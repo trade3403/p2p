@@ -1,57 +1,59 @@
-# P2P Remote V0.6 — H.264 Video Channel (Test Build)
+# P2P Remote V0.7 — LAN Direct First, VPS Relay Fallback
 
-Private Windows Rust + Iced remote host, Android Kotlin/Jetpack Compose viewer, and self-hosted Go WebSocket relay.
+Private Windows Rust/Iced host + Android Kotlin Compose viewer with AES-256-GCM end-to-end encrypted remote desktop. **Development test build, not a stable commercial release.**
 
-**V0.6 introduces a real, opt-in H.264 video data path. The Windows encoder is OpenH264 software encoding, not GPU hardware encoding.** Android decodes using the system MediaCodec API (hardware support depends on the phone). JPEG remains the default compatibility mode. Neither mode is a security-audited commercial product.
+## What's new
 
-## Changes from V0.5
+- **Real local-network P2P:** Windows can explicitly enable an inbound LAN WebSocket listener on TCP **43821**. It accepts only RFC1918/private IPv4 peers (and loopback for tests), and only while the owner has manually started the app and enabled the feature.
+- **Encrypted key proof before video:** Android's first WebSocket message is an AES-GCM authenticated type-6 `P2P-LAN-HELLO-v1`; Windows rejects it unless it was encrypted with the correct current session key. Only after verification does Windows reply with encrypted type-7 `P2P-LAN-READY-v1` and begin streaming. Neither the session key nor the VPS bearer token is placed in the LAN URL or headers.
+- **Automatic LAN-to-VPS fallback:** Android can optionally save the host's private IPv4 address (for example `192.168.1.100`). On an explicit Connect tap it tries `ws://HOST:43821/direct` first. After a failed socket/4-second handshake, or if an established LAN connection drops, the app falls back to the existing `wss://VPS/relay` link when a valid VPS token exists. The fallback is displayed in the UI.
+- **Direct-only mode** is possible with no VPS token, when a valid private IPv4 is entered and Windows LAN permission is enabled. It cannot work across independent mobile/cellular networks.
+- The full-screen JPEG/H.264, mouse/keyboard permissions, manually requested clipboard transfer, Windows DPAPI trust and Android Keystore trust remain intact.
+- Unit tests: RFC1918 IP policy, encrypted handshake validation and a real localhost WebSocket handshake on Windows; JVM tests for Android private IPv4 input.
 
-- Windows: new frame-producer thread with bounded two-frame queue. Capture/encoding no longer blocks the async socket loop responsible for mouse, clipboard and connection commands.
-- Windows: H.264 Annex-B access units via OpenH264 v0.9.9, limited to 1280×720; JPEG quality 58 remains available. Codec initializes on demand when the user toggles H.264 on. It is reset when switching displays or video formats, and every 30 frames for periodic SPS/PPS/IDR recovery.
-- Android: MediaCodec AVC decoder rendering directly to TextureView. JPEG decoding and interaction controls continue to work.
-- Protocol: AES-256-GCM encrypted type 5: `uint16BE width | uint16BE height | Annex-B H.264 access unit`; old JPEG type 1, control type 2, clipboard type 3, monitors type 4 remain intact.
-- FPS presets: 6 / 12 / 20 requested FPS in H.264 mode; JPEG stays at approximately 6 FPS. Actual throughput depends on CPU, encoder, relay bandwidth, Android decoder and network.
-- Sender queue drops stale/overflow frames instead of growing memory indefinitely; drop counter and sent packet counter shown in Windows UI.
-- V0.5 trusted pairing (Windows DPAPI, Android Keystore) and explicit host permission controls remain unchanged.
+## Important networking limitation
+
+**This release does NOT implement Internet NAT traversal/ICE/STUN/TURN or automatic cross-subnet P2P.** It provides actual **same-LAN direct** connection without VPS and automatically chooses VPS when the direct connection fails. For Android on 5G outside home, the VPS relay is still required. Many home APs enable client isolation, which can prevent even same-Wi-Fi direct connections.
+
+The Android app enables cleartext HTTP/WebSocket support **only to permit an explicitly configured RFC1918 LAN WebSocket**, and all LAN application messages use authenticated AES-256-GCM. The code rejects public IPs and DNS names as LAN-direct endpoints. Because `usesCleartextTraffic` is globally enabled at the OS policy level, this requires an independent security review before commercial release. Public relay connections are always `wss://`; the relay bearer token is never sent over `ws://`.
 
 ## Install
 
-From this private repository, open **Actions → V0.6 Windows Android Relay**, choose the same successful run and download its two Artifacts:
+From the private repo `chengzi1994999/p2p`, open GitHub **Actions → V0.7 Windows Android Relay → a successful run → Artifacts**:
 
-- `P2PRemote-Windows-v0.6.0-test` — ZIP containing portable `P2PRemote.exe` plus SHA256 hash.
-- `P2PRemote-Android-v0.6.0-debug` — debug-signed installable APK plus SHA256 hash.
+- `P2PRemote-Windows-v0.7.0-test`: ZIP including portable Windows Rust EXE and SHA-256 checksum.
+- `P2PRemote-Android-v0.7.0-debug`: debug-signed APK and checksum.
 
-Android and Windows should both be V0.6 to use the new video packet kind; v0.5 Android does not decode type 5. Start in JPEG mode, validate a working connection, then enable H.264 on Windows.
+Both must be V0.7. V0.6 clients can still use the original WSS relay transport, but do **not** understand the new LAN proof messages.
 
-## VPS setup is still required
+## Same-Wi-Fi direct test (no VPS required)
 
-A Linux VPS with DNS and Docker Compose is not automatically provisioned by GitHub Actions. In the checked-out repository:
+1. Both devices must be on the same private LAN. Open Windows `ipconfig` to see the host IPv4 address, e.g. `192.168.1.100`.
+2. Start Windows V0.7. Tick **允许局域网加密直连（TCP 43821）** and start remote service. Windows may prompt for a firewall rule; allow TCP 43821 **only on trusted Private networks** for this test, not on Public profiles. Never forward port 43821 on your router.
+3. Open Android V0.7, enter the Windows private IPv4 and the matching 64-character E2E session key. WSS server/token are optional in direct-only mode. Tap Connect.
+4. Android should show **局域网 P2P 直连** after encrypted proof, followed by JPEG/H.264 frame view. Remote input still requires explicit owner authorization in Windows.
+5. With an owned VPS configured, block port 43821 or leave the private network. Android should report switching to **VPS WSS 中转**. Relay must be deployed, reachable and configured before this will succeed.
+
+## VPS relay (fallback mode)
+
+Existing `deploy/compose.yml` + Caddy still apply; the server is **not automatically deployed by GitHub CI**. DNS, TLS certificate and a sufficiently long `RELAY_ACCESS_TOKEN` are required.
 
 ```bash
 cp deploy/.env.example deploy/.env
-# configure RELAY_DOMAIN and a fresh RELAY_ACCESS_TOKEN; keep .env out of Git!
+# Configure RELAY_DOMAIN and RELAY_ACCESS_TOKEN, e.g. openssl rand -hex 32
 docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build
-curl -fsS https://YOUR_DOMAIN/healthz
 ```
 
-The VPS must terminate TLS through Caddy and must **not** expose relay TCP 8080 publicly. Windows and Android both use `wss://YOUR_DOMAIN`, the same relay token, and the owner's session key. No static home IP or router port forwarding is needed.
+Both devices initiate outbound WSS to the VPS, so a home broadband static IP or port forwarding is unnecessary for the fallback path. Never expose Go relay port 8080 directly to the Internet.
 
-## H.264 test checklist
+## Safety and limitations
 
-1. Run Windows V0.6 and Android V0.6 on devices you own. Connect in JPEG mode and confirm the screen and explicit remote-input authorization work.
-2. Enable **H.264 软件编码** in Windows while the session is active.
-3. Android should display `H.264 · Android MediaCodec` and render the video in the same screen area. The first picture might need up to a few seconds until the next codec configuration/keyframe.
-4. Switch from H.264 back to JPEG, change monitor, disconnect/reconnect, and verify the view recovers.
-5. Change requested H.264 FPS among 6, 12 and 20; inspect sent/dropped counters. Numbers are *requests*, not measured FPS.
-6. To compare mobile vs LAN, log end-to-end latency, CPU, GPU utilization, frame loss, audio absence, bandwidth and 8-hour stability. These measurements have **not** been performed in CI.
+- LAN transport uses `ws://` at the network layer; confidentiality and authorization are provided by AES-256-GCM encrypted payloads and a mandatory key-proof handshake. Do not send credentials or personal information in plaintext outside the encrypted protocol.
+- The Windows listener accepts private IPv4 peers only, requires the owner to enable LAN for the current session, and accepts a single LAN viewer per listener at a time.
+- Do not interpret "LAN P2P" as NAT hole-punching: different routers or 5G require a VPS relay until ICE/STUN and compatible secure UDP transport are implemented.
+- Session-key sharing is still manual or via locally encrypted trusted profiles; there is no independent per-device identity at the relay.
+- Closing the visible Windows application or stopping the session ends streaming. Windows lock screen/UAC and pre-login services remain unsupported.
+- Windows H.264 uses OpenH264 software encoding, not GPU NVENC/QSV/AMF; video performance must be measured on real devices.
+- Real Windows firewall rules, multiple home routers, Android device compatibility, long-run stability and WAN fallback are **not** tested by GitHub Actions.
 
-## Security and compatibility
-
-- All video and input payloads use the existing authenticated AES-256-GCM layer. A public VPS only forwards encrypted packets; the session key must be shared privately.
-- Remote input requires Windows owner's explicit permission. Windows login pre-desktop, UAC secure desktop and unattended service operation are **not** supported.
-- OpenH264 source is permissively licensed (BSD-2-Clause). H.264 patent and distribution obligations may need separate review before commercial distribution.
-- V0.6 does **not** implement Windows GPU/NVENC/AMF/QSV or Media Foundation hardware *encoding*. Android's system MediaCodec may select hardware or software based on device capabilities.
-- JPEG and H.264 paths are both best-effort prototype implementations; remote function, animation smoothness and codec compatibility must be verified on the actual devices.
-- V0.1–V0.5 history remains in Git; development branch `feature/v0.6-h264-video`. No stable release tag until on-device verification.
-
-See [docs/V0.6-ACCEPTANCE.md](docs/V0.6-ACCEPTANCE.md).
+See [docs/V0.7-ACCEPTANCE.md](docs/V0.7-ACCEPTANCE.md). V0.1–V0.6 are retained in Git history.
