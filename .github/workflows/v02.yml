@@ -28,9 +28,9 @@ jobs:
         with:
           workspaces: desktop
       - name: Rust tests
-        run: cargo test --manifest-path desktop/Cargo.toml --locked
+        run: cargo test --manifest-path desktop/Cargo.toml
       - name: Build Windows EXE
-        run: cargo build --manifest-path desktop/Cargo.toml --release --locked
+        run: cargo build --manifest-path desktop/Cargo.toml --release
       - name: Package EXE
         shell: pwsh
         run: |
