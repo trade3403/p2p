@@ -1,59 +1,68 @@
-# P2P Remote V0.7 — LAN Direct First, VPS Relay Fallback
+# P2P Remote V0.8 — STUN Network Diagnostics + Encrypted RTT
 
-Private Windows Rust/Iced host + Android Kotlin Compose viewer with AES-256-GCM end-to-end encrypted remote desktop. **Development test build, not a stable commercial release.**
+Private, personal-use Windows Rust/Iced host + Android Kotlin Compose controller + Go WebSocket relay. **This is an unsigned test build.** The implementation has not been tested against a real VPS or Windows/Android devices.
 
-## What's new
+## V0.8 delivers
 
-- **Real local-network P2P:** Windows can explicitly enable an inbound LAN WebSocket listener on TCP **43821**. It accepts only RFC1918/private IPv4 peers (and loopback for tests), and only while the owner has manually started the app and enabled the feature.
-- **Encrypted key proof before video:** Android's first WebSocket message is an AES-GCM authenticated type-6 `P2P-LAN-HELLO-v1`; Windows rejects it unless it was encrypted with the correct current session key. Only after verification does Windows reply with encrypted type-7 `P2P-LAN-READY-v1` and begin streaming. Neither the session key nor the VPS bearer token is placed in the LAN URL or headers.
-- **Automatic LAN-to-VPS fallback:** Android can optionally save the host's private IPv4 address (for example `192.168.1.100`). On an explicit Connect tap it tries `ws://HOST:43821/direct` first. After a failed socket/4-second handshake, or if an established LAN connection drops, the app falls back to the existing `wss://VPS/relay` link when a valid VPS token exists. The fallback is displayed in the UI.
-- **Direct-only mode** is possible with no VPS token, when a valid private IPv4 is entered and Windows LAN permission is enabled. It cannot work across independent mobile/cellular networks.
-- The full-screen JPEG/H.264, mouse/keyboard permissions, manually requested clipboard transfer, Windows DPAPI trust and Android Keystore trust remain intact.
-- Unit tests: RFC1918 IP policy, encrypted handshake validation and a real localhost WebSocket handshake on Windows; JVM tests for Android private IPv4 input.
+1. **Optional self-hosted STUN Binding server (UDP 3478).** The Go relay supports RFC 8489-style IPv4 Binding requests/responses with XOR-MAPPED-ADDRESS, exact transaction-ID echo, input validation, and bounded reply size. It is **disabled by default** and must be enabled using the additional Compose file `deploy/compose.stun.yml`.
+2. **Windows public UDP mapping probe.** A visible "探测公网 UDP 映射" button sends a single STUN Binding request to the same host as your WSS relay, over UDP 3478. It reports observed public IPv4:port and RTT (or a clear failure); no secret, bearer token, desktop video or clipboard data are sent.
+3. **Android public UDP mapping probe.** A "检测公网 UDP" button performs the equivalent test off the UI thread, rejects malformed responses and matches the 96-bit random transaction ID.
+4. **Actual encrypted remote-session signaling RTT.** Every ~5 seconds while connected, Android sends an AES-256-GCM authenticated 8-byte nonce, packet kind 8 (PING). The Windows host echoes it as kind 9 (PONG) through the active LAN-direct or VPS relay transport. Android shows the resulting application-level RTT in milliseconds.
+5. **V0.7 transport remains.** On trusted LAN, Android can directly connect to Windows TCP 43821 after encrypted proof; when unavailable it falls back to the existing WSS VPS relay. Windows OpenH264 software video, Android MediaCodec, clipboard permission and trusted pairing remain intact.
+6. **Automated tests** for Go STUN protocol parsing and actual localhost UDP roundtrip, Rust STUN parsing and UDP test, Android JVM STUN parsing, plus existing end-to-end encrypted protocol and app builds.
 
-## Important networking limitation
+## Critical limitation: this is NOT public NAT traversal
 
-**This release does NOT implement Internet NAT traversal/ICE/STUN/TURN or automatic cross-subnet P2P.** It provides actual **same-LAN direct** connection without VPS and automatically chooses VPS when the direct connection fails. For Android on 5G outside home, the VPS relay is still required. Many home APs enable client isolation, which can prevent even same-Wi-Fi direct connections.
+**A STUN Binding response describes an observed UDP address/port for one temporary socket; it does not prove that a second device can connect to it.** V0.8 closes the diagnostic UDP socket after receiving a response. It does **not** implement ICE candidate exchange, persistent UDP sockets, simultaneous hole punching, secure UDP/QUIC media transport, or TURN. Public P2P success cannot be claimed until those components and tests exist.
 
-The Android app enables cleartext HTTP/WebSocket support **only to permit an explicitly configured RFC1918 LAN WebSocket**, and all LAN application messages use authenticated AES-256-GCM. The code rejects public IPs and DNS names as LAN-direct endpoints. Because `usesCleartextTraffic` is globally enabled at the OS policy level, this requires an independent security review before commercial release. Public relay connections are always `wss://`; the relay bearer token is never sent over `ws://`.
+For Android on 5G when away from home, use your private VPS WSS relay. Home broadband still does not need a fixed public IP for the VPS transport.
 
-## Install
+## Download test builds
 
-From the private repo `chengzi1994999/p2p`, open GitHub **Actions → V0.7 Windows Android Relay → a successful run → Artifacts**:
+Open the private GitHub repository `chengzi1994999/p2p` → **Actions** → **V0.8 Windows Android Relay** → a successful run → **Artifacts**.
 
-- `P2PRemote-Windows-v0.7.0-test`: ZIP including portable Windows Rust EXE and SHA-256 checksum.
-- `P2PRemote-Android-v0.7.0-debug`: debug-signed APK and checksum.
+- `P2PRemote-Windows-v0.8.0-test`: ZIP containing portable `P2PRemote.exe`, and SHA-256 checksum.
+- `P2PRemote-Android-v0.8.0-debug`: Android debug APK and SHA-256 checksum.
 
-Both must be V0.7. V0.6 clients can still use the original WSS relay transport, but do **not** understand the new LAN proof messages.
+Both are test artifacts, not signed production installers. For RTT measurement the host must be updated to V0.8 because earlier versions do not reply to the new PING message type.
 
-## Same-Wi-Fi direct test (no VPS required)
+## VPS setup — optional STUN diagnostics
 
-1. Both devices must be on the same private LAN. Open Windows `ipconfig` to see the host IPv4 address, e.g. `192.168.1.100`.
-2. Start Windows V0.7. Tick **允许局域网加密直连（TCP 43821）** and start remote service. Windows may prompt for a firewall rule; allow TCP 43821 **only on trusted Private networks** for this test, not on Public profiles. Never forward port 43821 on your router.
-3. Open Android V0.7, enter the Windows private IPv4 and the matching 64-character E2E session key. WSS server/token are optional in direct-only mode. Tap Connect.
-4. Android should show **局域网 P2P 直连** after encrypted proof, followed by JPEG/H.264 frame view. Remote input still requires explicit owner authorization in Windows.
-5. With an owned VPS configured, block port 43821 or leave the private network. Android should report switching to **VPS WSS 中转**. Relay must be deployed, reachable and configured before this will succeed.
-
-## VPS relay (fallback mode)
-
-Existing `deploy/compose.yml` + Caddy still apply; the server is **not automatically deployed by GitHub CI**. DNS, TLS certificate and a sufficiently long `RELAY_ACCESS_TOKEN` are required.
+Normal HTTPS/WSS relay remains configured using `deploy/compose.yml`:
 
 ```bash
 cp deploy/.env.example deploy/.env
-# Configure RELAY_DOMAIN and RELAY_ACCESS_TOKEN, e.g. openssl rand -hex 32
+# Edit deploy/.env: RELAY_DOMAIN and RELAY_ACCESS_TOKEN.
+# Generate a new access token: openssl rand -hex 32
 docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build
 ```
 
-Both devices initiate outbound WSS to the VPS, so a home broadband static IP or port forwarding is unnecessary for the fallback path. Never expose Go relay port 8080 directly to the Internet.
+STUN is **not** enabled by that command. If you choose to expose UDP STUN on an authorized VPS, add the override:
 
-## Safety and limitations
+```bash
+docker compose --env-file deploy/.env \
+  -f deploy/compose.yml -f deploy/compose.stun.yml \
+  up -d --build
+```
 
-- LAN transport uses `ws://` at the network layer; confidentiality and authorization are provided by AES-256-GCM encrypted payloads and a mandatory key-proof handshake. Do not send credentials or personal information in plaintext outside the encrypted protocol.
-- The Windows listener accepts private IPv4 peers only, requires the owner to enable LAN for the current session, and accepts a single LAN viewer per listener at a time.
-- Do not interpret "LAN P2P" as NAT hole-punching: different routers or 5G require a VPS relay until ICE/STUN and compatible secure UDP transport are implemented.
-- Session-key sharing is still manual or via locally encrypted trusted profiles; there is no independent per-device identity at the relay.
-- Closing the visible Windows application or stopping the session ends streaming. Windows lock screen/UAC and pre-login services remain unsupported.
-- Windows H.264 uses OpenH264 software encoding, not GPU NVENC/QSV/AMF; video performance must be measured on real devices.
-- Real Windows firewall rules, multiple home routers, Android device compatibility, long-run stability and WAN fallback are **not** tested by GitHub Actions.
+This starts Go's optional IPv4 STUN listener on UDP 3478, published by Docker as `3478:3478/udp`. Permit UDP 3478 through your VPS provider firewall **only if needed**, and apply an external rate limit to reduce abuse. This server is a basic Binding diagnostic, **not a fully RFC-8489-compliant internet STUN service** or TURN relay. The result reveals public IP/port to the requesting client only; the server does not log client addresses or traffic contents.
 
-See [docs/V0.7-ACCEPTANCE.md](docs/V0.7-ACCEPTANCE.md). V0.1–V0.6 are retained in Git history.
+For an external network: `curl -fsS https://YOUR_DOMAIN/healthz` verifies the HTTPS relay only; **it does not test UDP STUN**. Use the new client diagnostic buttons to verify actual UDP response.
+
+## Use V0.8
+
+1. Start the Windows application on your own PC, configure your WSS server and bearer token if using a VPS. Consent is required before remote mouse and keyboard operations.
+2. Open the Android V0.8 app; enter WSS, bearer token and session key, or use an already saved trusted profile. Android may try LAN direct before the VPS.
+3. When connected, Android displays the current transport and its encrypted **signaling RTT**; this is not video decode/render latency.
+4. On each platform, tap the STUN diagnostic button. A successful result shows only a **temporary observed address/port**. Failures generally indicate missing UDP 3478 service, DNS/UDP firewall restrictions, NAT/proxy changes or an invalid response.
+5. Compare LAN-direct versus WSS relay RTT on owned devices and run repeated 5G/Wi-Fi tests. No guarantees are made about real-world latency from GitHub Actions.
+
+## Security
+
+- STUN tests are user-triggered only. No private session key, VPS token or desktop content is included in packets.
+- STUN uses unauthenticated UDP as designed for discovery; keep server exposure optional and firewall rate-limited. The STUN result must never be treated as proof of a remote device's identity.
+- Actual remote commands/video remain encrypted with existing AES-256-GCM session key. Input and clipboard require explicit owner permission.
+- Android's V0.7 private-LAN WebSocket uses cleartext at the transport layer only for private IPv4, with mandatory AES-GCM application authentication. Android manifest currently enables cleartext globally for this test feature; a scoped policy or TLS/QUIC design is needed before commercial release.
+- No Windows lock-screen or UAC secure desktop bypass, stealth background control, P2P Internet transport, audio, full file transfer, paid SDK or commercial signed release.
+
+See [docs/V0.8-ACCEPTANCE.md](docs/V0.8-ACCEPTANCE.md).

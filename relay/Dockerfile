@@ -9,4 +9,5 @@ RUN adduser -D -u 10001 app
 USER app
 COPY --from=builder /relay /relay
 EXPOSE 8080
+EXPOSE 3478/udp
 ENTRYPOINT ["/relay"]

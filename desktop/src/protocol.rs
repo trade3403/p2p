@@ -8,6 +8,9 @@ pub const CONTROL: u8 = 2;
 pub const CLIPBOARD: u8 = 3;
 pub const MONITORS: u8 = 4;
 pub const AVC: u8 = 5;
+// PING/PONG each carry only an opaque 8-byte nonce; GCM authenticates both.
+pub const PING: u8 = 8;
+pub const PONG: u8 = 9;
 
 pub fn new_secret() -> [u8; 32] {
     let mut secret = [0u8; 32];

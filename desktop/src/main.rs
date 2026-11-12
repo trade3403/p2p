@@ -6,6 +6,7 @@ mod remote_ops;
 mod trusted_profile;
 mod video;
 mod lan;
+mod stun;
 
 use iced::{widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
@@ -36,6 +37,7 @@ struct App {
     sent_frames: Arc<AtomicU64>,
     dropped_frames: Arc<AtomicU64>,
     status: String,
+    diagnostics: String,
     tx: Sender<String>,
     rx: Receiver<String>,
 }
@@ -67,6 +69,7 @@ impl Default for App {
             unattended_input: trusted.as_ref().map(|p| p.unattended_input).unwrap_or(false),
             trust_saved: trusted.is_some(),
             status: "未连接 · 手动启动或启用登录后自动连接".into(),
+            diagnostics: "尚未探测 STUN 公网 UDP 地址".into(),
             tx,
             rx,
         };
@@ -111,7 +114,7 @@ impl Drop for App {
 #[derive(Debug, Clone)]
 enum Msg { Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
-    H264(bool), Fps(u32), Lan(bool), Start, Stop, NewKey, Tick }
+    H264(bool), Fps(u32), Lan(bool), ProbeNetwork, Start, Stop, NewKey, Tick }
 
 fn update(state: &mut App, msg: Msg) {
     match msg {
@@ -119,6 +122,24 @@ fn update(state: &mut App, msg: Msg) {
         Msg::Token(s) if !state.running.load(Ordering::SeqCst) => state.relay_token = s,
         Msg::Allow(value) => state.allow_input.store(value, Ordering::SeqCst),
         Msg::Clipboard(value) => state.allow_clipboard.store(value, Ordering::SeqCst),
+        Msg::ProbeNetwork => {
+            state.diagnostics = "正在发送 STUN UDP 探测（最多约 2 秒）".into();
+            let relay = state.server.clone();
+            let tx = state.tx.clone();
+            std::thread::spawn(move || {
+                let result = match stun::probe_from_relay(&relay) {
+                    Ok((mapped, rtt)) => format!(
+                        "[STUN] 探测成功：出口 {} · UDP 往返 {} ms。只是一次性 NAT 映射，不代表可直接穿透。",
+                        mapped, rtt.as_millis()
+                    ),
+                    Err(error) => format!(
+                        "[STUN] 探测失败：{}。请确认 VPS 已启用 UDP 3478 并检查防火墙。",
+                        error
+                    ),
+                };
+                let _ = tx.send(result);
+            });
+        }
         Msg::Lan(value) if !state.running.load(Ordering::SeqCst) => {
             state.lan_direct.store(value, Ordering::SeqCst);
         },
@@ -223,7 +244,13 @@ fn update(state: &mut App, msg: Msg) {
             };
         },
         Msg::Tick => {
-            while let Ok(message) = state.rx.try_recv() { state.status = message; }
+            while let Ok(message) = state.rx.try_recv() {
+                if message.starts_with("[STUN]") {
+                    state.diagnostics = message.trim_start_matches("[STUN] ").to_string();
+                } else {
+                    state.status = message;
+                }
+            }
         }
         _ => {}
     }
@@ -244,7 +271,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let top = row![
         column![text("P2P  /  REMOTE").size(14).color(Color::from_rgb8(127,171,255)),
                 text("个人远程桌面").size(33),
-                text("Rust 原生客户端  ·  Windows Host  ·  V0.7 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
+                text("Rust 原生客户端  ·  Windows Host  ·  V0.8 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
         container(text(if active {"●  服务已启动"} else {"○  尚未连接"}).size(14))
             .padding([12,20])
@@ -278,7 +305,7 @@ fn view(state: &App) -> Element<'_, Msg> {
             .color(Color::from_rgb8(158,172,199)),
         text("局域网直连采用加密握手认证，访问口令不会通过 ws:// 私网链接发送。").size(13)
             .color(Color::from_rgb8(158,172,199)),
-        text("本版未实现 STUN/ICE 打洞；不同 Wi-Fi/5G 不一定能直连，仍需 VPS。").size(13)
+        text("本版可探测 STUN 出口地址，但未实现 ICE/UDP 打洞；5G 跨网仍优先 VPS。").size(13)
             .color(Color::from_rgb8(204,178,130)),
     ].spacing(13));
     let safety = card(column![
@@ -348,7 +375,17 @@ fn view(state: &App) -> Element<'_, Msg> {
             .color(Color::from_rgb8(158,172,199)),
     ].spacing(14));
 
-    container(scrollable(container(column![top, connection, direct, safety, trust, video, status].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
+    let diagnostics = card(column![
+        heading("07 / 公网 UDP/STUN 诊断", "通过你自己的 VPS UDP 3478 查看 NAT 出口地址"),
+        button("探测公网 UDP 映射").on_press(Msg::ProbeNetwork).padding(12),
+        text(&state.diagnostics).size(14),
+        text("STUN 探测使用独立短期 UDP Socket：不交换真实候选地址，也不传输密钥。").size(13)
+            .color(Color::from_rgb8(204,178,130)),
+        text("公网 NAT 穿透/ICE 将在后续阶段实施；本版仅验证探测和中转往返时间。").size(13)
+            .color(Color::from_rgb8(158,172,199)),
+    ].spacing(14));
+
+    container(scrollable(container(column![top, connection, direct, safety, trust, video, status, diagnostics].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
         .width(Length::Fill).height(Length::Fill)
         .center_x(Length::Fill).into()
 }

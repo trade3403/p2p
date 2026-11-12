@@ -6,6 +6,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -166,6 +167,20 @@ func main() {
 	if len(token) < 32 {
 		log.Fatal("RELAY_ACCESS_TOKEN must be at least 32 characters")
 	}
+    if os.Getenv("STUN_ENABLED") == "true" {
+        address := os.Getenv("STUN_LISTEN_ADDR")
+        if address == "" { address = ":3478" }
+        endpoint, err := net.ResolveUDPAddr("udp4", address)
+        if err != nil { log.Fatalf("invalid STUN bind address: %v", err) }
+        server, err := net.ListenUDP("udp4", endpoint)
+        if err != nil { log.Fatalf("STUN UDP bind failed: %v", err) }
+        log.Printf("optional STUN Binding listener enabled on %s (UDP)", address)
+        go func() {
+            if err := serveSTUN(server, make(chan struct{})); err != nil {
+                log.Printf("STUN service stopped: %v", err)
+            }
+        }()
+    }
 	h := newHub(token)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200); w.Write([]byte("ok\n")) })

@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import java.nio.ByteBuffer
 import android.view.Surface
 import android.view.TextureView
 import androidx.activity.ComponentActivity
@@ -80,6 +81,10 @@ class MainActivity : ComponentActivity() {
     private var watchdogTask: Runnable? = null
     private var lastFrameAtMs = 0L
     private var status by mutableStateOf("等待配置服务器")
+    private var stunReport by mutableStateOf("STUN UDP 尚未探测")
+    private var rttMs by mutableStateOf<Long?>(null)
+    private var lastPingNonce = 0L
+    private var lastPingTimeMs = 0L
     private var frame by mutableStateOf<Bitmap?>(null)
     private var h264Active by mutableStateOf(false)
     private var h264Width by mutableIntStateOf(1280)
@@ -124,7 +129,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(8.dp))
                     Text("P2P  /  REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("我的远程桌面",fontSize=29.sp,fontWeight=FontWeight.Bold)
-                    Text("Android 控制端  ·  V0.7 测试版",fontSize=13.sp,color=Muted)
+                    Text("Android 控制端  ·  V0.8 测试版",fontSize=13.sp,color=Muted)
                     PanelCard {
                         Text("01   已授权的家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text(if(savedPairAvailable)"已在 Android Keystore 加密保存一台电脑"
@@ -187,8 +192,13 @@ class MainActivity : ComponentActivity() {
                             label={Text("可选：家中电脑的局域网 IPv4")},
                             placeholder={Text("例如 192.168.1.100")}
                         )
-                        Text("同一 Wi-Fi 优先直连，失败自动回退 VPS；不支持公网 IP 或 NAT 自动打洞。",
+                        Text("局域网直连优先，跨公网使用 VPS；STUN 仅探测 NAT 映射，尚未实现 ICE/UDP 穿透。",
                             color=Muted,fontSize=12.sp)
+                        Row(verticalAlignment=Alignment.CenterVertically,
+                            horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                            Button(onClick={probeSTUN(server)}) { Text("检测公网 UDP") }
+                            Text(stunReport,color=Muted,fontSize=12.sp,modifier=Modifier.weight(1f))
+                        }
                         OutlinedTextField(value=relayToken,onValueChange={relayToken=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("中转服务器访问口令")})
                         OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("Windows 显示的 64 位会话密钥")})
                         Button(onClick={ if (requested) disconnect() else connect(server, relayToken, sessionKey, lanIp) },modifier=Modifier.fillMaxWidth()) {
@@ -196,6 +206,8 @@ class MainActivity : ComponentActivity() {
                         }
                         Text(status,color=if(receivingFrames)Color(0xFF72D9AB) else Muted,fontSize=13.sp)
                         Text("当前链路：$transport",color=Accent,fontSize=13.sp)
+                        Text("端到端信令 RTT：${rttMs?.let{"$it ms"} ?: "等待响应"}",
+                            color=Muted,fontSize=12.sp)
                         Text("只有主动点击加密保存才会存储可信配对；网络中断期间允许当前会话自动重连",color=Muted,fontSize=12.sp)
                     }
                     PanelCard {
@@ -432,6 +444,20 @@ class MainActivity : ComponentActivity() {
                     val original = decryptPacket(key, bytes.toByteArray())
                     if (tryLan && !lanVerified && original.first != 7) return
                     when (original.first) {
+                        9 -> {
+                            if(original.second.size == 8) {
+                                val nonce = ByteBuffer.wrap(original.second).long
+                                main.post {
+                                    if(socket === webSocket && requested &&
+                                        lastPingTimeMs > 0L && nonce == lastPingNonce
+                                    ) {
+                                        rttMs = (SystemClock.elapsedRealtime() - lastPingTimeMs)
+                                            .coerceAtLeast(0)
+                                        lastPingTimeMs = 0
+                                    }
+                                }
+                            }
+                        }
                         7 -> {
                             if(tryLan &&
                                 original.second.contentEquals(
@@ -589,9 +615,36 @@ class MainActivity : ComponentActivity() {
                     socket?.cancel()
                     return
                 }
+                sendPing()
                 main.postDelayed(this, 5_000L)
             }
         }.also { main.postDelayed(it, 5_000L) }
+    }
+
+    private fun sendPing() {
+        val currentKey = secret ?: return
+        val ws = socket ?: return
+        if(!requested || !online) return
+        val nonce = SecureRandom().nextLong()
+        lastPingNonce = nonce
+        lastPingTimeMs = SystemClock.elapsedRealtime()
+        try {
+            ws.send(encryptPacket(currentKey, 8,
+                ByteBuffer.allocate(8).putLong(nonce).array()).toByteString())
+        } catch (_: Exception) {}
+    }
+
+    private fun probeSTUN(relay: String) {
+        stunReport = "探测 UDP 3478 中..."
+        Thread {
+            val result = try {
+                val outcome = StunProbe.probe(relay)
+                "映射 ${outcome.address.address.hostAddress}:${outcome.address.port} · ${outcome.millis}ms（仅诊断）"
+            } catch (_: Exception) {
+                "探测失败：请检查 VPS 是否开放 UDP 3478"
+            }
+            main.post { stunReport = result }
+        }.start()
     }
 
     private fun stopWatchdog() {
@@ -624,6 +677,8 @@ class MainActivity : ComponentActivity() {
         usingLan = false
         lanVerified = false
         transport = "未连接"
+        rttMs = null
+        lastPingTimeMs = 0L
         status = "已断开，不会后台自动连接"
     }
 

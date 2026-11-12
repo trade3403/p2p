@@ -1,0 +1,10 @@
+# Optional V0.8 network diagnostics: expose UDP 3478 explicitly.
+# Use only with a trusted VPS and firewall rate limits. This is STUN,
+# not TURN, and enabling it alone does NOT create public P2P sessions.
+services:
+  relay:
+    environment:
+      STUN_ENABLED: "true"
+      STUN_LISTEN_ADDR: ":3478"
+    ports:
+      - "3478:3478/udp"

@@ -162,7 +162,13 @@ where
                 }
                 match next {
                     Some(Ok(Message::Binary(packet))) => {
-                        if let Ok((protocol::CONTROL, bytes)) = protocol::decrypt(&config.secret, &packet) {
+                        if let Ok((kind, bytes)) = protocol::decrypt(&config.secret, &packet) {
+                            if kind == protocol::PING && bytes.len() == 8 {
+                                // Authenticated application-level ping works on both
+                                // LAN direct and WSS relay; no user data is exposed.
+                                let pong = protocol::encrypt(&config.secret, protocol::PONG, &bytes)?;
+                                outgoing.send(Message::Binary(pong)).await?;
+                            } else if kind == protocol::CONTROL {
                             #[cfg(windows)]
                             {
                                 if let Ok(command) = serde_json::from_slice::<Control>(&bytes) {
@@ -204,6 +210,7 @@ where
                                         _ => {}
                                     }
                                 }
+                            }
                             }
                         }
                     }
