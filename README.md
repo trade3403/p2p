@@ -1,68 +1,79 @@
-# P2P Remote v0.2 — Native Windows + Android + Self-hosted Relay
+# P2P Remote V0.3 · Windows Rust + Android Compose
 
-Private personal-use remote desktop project. **This is a test build, not an audited release.**
+**Development test build, not a security-audited commercial release.**
 
-## What changed in V0.2
+P2P Remote lets you remotely view and (after explicit host authorization) control your own Windows PC from an Android device through a self-hosted HTTPS/WSS relay. Both devices initiate outbound connections, so a home broadband connection does **not** require a static IP or router port-forwarding.
 
-- Windows: native **Rust + Iced** application with modern dark UI, screenshot capture, mouse/text input, explicit control toggle.
-- Android: native **Kotlin + Jetpack Compose** interface, picture viewer with pointer mapping, text input.
-- VPS: lightweight **Go WebSocket relay** running behind Caddy TLS. No fixed home IP and no router port forwarding.
-- Screen frames and commands are encrypted **end-to-end AES-256-GCM** before the relay; the relay only transports opaque bytes.
-- GitHub Actions builds Windows portable EXE, Android debug APK, and tests the Go relay.
-- V0.1 C# code stays in `windows/` for history and fallback; V0.2 source is in `desktop/`.
+## V0.3 changes
 
-## Important: no VPS has been provisioned for you
+- Windows: Rust + Iced native desktop, automatic reconnection with bounded backoff (1–30 seconds), a visible stop control, and status messages.
+- Android: Kotlin + Jetpack Compose, network-failure reconnection, 20-second stalled-frame detection, a stop/cancel button, and clearer status indicators.
+- Both apps remember **only the non-sensitive relay address**. The relay bearer token and 64-character session key are held only in memory during an active session; enter them again after restarting.
+- End-to-end AES-256-GCM now authenticates **both packet contents and packet kind** (type is bound using AEAD AAD). V0.3 and V0.2 clients are **not protocol-compatible**. Upgrade both together.
+- Go relay includes additional unit tests for unauthorized and malformed join requests. Docker Compose/Caddy deployment is retained.
+- GitHub Actions now runs Windows Rust tests/build, Android unit tests/APK build, and Go race/security tests + Docker image build.
 
-You must have your own VPS, a domain name pointing to its public IP, and Docker Engine + Docker Compose. **CI building a relay container is not deploying it to a server**. Do not share VPS root passwords or API tokens in issues, commits, or chat.
+## Test-build downloads
 
-### 1. VPS setup
+Private GitHub repository → **Actions → V0.3 Windows Android Relay → successful run → Artifacts**.
+
+Artifacts:
+- `P2PRemote-Windows-v0.3.0-test`: ZIP containing portable `P2PRemote.exe`.
+- `P2PRemote-Android-v0.3.0-debug`: debug installable APK.
+- Both packages include SHA-256 checksums. These builds are **unsigned test packages**.
+
+## VPS deployment (manual, server not provisioned)
+
+A publicly reachable Linux VPS, a domain you control, DNS pointing to its public IP, Docker Engine, and Docker Compose are needed. Never paste or commit root passwords, signing keys, or relay access tokens.
 
 ```bash
-# clone your private GitHub repo after authenticating to GitHub
+git clone git@github.com:chengzi1994999/p2p.git
 cd p2p
 cp deploy/.env.example deploy/.env
-# edit .env: RELAY_DOMAIN points to this VPS; RELAY_ACCESS_TOKEN is a new random 64-character hex string
-# generate token via: openssl rand -hex 32
+# Edit deploy/.env with RELAY_DOMAIN and a newly generated RELAY_ACCESS_TOKEN
+# Generate a token on the VPS: openssl rand -hex 32
 docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build
-# Caddy requests a TLS certificate for your domain; DNS and TCP 80/443 must be reachable.
+curl -fsS https://YOUR_DOMAIN/healthz
 ```
 
-Open `https://YOUR_DOMAIN/healthz` and verify response `ok`.
+Caddy terminates HTTPS/WSS; the Go relay's internal port **8080 must not be exposed publicly**.
 
-### 2. Windows
+## Connect Windows to Android
 
-Download **P2PRemote-Windows-v0.2.0-test** from the latest successful **V0.2 Rust / Compose / Relay** workflow run under Actions. Unzip and run `P2PRemote.exe` **only on a Windows machine you own or are authorized to access**.
+1. Start `P2PRemote.exe` on your own Windows PC. Enter `wss://YOUR_DOMAIN` and `RELAY_ACCESS_TOKEN`; click **启动远程服务**.
+2. Keep the **64-character session secret** visible only to yourself. The relay cannot decrypt the screen.
+3. Install Android debug APK. Enter the same WSS address, relay token, and session secret. Tap **连接电脑**.
+4. When the Android app displays the Windows screen, enable **允许 Android 端操作** in the Windows app if input control is needed; it is disabled by default.
+5. Disconnect from either side to end the session. Android and Windows reconnect **only while you have explicitly requested an active session**.
 
-Enter `wss://YOUR_DOMAIN` and the same `RELAY_ACCESS_TOKEN`, click **启动远程服务**, and copy the 64-character session secret displayed by the app.
+### What a green CI result proves
 
-### 3. Android
+A green workflow confirms **code compilation and automated tests**. It does not prove that a real VPS is deployed, an APK launches on every Android phone, input works across UAC/lock screens, the program is free of bugs, or that latency meets product targets. You must complete the manual acceptance checklist at [docs/V0.3-ACCEPTANCE.md](docs/V0.3-ACCEPTANCE.md).
 
-Download **P2PRemote-Android-v0.2.0-debug** from that same run, install on your own Android phone, and enter the WSS address, relay token, and Windows session secret. Tap **连接电脑**. To allow mouse/text input you must toggle authorization on the Windows app. Closing the Windows app stops the service.
+### Current limitations
 
-### Key notes
-
-- The relay token protects your VPS against unauthenticated relay usage; the separate session key encrypts video and commands end-to-end. Never put either token in a URL, screenshot, source control or CI logs.
-- Both clients connect *outbound* to the VPS. The desktop uses WSS; the Android application rejects cleartext endpoints.
-- Only a **single host and single viewer** per room. No remote login screen, UAC, Windows service, wake-on-LAN, unattended startup, H.264, audio or file transfer.
-- V0.2 video is **JPEG ~6 FPS** to validate the networking and UI rewrite. Target H.264/WebRTC is later. Performance has not been bench-tested.
-- This is test software: possible disconnects, data loss, errors. Test on non-sensitive data.
-- No commercial branding, payment system, telemetry or external servers other than your configured VPS.
+- Video still uses JPEG at ~6 FPS, not H.264 hardware encode; no audio, file transfer or multi-monitor switching.
+- Android currently supports only a **single active session**; closing the app ends it. No stealth/background remote access.
+- Relay credentials and session secret intentionally **are not stored**; copying them requires a trusted method.
+- Automatic retry handles transient network errors, not incorrect credentials (401/403 stops retry).
+- No unattended Windows service, secure-desktop access, P2P bypass or wake-on-LAN.
+- Commercial distribution requires independent dependency-license and security audits, code-signing, and real device tests.
 
 ## Repository structure
 
-| Folder | Purpose |
+| Path | Purpose |
 |---|---|
-| `desktop/` | Windows Rust + Iced host |
-| `android/` | Android Kotlin + Compose controller |
-| `relay/` | Go relay (WebSocket transport only) |
-| `deploy/` | Caddy + Compose TLS deployment |
-| `.github/workflows/v02.yml` | CI for three modules |
-| `windows/` | V0.1 legacy WinForms implementation (preserved) |
+| `desktop/` | Rust/Iced Windows host, encryption, reconnect state |
+| `android/` | Kotlin Compose viewer, retry policy, Android tests |
+| `relay/` | Go WebSocket relay; opaque encrypted data only |
+| `deploy/` | Docker Compose + Caddy HTTPS deployment |
+| `.github/workflows/v03.yml` | Current CI test-build workflow |
+| `windows/` | V0.1 legacy C# host preserved for Git history |
 
-## Git workflow
+## Git versions
 
-- `main` protected as stable; develop on `feature/v0.2-rust-native`, open PR, merge after CI.
-- CI artifacts are **test builds**, not signed production releases.
-- Create `v0.2.0-rc1` only after both builds pass and manual test is performed. Formal `v0.2.0` after validation.
+- `main`: last merged build-verified version
+- `feature/v0.3-stable-remote`: V0.3 development and testing
+- `v0.3.0-rc1`: create only after actual two-client testing; a green CI alone does not warrant a stable release tag.
 
-See `docs/V0.2-ACCEPTANCE.md` for criteria and outstanding work.
+Private, personal-use source. No license granting others permission to redistribute is included.

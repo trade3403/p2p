@@ -1,0 +1,108 @@
+name: V0.3 Windows Android Relay
+
+on:
+  push:
+    branches: [main, 'feature/**']
+    paths:
+      - 'desktop/**'
+      - 'android/**'
+      - 'relay/**'
+      - 'deploy/**'
+      - '.github/workflows/v03.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v03-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Rust Windows V0.3 EXE
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - name: Run Rust tests (reconnect and encryption)
+        run: cargo test --manifest-path desktop/Cargo.toml
+      - name: Build Windows Release EXE
+        run: cargo build --manifest-path desktop/Cargo.toml --release
+      - name: Package and hash portable EXE
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/windows | Out-Null
+          Copy-Item desktop/target/release/p2p-remote.exe dist/windows/P2PRemote.exe
+          Copy-Item README.md dist/windows/README.md
+          Compress-Archive -Path dist/windows/* -DestinationPath P2PRemote-Windows-v0.3.0-test.zip
+          (Get-FileHash P2PRemote-Windows-v0.3.0-test.zip -Algorithm SHA256).Hash | Out-File P2PRemote-Windows-v0.3.0-test.sha256 -Encoding ASCII
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Windows-v0.3.0-test
+          path: |
+            P2PRemote-Windows-v0.3.0-test.zip
+            P2PRemote-Windows-v0.3.0-test.sha256
+          retention-days: 14
+
+  android:
+    name: Android Compose V0.3 APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Install Android SDK platform
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then SDKMANAGER="$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"; fi
+          "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Run reconnection policy unit tests
+        run: gradle --no-daemon :app:testDebugUnitTest
+      - name: Build debug APK
+        run: gradle --no-daemon :app:assembleDebug
+      - name: Package and hash APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk ../P2PRemote-Android-v0.3.0-debug.apk
+          cd .. && sha256sum P2PRemote-Android-v0.3.0-debug.apk > P2PRemote-Android-v0.3.0-debug.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Android-v0.3.0-debug
+          path: |
+            P2PRemote-Android-v0.3.0-debug.apk
+            P2PRemote-Android-v0.3.0-debug.sha256
+          retention-days: 14
+
+  relay:
+    name: Go Relay Security and Container Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: Resolve Go modules
+        working-directory: relay
+        run: go mod tidy
+      - name: Go race and security tests
+        working-directory: relay
+        run: go test -race -count=1 ./...
+      - name: Build relay Docker image
+        run: docker build -t p2p-relay:v0.3.0-test ./relay

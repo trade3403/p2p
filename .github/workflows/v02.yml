@@ -1,15 +1,5 @@
-name: V0.2 Rust / Compose / Relay
+name: V0.2 Legacy Build (manual only)
 on:
-  push:
-    branches: [main, 'feature/**']
-    paths:
-      - 'desktop/**'
-      - 'android/**'
-      - 'relay/**'
-      - 'deploy/**'
-      - '.github/workflows/v02.yml'
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read

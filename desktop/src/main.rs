@@ -1,5 +1,7 @@
 mod host;
 mod protocol;
+mod reconnect;
+mod local_settings;
 
 use iced::{widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
@@ -26,7 +28,7 @@ impl Default for App {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
-            server: "wss://remote.example.com".into(),
+            server: local_settings::load_relay_url(),
             relay_token: String::new(),
             secret: protocol::new_secret(),
             running: Arc::new(AtomicBool::new(false)),
@@ -46,6 +48,10 @@ fn update(state: &mut App, msg: Msg) {
         Msg::Start if !state.running.load(Ordering::SeqCst) => {
             if state.relay_token.trim().is_empty() {
                 state.status = "必须填写 VPS RELAY_ACCESS_TOKEN".into(); return;
+            }
+            if let Err(err) = local_settings::save_relay_url(state.server.trim()) {
+                state.status = format!("服务器地址无效或无法保存：{err}");
+                return;
             }
             state.running.store(true, Ordering::SeqCst);
             state.status = "正在连接 VPS...".into();
@@ -79,7 +85,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let top = row![
         column![text("P2P  /  REMOTE").size(14).color(Color::from_rgb8(127,171,255)),
                 text("个人远程桌面").size(33),
-                text("Rust 原生客户端  ·  Windows Host  ·  V0.2 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
+                text("Rust 原生客户端  ·  Windows Host  ·  V0.3 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
         container(text(if active {"●  服务已启动"} else {"○  尚未连接"}).size(14))
             .padding([12,20])
@@ -109,11 +115,11 @@ fn view(state: &App) -> Element<'_, Msg> {
         text("仅当前登录桌面。UAC、安全桌面、锁屏及后台服务暂不支持。").size(13).color(Color::from_rgb8(204,178,130)),
     ].spacing(15));
     let status = card(column![
-        heading("03 / 运行状态", "当前中转连接和下一步操作"),
+        heading("03 / 运行状态", "实时连接状态 · 自动断线重连（最长等待 30 秒）"),
         text(&state.status).size(18),
-        text("下一步：Android 安装 V0.2 APK，输入相同 WSS 地址、口令和会话密钥。").size(13)
+        text("Android V0.3：输入相同 WSS 地址、访问口令和会话密钥。").size(13)
             .color(Color::from_rgb8(158,172,199)),
-        text("断开连接或关闭此窗口即可停止传输。不会静默启动后台监控。").size(13)
+        text("只保存中转服务器地址，不保存访问口令或密钥。停止远控会立即取消重试。").size(13)
             .color(Color::from_rgb8(158,172,199)),
     ].spacing(14));
 

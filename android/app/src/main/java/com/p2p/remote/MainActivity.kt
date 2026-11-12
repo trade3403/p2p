@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -14,7 +15,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -24,10 +24,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import okhttp3.OkHttpClient
@@ -59,13 +57,24 @@ class MainActivity : ComponentActivity() {
     private var secret: ByteArray? = null
     private val decoding = AtomicBoolean(false)
     private var online by mutableStateOf(false)
+    private var requested by mutableStateOf(false)
+    private var receivingFrames by mutableStateOf(false)
+    private var activeEndpoint = ""
+    private var activeToken = ""
+    private var retryAttempt = 0
+    private var retryTask: Runnable? = null
+    private var watchdogTask: Runnable? = null
+    private var lastFrameAtMs = 0L
     private var status by mutableStateOf("等待配置服务器")
     private var frame by mutableStateOf<Bitmap?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            var server by remember { mutableStateOf("wss://remote.example.com") }
+            var server by remember { mutableStateOf(
+                getSharedPreferences("public_settings", MODE_PRIVATE).getString("relay_url", "wss://remote.example.com")
+                    ?: "wss://remote.example.com"
+            ) }
             var relayToken by remember { mutableStateOf("") }
             var sessionKey by remember { mutableStateOf("") }
             var textToSend by remember { mutableStateOf("") }
@@ -74,23 +83,24 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(8.dp))
                     Text("P2P  /  REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("我的远程桌面",fontSize=29.sp,fontWeight=FontWeight.Bold)
-                    Text("Android 控制端  ·  V0.2 测试版",fontSize=13.sp,color=Muted)
+                    Text("Android 控制端  ·  V0.3 测试版",fontSize=13.sp,color=Muted)
                     PanelCard {
                         Text("01   连接家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text("跨公网使用 VPS 中转，无需家庭固定 IP",fontSize=12.sp,color=Muted)
                         OutlinedTextField(value=server,onValueChange={server=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("中转服务器 WSS 地址")})
                         OutlinedTextField(value=relayToken,onValueChange={relayToken=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("中转服务器访问口令")})
-                        OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("Windows 显示的 64 位会话密钥")})
-                        Button(onClick={ if (online) disconnect() else connect(server, relayToken, sessionKey) },modifier=Modifier.fillMaxWidth()) {
-                            Text(if(online)"断开远程连接" else "连接电脑")
+                        OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("Windows 显示的 64 位会话密钥")})
+                        Button(onClick={ if (requested) disconnect() else connect(server, relayToken, sessionKey) },modifier=Modifier.fillMaxWidth()) {
+                            Text(if(requested)"停止连接 / 取消重试" else "连接电脑")
                         }
-                        Text(status,color=if(online)Color(0xFF72D9AB) else Muted,fontSize=13.sp)
+                        Text(status,color=if(receivingFrames)Color(0xFF72D9AB) else Muted,fontSize=13.sp)
+                        Text("已记住服务器地址 · 不保存访问口令或会话密钥 · 网络中断后自动重连",color=Muted,fontSize=12.sp)
                     }
                     PanelCard {
                         Row(verticalAlignment=Alignment.CenterVertically) {
                             Text("02   远程画面",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                             Spacer(Modifier.weight(1f))
-                            Text(if(online)"● 已连接" else "○ 未连接",fontSize=12.sp,color=if(online)Color(0xFF72D9AB) else Muted)
+                            Text(if(receivingFrames)"● 正在接收画面" else if(online)"○ 等待家庭电脑" else "○ 未连接",fontSize=12.sp,color=if(receivingFrames)Color(0xFF72D9AB) else Muted)
                         }
                         val bitmap = frame
                         Box(Modifier.fillMaxWidth().height(260.dp).background(Color(0xFF0F1625),RoundedCornerShape(12.dp)),contentAlignment=Alignment.Center) {
@@ -132,38 +142,170 @@ class MainActivity : ComponentActivity() {
         Column(Modifier.fillMaxWidth().background(Panel,RoundedCornerShape(18.dp)).padding(17.dp),verticalArrangement=Arrangement.spacedBy(12.dp),content=content)
     }
 
-    private fun connect(server:String,relayToken:String,keyText:String) {
-        val key = try { decodeKey(keyText) } catch(e:Exception) { status="会话密钥必须是 64 位十六进制字符串";return }
+    private fun connect(server: String, relayToken: String, keyText: String) {
+        val key = try { decodeKey(keyText) } catch (_: Exception) {
+            status = "会话密钥必须是 64 位十六进制字符串"
+            return
+        }
         val source = server.trim().trimEnd('/')
         val normalized = when {
-            source.startsWith("https://") -> "wss://"+source.removePrefix("https://")
+            source.startsWith("https://") -> "wss://" + source.removePrefix("https://")
             source.startsWith("wss://") -> source
-            else -> {status="必须使用 HTTPS/WSS 服务器";return}
+            else -> { status = "必须使用 HTTPS/WSS 中转服务器"; return }
         }
-        if(relayToken.length<32){status="请填写至少 32 字符的服务器访问口令";return}
-        val room=sha256("p2p-v02-room:".toByteArray(Charsets.UTF_8)+key).toHex()
-        val endpoint="$normalized/relay?room=$room&role=viewer"
-        secret=key
-        status="正在连接 VPS..."
-        val request=try {Request.Builder().url(endpoint).header("Authorization","Bearer $relayToken").build()}catch(e:Exception){status="无效服务器地址";return}
-        val ws=client.newWebSocket(request,object:WebSocketListener(){
-            override fun onOpen(webSocket:WebSocket,response:Response){ main.post { if(socket===webSocket){online=true;status="已连接中转，等待电脑屏幕"} } }
-            override fun onMessage(webSocket:WebSocket,bytes:ByteString){
-                if(!decoding.compareAndSet(false,true))return
-                try {
-                    val original=decryptPacket(key,bytes.toByteArray())
-                    if(original.first==1){
-                        val b=BitmapFactory.decodeByteArray(original.second,0,original.second.size)
-                        if(b!=null) main.post { if(socket===webSocket)frame=b }
-                    }
-                }catch(_:Exception){}finally{decoding.set(false)}
-            }
-            override fun onFailure(webSocket:WebSocket,t:Throwable,response:Response?){main.post {if(socket===webSocket){socket=null;online=false;status="连接失败：${response?.code ?: t.localizedMessage}"}}}
-            override fun onClosed(webSocket:WebSocket,code:Int,reason:String){main.post {if(socket===webSocket){socket=null;online=false;status="连接已断开"}}}
-        })
-        socket=ws
+        if (normalized.contains("@") || normalized.contains("?") || normalized.contains("#")) {
+            status = "中转 URL 不允许包含账号、查询参数或密钥"
+            return
+        }
+        if (relayToken.length < 32) {
+            status = "请填写至少 32 字符的服务器访问口令"
+            return
+        }
+        val room = sha256("p2p-v02-room:".toByteArray(Charsets.UTF_8) + key).toHex()
+        activeEndpoint = "$normalized/relay?room=$room&role=viewer"
+        activeToken = relayToken
+        secret = key
+        requested = true
+        retryAttempt = 0
+        getSharedPreferences("public_settings", MODE_PRIVATE).edit()
+            .putString("relay_url", normalized).apply()
+        openConnection()
     }
-    private fun disconnect(){socket?.close(1000,"user disconnect");socket=null;online=false;frame=null;secret=null;status="已断开"}
+
+    private fun openConnection() {
+        if (!requested) return
+        status = if (retryAttempt == 0) "正在连接中转服务器..." else "正在重新连接中转服务器..."
+        val request = try {
+            Request.Builder().url(activeEndpoint).header("Authorization", "Bearer $activeToken").build()
+        } catch (_: Exception) {
+            status = "中转服务器地址无效"
+            requested = false
+            secret = null
+            activeToken = ""
+            return
+        }
+        val ws = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                main.post {
+                    if (socket === webSocket && requested) {
+                        online = true
+                        receivingFrames = false
+                        status = "已连接中转服务器，等待家庭电脑画面"
+                        startWatchdog()
+                    }
+                }
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (socket !== webSocket || !requested) return
+                if (!decoding.compareAndSet(false, true)) return
+                try {
+                    val key = secret ?: return
+                    val original = decryptPacket(key, bytes.toByteArray())
+                    if (original.first == 1) {
+                        val decoded = BitmapFactory.decodeByteArray(original.second, 0, original.second.size)
+                        if (decoded != null) main.post {
+                            if (socket === webSocket && requested) {
+                                frame = decoded
+                                receivingFrames = true
+                                lastFrameAtMs = SystemClock.elapsedRealtime()
+                                retryAttempt = 0
+                                status = "已连接家庭电脑 · 正在接收画面"
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Invalid or unauthenticated packets never affect the desktop.
+                } finally {
+                    decoding.set(false)
+                }
+            }
+
+            override fun onFailure(webSocket: WebSocket, error: Throwable, response: Response?) {
+                main.post {
+                    if (socket !== webSocket || !requested) return@post
+                    socket = null
+                    online = false
+                    receivingFrames = false
+                    frame = null
+                    stopWatchdog()
+                    if (response?.code == 401 || response?.code == 403) {
+                        requested = false
+                        secret = null
+                        activeToken = ""
+                        status = "中转访问口令错误（HTTP ${response.code}），已停止重试"
+                    } else {
+                        scheduleRetry("连接失败：${response?.code ?: error.localizedMessage ?: "网络错误"}")
+                    }
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                main.post {
+                    if (socket !== webSocket || !requested) return@post
+                    socket = null
+                    online = false
+                    receivingFrames = false
+                    frame = null
+                    stopWatchdog()
+                    scheduleRetry("连接已断开（$code）")
+                }
+            }
+        })
+        socket = ws
+    }
+
+    private fun scheduleRetry(reason: String) {
+        if (!requested) return
+        retryTask?.let { main.removeCallbacks(it) }
+        val waitMs = ReconnectPolicy.delayMs(retryAttempt)
+        retryAttempt = (retryAttempt + 1).coerceAtMost(31)
+        status = "$reason · ${waitMs / 1000} 秒后重连"
+        retryTask = Runnable {
+            retryTask = null
+            if (requested) openConnection()
+        }.also { main.postDelayed(it, waitMs) }
+    }
+
+    private fun startWatchdog() {
+        stopWatchdog()
+        lastFrameAtMs = 0L
+        watchdogTask = object : Runnable {
+            override fun run() {
+                if (!requested || !online) return
+                if (receivingFrames && SystemClock.elapsedRealtime() - lastFrameAtMs > 20_000L) {
+                    status = "画面超过 20 秒未更新，正在恢复连接"
+                    socket?.cancel()
+                    return
+                }
+                main.postDelayed(this, 5_000L)
+            }
+        }.also { main.postDelayed(it, 5_000L) }
+    }
+
+    private fun stopWatchdog() {
+        watchdogTask?.let { main.removeCallbacks(it) }
+        watchdogTask = null
+    }
+
+    private fun disconnect() {
+        requested = false
+        retryTask?.let { main.removeCallbacks(it) }
+        retryTask = null
+        stopWatchdog()
+        val old = socket
+        socket = null
+        old?.close(1000, "User disconnected")
+        online = false
+        receivingFrames = false
+        retryAttempt = 0
+        frame = null
+        secret = null
+        activeToken = ""
+        activeEndpoint = ""
+        status = "已断开，不会后台自动连接"
+    }
+
     private fun sendControl(type:String,x:Float,y:Float){
         val packet=JSONObject().put("type",type).put("x",x.toDouble()).put("y",y.toDouble())
         send(packet)
@@ -193,11 +335,13 @@ private fun encryptPacket(key:ByteArray,kind:Int,plain:ByteArray):ByteArray{
     val nonce=ByteArray(12).also {SecureRandom().nextBytes(it)}
     val cipher=Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(Cipher.ENCRYPT_MODE,SecretKeySpec(key,"AES"),GCMParameterSpec(128,nonce))
+    cipher.updateAAD(byteArrayOf(kind.toByte()))
     return byteArrayOf(kind.toByte())+nonce+cipher.doFinal(plain)
 }
 private fun decryptPacket(key:ByteArray,packet:ByteArray):Pair<Int,ByteArray>{
     require(packet.size in 30..(3*1024*1024))
     val cipher=Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(Cipher.DECRYPT_MODE,SecretKeySpec(key,"AES"),GCMParameterSpec(128,packet.copyOfRange(1,13)))
+    cipher.updateAAD(packet.copyOfRange(0,1))
     return Pair(packet[0].toInt() and 0xff,cipher.doFinal(packet.copyOfRange(13,packet.size)))
 }
