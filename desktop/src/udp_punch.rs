@@ -24,6 +24,11 @@ pub const HELLO: u8 = 11;
 pub const ACK: u8 = 12;
 pub const PREVIEW_START: u8 = 13;
 pub const PREVIEW_ACK: u8 = 15;
+pub fn valid_frame_ack(latest_sent: u32, last_acked: u32, next_ack: u32) -> bool {
+    next_ack > last_acked && next_ack <= latest_sent
+        && latest_sent.saturating_sub(next_ack) <= 3
+}
+
 const START_BYTES: &[u8] = b"P2P-UDP-START-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +142,7 @@ fn run(
     let mut last_frame_at = Instant::now() - Duration::from_millis(350);
     let mut last_media_ack = Instant::now();
     let mut frame_id = 0u32;
+    let mut highest_ack = 0u32;
     let mut last_sent = Instant::now() - Duration::from_millis(300);
     let mut last_candidate = Instant::now();
     let started = Instant::now();
@@ -226,9 +232,8 @@ fn run(
                         && preview_until.is_some()
                     {
                         let ack_id = u32::from_be_bytes(plaintext[..4].try_into()?);
-                        if ack_id != 0 && ack_id <= frame_id &&
-                            frame_id.saturating_sub(ack_id) <= 3
-                        {
+                        if valid_frame_ack(frame_id, highest_ack, ack_id) {
+                            highest_ack = ack_id;
                             last_media_ack = Instant::now();
                         }
                     } else if kind == ACK && plaintext.as_slice() == challenge {
@@ -273,6 +278,15 @@ mod tests {
         assert!(!is_request(br#"{"v":2,"type":"request"}"#));
     }
 
+    #[test]
+    fn only_recent_monotonic_media_acks_extend_udp_preview() {
+        assert!(valid_frame_ack(11, 8, 9));
+        assert!(valid_frame_ack(11, 9, 11));
+        assert!(!valid_frame_ack(11, 9, 9)); // duplicate/replay
+        assert!(!valid_frame_ack(11, 9, 8)); // stale
+        assert!(!valid_frame_ack(11, 9, 12)); // future frame
+        assert!(!valid_frame_ack(11, 0, 7)); // too old
+    }
     #[test]
     fn encrypted_udp_challenge_rejects_tampering_and_wrong_secret() {
         let key = protocol::new_secret();
