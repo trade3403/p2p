@@ -26,5 +26,6 @@ screenshots = "0.8.10"
 enigo = { version = "0.6.1", default-features = false }
 
 [profile.release]
-lto = "thin"
+lto = false
+codegen-units = 16
 strip = true

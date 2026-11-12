@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
                         OutlinedTextField(value=server,onValueChange={server=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("中转服务器 WSS 地址")})
                         OutlinedTextField(value=relayToken,onValueChange={relayToken=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("中转服务器访问口令")})
                         OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("Windows 显示的 64 位会话密钥")})
-                        Button(onClick={if(online){ {disconnect()} }else{ {connect(server,relayToken,sessionKey)} },modifier=Modifier.fillMaxWidth()) {
+                        Button(onClick={ if (online) disconnect() else connect(server, relayToken, sessionKey) },modifier=Modifier.fillMaxWidth()) {
                             Text(if(online)"断开远程连接" else "连接电脑")
                         }
                         Text(status,color=if(online)Color(0xFF72D9AB) else Muted,fontSize=13.sp)
