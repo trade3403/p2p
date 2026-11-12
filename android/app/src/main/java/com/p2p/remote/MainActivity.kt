@@ -531,6 +531,8 @@ class MainActivity : ComponentActivity() {
                     if (socket !== webSocket || !requested) return@post
                     socket = null
                     online = false
+                    rttMs = null
+                    lastPingTimeMs = 0L
                     receivingFrames = false
                     frame = null
                     h264Active = false
@@ -565,6 +567,8 @@ class MainActivity : ComponentActivity() {
                     if (socket !== webSocket || !requested) return@post
                     socket = null
                     online = false
+                    rttMs = null
+                    lastPingTimeMs = 0L
                     receivingFrames = false
                     frame = null
                     h264Active = false
