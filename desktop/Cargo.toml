@@ -1,6 +1,6 @@
 [package]
 name = "p2p-remote"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "Proprietary"
 description = "Personal remote desktop Windows host - private source"
@@ -24,6 +24,7 @@ image = { version = "0.24.9", default-features = false, features = ["jpeg"] }
 [target.'cfg(windows)'.dependencies]
 screenshots = "0.8.10"
 enigo = { version = "0.6.1", default-features = false }
+arboard = { version = "3.6.1", default-features = false }
 
 [profile.release]
 lto = false

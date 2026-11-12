@@ -1,5 +1,8 @@
 package com.p2p.remote
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
@@ -67,6 +70,11 @@ class MainActivity : ComponentActivity() {
     private var lastFrameAtMs = 0L
     private var status by mutableStateOf("等待配置服务器")
     private var frame by mutableStateOf<Bitmap?>(null)
+    private var clipboardResult by mutableStateOf("")
+    private var monitorCount by mutableIntStateOf(1)
+    private var selectedMonitor by mutableIntStateOf(0)
+    private var pointerX by mutableFloatStateOf(0.5f)
+    private var pointerY by mutableFloatStateOf(0.5f)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,12 +86,13 @@ class MainActivity : ComponentActivity() {
             var relayToken by remember { mutableStateOf("") }
             var sessionKey by remember { mutableStateOf("") }
             var textToSend by remember { mutableStateOf("") }
+            var clipboardToSend by remember { mutableStateOf("") }
             MaterialTheme(colorScheme=darkColorScheme(primary=Accent, background=Ink,surface=Panel,onSurface=Color.White,onBackground=Color.White)) {
                 Column(Modifier.fillMaxSize().background(Ink).verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(15.dp)) {
                     Spacer(Modifier.height(8.dp))
                     Text("P2P  /  REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("我的远程桌面",fontSize=29.sp,fontWeight=FontWeight.Bold)
-                    Text("Android 控制端  ·  V0.3 测试版",fontSize=13.sp,color=Muted)
+                    Text("Android 控制端  ·  V0.4 测试版",fontSize=13.sp,color=Muted)
                     PanelCard {
                         Text("01   连接家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text("跨公网使用 VPS 中转，无需家庭固定 IP",fontSize=12.sp,color=Muted)
@@ -110,11 +119,13 @@ class MainActivity : ComponentActivity() {
                                     awaitEachGesture {
                                         val down=awaitFirstDown(requireUnconsumed=false)
                                         val first=coordinate(down.position,size.width.toFloat(),size.height.toFloat(),bitmap.width,bitmap.height)
+                                        pointerX=first.first;pointerY=first.second
                                         sendControl("down",first.first,first.second)
                                         do {
                                             val e=awaitPointerEvent()
                                             val change=e.changes.firstOrNull() ?: break
                                             val p=coordinate(change.position,size.width.toFloat(),size.height.toFloat(),bitmap.width,bitmap.height)
+                                            pointerX=p.first;pointerY=p.second
                                             if(change.pressed) sendControl("move",p.first,p.second)
                                             else {sendControl("up",p.first,p.second);break}
                                         }while(true)
@@ -123,13 +134,43 @@ class MainActivity : ComponentActivity() {
                             } else Text("连接后在这里显示电脑屏幕",color=Muted,fontSize=13.sp)
                         }
                         Text("触摸 = 左键 · 滑动 = 拖拽（电脑端需要授权）",color=Muted,fontSize=12.sp)
+                        Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(7.dp)) {
+                            Text("显示器 ${selectedMonitor+1}/$monitorCount",fontSize=13.sp,color=Muted,modifier=Modifier.weight(1f))
+                            Button(onClick={selectMonitor((selectedMonitor-1+monitorCount)%monitorCount)},enabled=online && monitorCount>1) {Text("上一屏")}
+                            Button(onClick={selectMonitor((selectedMonitor+1)%monitorCount)},enabled=online && monitorCount>1) {Text("下一屏")}
+                        }
+                        Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                            Button(onClick={sendControl("right_click",pointerX,pointerY)},enabled=online,modifier=Modifier.weight(1f)){Text("右键")}
+                            Button(onClick={sendScroll(-3)},enabled=online,modifier=Modifier.weight(1f)){Text("上滚")}
+                            Button(onClick={sendScroll(3)},enabled=online,modifier=Modifier.weight(1f)){Text("下滚")}
+                        }
                         Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                             OutlinedTextField(value=textToSend,onValueChange={textToSend=it},modifier=Modifier.weight(1f),singleLine=true,label={Text("发送文字到电脑")})
                             Button(onClick={sendControlText(textToSend);textToSend=""},enabled=online && textToSend.isNotBlank()){Text("发送")}
                         }
                     }
                     PanelCard {
-                        Text("03   安全提示",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
+                        Text("03   按需传递剪贴板文字",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
+                        Text("电脑端须单独授权。不会自动监听或同步任何剪贴板内容。",fontSize=12.sp,color=Muted)
+                        OutlinedTextField(value=clipboardToSend,onValueChange={clipboardToSend=it.take(2048)},
+                            modifier=Modifier.fillMaxWidth(),label={Text("输入要放进电脑剪贴板的文字")},maxLines=3)
+                        Row(horizontalArrangement=Arrangement.spacedBy(7.dp)){
+                            Button(onClick={sendClipboardSet(clipboardToSend)},
+                                enabled=online && clipboardToSend.isNotEmpty() && clipboardToSend.toByteArray(Charsets.UTF_8).size<=4096,
+                                modifier=Modifier.weight(1f)){Text("发送至电脑")}
+                            Button(onClick={send(JSONObject().put("type","clipboard_get"))},enabled=online,
+                                modifier=Modifier.weight(1f)){Text("读取电脑文字")}
+                        }
+                        if(clipboardResult.isNotEmpty()){
+                            Text(clipboardResult,color=Muted,fontSize=12.sp,maxLines=3)
+                            Button(onClick={
+                                val manager=getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                manager.setPrimaryClip(ClipData.newPlainText("P2P Remote",clipboardResult))
+                            }){Text("复制至手机剪贴板")}
+                        }
+                    }
+                    PanelCard {
+                        Text("04   安全提示",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
                         Text("桌面画面采用 AES-256-GCM 端到端加密；中转服务器无法解密图像。首次测试请仅在你自己的电脑上使用。",fontSize=13.sp,color=Muted,lineHeight=20.sp)
                     }
                     Spacer(Modifier.height(15.dp))
@@ -202,15 +243,31 @@ class MainActivity : ComponentActivity() {
                 try {
                     val key = secret ?: return
                     val original = decryptPacket(key, bytes.toByteArray())
-                    if (original.first == 1) {
-                        val decoded = BitmapFactory.decodeByteArray(original.second, 0, original.second.size)
-                        if (decoded != null) main.post {
-                            if (socket === webSocket && requested) {
-                                frame = decoded
-                                receivingFrames = true
-                                lastFrameAtMs = SystemClock.elapsedRealtime()
-                                retryAttempt = 0
-                                status = "已连接家庭电脑 · 正在接收画面"
+                    when (original.first) {
+                        1 -> {
+                            val decoded = BitmapFactory.decodeByteArray(original.second, 0, original.second.size)
+                            if (decoded != null) main.post {
+                                if (socket === webSocket && requested) {
+                                    frame = decoded
+                                    receivingFrames = true
+                                    lastFrameAtMs = SystemClock.elapsedRealtime()
+                                    retryAttempt = 0
+                                    status = "已连接家庭电脑 · 正在接收画面"
+                                }
+                            }
+                        }
+                        3 -> {
+                            if (original.second.size <= 4096) {
+                                val value = original.second.toString(Charsets.UTF_8)
+                                main.post { if(socket===webSocket && requested) clipboardResult=value }
+                            }
+                        }
+                        4 -> {
+                            val metadata = JSONObject(original.second.toString(Charsets.UTF_8))
+                            val count = metadata.optInt("count", 1).coerceIn(1, 16)
+                            val index = metadata.optInt("selected", 0).coerceIn(0, count - 1)
+                            main.post {
+                                if(socket===webSocket && requested){ monitorCount=count;selectedMonitor=index }
                             }
                         }
                     }
@@ -300,10 +357,26 @@ class MainActivity : ComponentActivity() {
         receivingFrames = false
         retryAttempt = 0
         frame = null
+        clipboardResult = ""
+        monitorCount = 1
+        selectedMonitor = 0
         secret = null
         activeToken = ""
         activeEndpoint = ""
         status = "已断开，不会后台自动连接"
+    }
+
+    private fun selectMonitor(index: Int) {
+        if(index < 0 || index >= monitorCount) return
+        send(JSONObject().put("type","monitor").put("index",index))
+    }
+    private fun sendScroll(delta: Int) {
+        if(delta !in -10..10 || delta == 0) return
+        send(JSONObject().put("type","scroll").put("delta",delta))
+    }
+    private fun sendClipboardSet(value: String) {
+        if(value.isEmpty() || value.toByteArray(Charsets.UTF_8).size > 4096) return
+        send(JSONObject().put("type","clipboard_set").put("text",value))
     }
 
     private fun sendControl(type:String,x:Float,y:Float){
