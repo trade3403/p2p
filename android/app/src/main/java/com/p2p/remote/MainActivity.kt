@@ -54,6 +54,7 @@ private val Accent = Color(0xFF6B9BFF)
 private val Muted = Color(0xFFB5C1D5)
 
 class MainActivity : ComponentActivity() {
+    private val trustedStore by lazy { TrustedPairingStore(this) }
     private val main = Handler(Looper.getMainLooper())
     private val client = OkHttpClient.Builder().readTimeout(0,TimeUnit.MILLISECONDS).pingInterval(20,TimeUnit.SECONDS).build()
     private var socket: WebSocket? = null
@@ -87,14 +88,65 @@ class MainActivity : ComponentActivity() {
             var sessionKey by remember { mutableStateOf("") }
             var textToSend by remember { mutableStateOf("") }
             var clipboardToSend by remember { mutableStateOf("") }
+            var savedPairAvailable by remember { mutableStateOf(trustedStore.hasSaved()) }
             MaterialTheme(colorScheme=darkColorScheme(primary=Accent, background=Ink,surface=Panel,onSurface=Color.White,onBackground=Color.White)) {
                 Column(Modifier.fillMaxSize().background(Ink).verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(15.dp)) {
                     Spacer(Modifier.height(8.dp))
                     Text("P2P  /  REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("我的远程桌面",fontSize=29.sp,fontWeight=FontWeight.Bold)
-                    Text("Android 控制端  ·  V0.4 测试版",fontSize=13.sp,color=Muted)
+                    Text("Android 控制端  ·  V0.5 测试版",fontSize=13.sp,color=Muted)
                     PanelCard {
-                        Text("01   连接家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
+                        Text("01   已授权的家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
+                        Text(if(savedPairAvailable)"已在 Android Keystore 加密保存一台电脑"
+                            else "尚未保存可信配对",fontSize=13.sp,color=Muted)
+                        Button(
+                            onClick={
+                                val saved=trustedStore.load()
+                                if(saved==null){
+                                    savedPairAvailable=false
+                                    status="无法解锁已保存的配对。请重新在电脑端配对。"
+                                }else{
+                                    server=saved.relayUrl
+                                    relayToken=saved.relayToken
+                                    sessionKey=saved.sessionKey
+                                    if(!requested) connect(server,relayToken,sessionKey)
+                                }
+                            },
+                            enabled=savedPairAvailable && !requested,
+                            modifier=Modifier.fillMaxWidth()
+                        ){Text("连接已保存的家庭电脑")}
+                        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){
+                            Button(
+                                onClick={
+                                    try{
+                                        trustedStore.save(TrustedPairingStore.Profile(
+                                            server.trim(),relayToken.trim(),sessionKey.trim()
+                                        ))
+                                        savedPairAvailable=true
+                                        status="已加密保存可信电脑，今后可直接连接"
+                                    }catch(_:Exception){
+                                        status="保存失败：请检查 HTTPS/WSS 地址、口令和 64 位密钥"
+                                    }
+                                },
+                                enabled=!requested,
+                                modifier=Modifier.weight(1f)
+                            ){Text("加密保存配对")}
+                            Button(
+                                onClick={
+                                    disconnect()
+                                    trustedStore.clear()
+                                    savedPairAvailable=false
+                                    relayToken=""
+                                    sessionKey=""
+                                    status="已清除此手机的绑定；若要撤销远端访问请在 Windows 轮换密钥"
+                                },
+                                modifier=Modifier.weight(1f)
+                            ){Text("清除此手机")}
+                        }
+                        Text("保存仅发生在你主动点击之后；不会自动连接或后台启动。",fontSize=12.sp,color=Muted)
+                    }
+                    PanelCard {
+                        Text("02   手动连接家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text("跨公网使用 VPS 中转，无需家庭固定 IP",fontSize=12.sp,color=Muted)
                         OutlinedTextField(value=server,onValueChange={server=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("中转服务器 WSS 地址")})
                         OutlinedTextField(value=relayToken,onValueChange={relayToken=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("中转服务器访问口令")})
@@ -103,11 +155,11 @@ class MainActivity : ComponentActivity() {
                             Text(if(requested)"停止连接 / 取消重试" else "连接电脑")
                         }
                         Text(status,color=if(receivingFrames)Color(0xFF72D9AB) else Muted,fontSize=13.sp)
-                        Text("已记住服务器地址 · 不保存访问口令或会话密钥 · 网络中断后自动重连",color=Muted,fontSize=12.sp)
+                        Text("只有主动点击加密保存才会存储可信配对；网络中断期间允许当前会话自动重连",color=Muted,fontSize=12.sp)
                     }
                     PanelCard {
                         Row(verticalAlignment=Alignment.CenterVertically) {
-                            Text("02   远程画面",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
+                            Text("03   远程画面",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                             Spacer(Modifier.weight(1f))
                             Text(if(receivingFrames)"● 正在接收画面" else if(online)"○ 等待家庭电脑" else "○ 未连接",fontSize=12.sp,color=if(receivingFrames)Color(0xFF72D9AB) else Muted)
                         }
@@ -150,7 +202,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     PanelCard {
-                        Text("03   按需传递剪贴板文字",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
+                        Text("04   按需传递剪贴板文字",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
                         Text("电脑端须单独授权。不会自动监听或同步任何剪贴板内容。",fontSize=12.sp,color=Muted)
                         OutlinedTextField(value=clipboardToSend,onValueChange={clipboardToSend=it.take(2048)},
                             modifier=Modifier.fillMaxWidth(),label={Text("输入要放进电脑剪贴板的文字")},maxLines=3)
@@ -170,7 +222,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     PanelCard {
-                        Text("04   安全提示",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
+                        Text("05   安全提示",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
                         Text("桌面画面采用 AES-256-GCM 端到端加密；中转服务器无法解密图像。首次测试请仅在你自己的电脑上使用。",fontSize=13.sp,color=Muted,lineHeight=20.sp)
                     }
                     Spacer(Modifier.height(15.dp))
