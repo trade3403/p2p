@@ -27,6 +27,7 @@ pub fn spawn_frames(
     h264: Arc<AtomicBool>,
     target_fps: Arc<AtomicU32>,
     drops: Arc<AtomicU64>,
+    udp_active: Arc<AtomicBool>,
 ) -> mpsc::Receiver<Frame> {
     let (tx, rx) = mpsc::channel(2);
     thread::spawn(move || {
@@ -36,6 +37,11 @@ pub fn spawn_frames(
         let mut frames_since_reset = 0u32;
 
         while !tx.is_closed() {
+            if udp_active.load(Ordering::Relaxed) {
+                // The encrypted UDP preview has its own low-res capture worker.
+                thread::sleep(Duration::from_millis(120));
+                continue;
+            }
             let started = Instant::now();
             let active_h264 = h264.load(Ordering::Relaxed);
             let selected = monitor.load(Ordering::Relaxed);
@@ -93,6 +99,7 @@ pub fn spawn_frames(
     _h264: Arc<AtomicBool>,
     _target_fps: Arc<AtomicU32>,
     _drops: Arc<AtomicU64>,
+    _udp_active: Arc<AtomicBool>,
 ) -> mpsc::Receiver<Frame> {
     let (_tx, rx) = mpsc::channel(1);
     rx
@@ -147,6 +154,25 @@ fn capture(
         JpegEncoder::new_with_quality(&mut bytes, 58).encode_image(&image)?;
         Ok(Some((protocol::FRAME, bytes)))
     }
+}
+
+/// Separate low-bandwidth preview used ONLY after an authenticated V0.10
+/// UDP handshake. Never captures lock/UAC secure desktops.
+#[cfg(windows)]
+pub fn capture_udp_jpeg(index: usize) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context;
+    use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, RgbaImage};
+    let display = screenshots::Screen::all()?.into_iter().nth(index)
+        .context("selected display missing for UDP preview")?;
+    let captured = display.capture()?;
+    let image = RgbaImage::from_raw(
+        captured.width(), captured.height(), captured.into_raw()
+    ).context("invalid screen capture bytes")?;
+    let resized = DynamicImage::ImageRgba8(image)
+        .resize(640, 360, FilterType::Triangle);
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 40).encode_image(&resized)?;
+    Ok(jpeg)
 }
 
 #[cfg(test)]

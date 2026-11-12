@@ -1,6 +1,7 @@
 package com.p2p.remote
 
 import org.json.JSONObject
+import java.nio.ByteBuffer
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -24,6 +25,7 @@ internal class UdpPunchProbe(
     secret: ByteArray,
     private val signal: (String) -> Unit,
     private val updateStatus: (String) -> Unit,
+    private val onJpeg: (ByteArray) -> Unit,
 ) {
     private val key = secret.copyOf()
     private val closed = AtomicBoolean(false)
@@ -57,13 +59,39 @@ internal class UdpPunchProbe(
                     var lastSent = 0L
                     var lastCandidate = System.nanoTime()
                     var confirmedAt = 0L
-                    val buffer = ByteArray(256)
-                    while (!closed.get() && System.nanoTime() - started < 12_000_000_000L) {
-                        if (confirmedAt != 0L && System.nanoTime() - confirmedAt > 1_000_000_000L) {
-                            return@thread // Let the peer receive final ACK before closing.
+                    var lastStartSent = 0L
+                    var previewStartedAt = 0L
+                    var lastJpegAt = 0L
+                    val assembler = UdpJpegAssembler()
+                    val buffer = ByteArray(1200)
+                    while (!closed.get() && System.nanoTime() - started < 35_000_000_000L) {
+                        val elapsed = System.nanoTime()
+                        if (confirmedAt == 0L && elapsed - started > 12_000_000_000L) {
+                            updateStatus("UDP 双端探测超时，继续 VPS 中转")
+                            return@thread
+                        }
+                        if (confirmedAt != 0L && previewStartedAt == 0L &&
+                            elapsed - confirmedAt > 3_000_000_000L) {
+                            updateStatus("UDP 握手成功，但电脑未开启画面预览，保留 VPS")
+                            return@thread
+                        }
+                        if (previewStartedAt != 0L &&
+                            (elapsed - previewStartedAt > 20_000_000_000L ||
+                             elapsed - lastJpegAt > 2_500_000_000L)) {
+                            updateStatus("UDP JPEG 预览已结束或超时，恢复 VPS WSS 画面")
+                            return@thread
                         }
                         val peer = remote
                         val now = System.nanoTime()
+                        if (peer != null && confirmedAt != 0L &&
+                            previewStartedAt == 0L && now-lastStartSent > 350_000_000L) {
+                            val startPacket = UdpPunchProtocol.encrypt(
+                                key, UdpPunchProtocol.PREVIEW_START,
+                                "P2P-UDP-START-v1".toByteArray(Charsets.UTF_8)
+                            )
+                            udp.send(DatagramPacket(startPacket,startPacket.size,peer))
+                            lastStartSent = now
+                        }
                         if (peer == null && now - lastCandidate >= 1_500_000_000L) {
                             // The WSS relay may drop candidate messages if its
                             // bounded queue is saturated by video frames.
@@ -80,9 +108,30 @@ internal class UdpPunchProbe(
                             udp.receive(response)
                             if (peer == null || response.address != peer.address ||
                                 response.port != peer.port) continue
-                            val packet = UdpPunchProtocol.decrypt(
-                                key, response.data.copyOfRange(0, response.length)
-                            ) ?: continue
+                            val datagram = response.data.copyOfRange(0,response.length)
+                            if (confirmedAt != 0L && datagram.isNotEmpty() &&
+                                (datagram[0].toInt() and 255) == UdpPunchProtocol.VIDEO) {
+                                val image = assembler.accept(
+                                    datagram,key,System.nanoTime()/1_000_000L
+                                )
+                                if(image != null) {
+                                    if(previewStartedAt == 0L) {
+                                        previewStartedAt = System.nanoTime()
+                                        updateStatus("UDP JPEG 画面正在接收，WSS 作为自动回退")
+                                    }
+                                    lastJpegAt = System.nanoTime()
+                                    onJpeg(image)
+                                    // ACK only a fully reassembled authenticated JPEG.
+                                    val ack = UdpPunchProtocol.encrypt(
+                                        key, UdpPunchProtocol.PREVIEW_ACK,
+                                        ByteBuffer.allocate(4)
+                                            .putInt(assembler.lastCompletedFrameId.toInt()).array()
+                                    )
+                                    udp.send(DatagramPacket(ack,ack.size,peer))
+                                }
+                                continue
+                            }
+                            val packet = UdpPunchProtocol.decrypt(key,datagram) ?: continue
                             if (packet.first == UdpPunchProtocol.HELLO && packet.second.size == 16) {
                                 val ack = UdpPunchProtocol.encrypt(
                                     key, UdpPunchProtocol.ACK, packet.second
@@ -91,7 +140,7 @@ internal class UdpPunchProbe(
                             } else if (packet.first == UdpPunchProtocol.ACK &&
                                 packet.second.contentEquals(challenge) && confirmedAt == 0L) {
                                 confirmedAt = System.nanoTime()
-                                updateStatus("UDP 双端加密握手成功（仅验证连通性），画面仍通过 VPS")
+                                updateStatus("UDP 双端加密握手成功，正在请求授权的 JPEG 预览")
                             }
                         } catch (_: java.net.SocketTimeoutException) {
                             // Normal bounded polling interval.
@@ -100,8 +149,8 @@ internal class UdpPunchProbe(
                             return@thread
                         }
                     }
-                    if (!closed.get() && confirmedAt == 0L) {
-                        updateStatus("UDP 双端探测超时，可能受对称 NAT 或防火墙限制；保留 VPS")
+                    if (!closed.get()) {
+                        updateStatus("UDP 预览探测已停止，继续 VPS 中转")
                     }
                 }
             } catch (_: Exception) {
@@ -123,6 +172,9 @@ internal class UdpPunchProbe(
 internal object UdpPunchProtocol {
     const val HELLO = 11
     const val ACK = 12
+    const val PREVIEW_START = 13
+    const val VIDEO = 14
+    const val PREVIEW_ACK = 15
 
     fun parseCandidate(json: JSONObject, expectedRole: String): InetSocketAddress? =
         parseCandidateFields(
@@ -153,8 +205,10 @@ internal object UdpPunchProtocol {
 
     fun encrypt(secret: ByteArray, kind: Int, body: ByteArray): ByteArray {
         require(secret.size == 32)
-        require(body.size == 16)
-        require(kind == HELLO || kind == ACK)
+        require(
+            (kind == PREVIEW_ACK && body.size == 4) ||
+            ((kind == HELLO || kind == ACK || kind == PREVIEW_START) && body.size == 16)
+        )
         val nonce = ByteArray(12).also { SecureRandom().nextBytes(it) }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(secret,"AES"),GCMParameterSpec(128,nonce))

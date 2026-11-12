@@ -8,6 +8,7 @@ mod video;
 mod lan;
 mod stun;
 mod udp_punch;
+mod udp_video;
 
 use iced::{widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
@@ -34,6 +35,8 @@ struct App {
     lan_direct: Arc<AtomicBool>,
     lan_active: Arc<AtomicBool>,
     allow_udp_probe: Arc<AtomicBool>,
+    allow_udp_preview: Arc<AtomicBool>,
+    udp_active: Arc<AtomicBool>,
     h264_enabled: Arc<AtomicBool>,
     target_fps: Arc<AtomicU32>,
     sent_frames: Arc<AtomicU64>,
@@ -64,6 +67,8 @@ impl Default for App {
             lan_direct: Arc::new(AtomicBool::new(false)),
             lan_active: Arc::new(AtomicBool::new(false)),
             allow_udp_probe: Arc::new(AtomicBool::new(false)),
+            allow_udp_preview: Arc::new(AtomicBool::new(false)),
+            udp_active: Arc::new(AtomicBool::new(false)),
             h264_enabled: Arc::new(AtomicBool::new(false)),
             target_fps: Arc::new(AtomicU32::new(12)),
             sent_frames: Arc::new(AtomicU64::new(0)),
@@ -95,6 +100,8 @@ impl Default for App {
                 lan_direct: app.lan_direct.clone(),
                 lan_active: app.lan_active.clone(),
                 allow_udp_probe: app.allow_udp_probe.clone(),
+                allow_udp_preview: app.allow_udp_preview.clone(),
+                udp_active: app.udp_active.clone(),
                 h264_enabled: app.h264_enabled.clone(),
                 target_fps: app.target_fps.clone(),
                 sent_frames: app.sent_frames.clone(),
@@ -118,7 +125,7 @@ impl Drop for App {
 #[derive(Debug, Clone)]
 enum Msg { Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
-    H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), ProbeNetwork, Start, Stop, NewKey, Tick }
+    H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick }
 
 fn update(state: &mut App, msg: Msg) {
     match msg {
@@ -144,6 +151,9 @@ fn update(state: &mut App, msg: Msg) {
                 let _ = tx.send(result);
             });
         }
+        Msg::AllowUdpPreview(value) if !state.running.load(Ordering::SeqCst) => {
+            state.allow_udp_preview.store(value, Ordering::SeqCst);
+        },
         Msg::AllowUdpProbe(value) if !state.running.load(Ordering::SeqCst) => {
             state.allow_udp_probe.store(value, Ordering::SeqCst);
         },
@@ -230,6 +240,8 @@ fn update(state: &mut App, msg: Msg) {
                 lan_direct: state.lan_direct.clone(),
                 lan_active: state.lan_active.clone(),
                 allow_udp_probe: state.allow_udp_probe.clone(),
+                allow_udp_preview: state.allow_udp_preview.clone(),
+                udp_active: state.udp_active.clone(),
                 h264_enabled: state.h264_enabled.clone(),
                 target_fps: state.target_fps.clone(),
                 sent_frames: state.sent_frames.clone(),
@@ -279,7 +291,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let top = row![
         column![text("P2P  /  REMOTE").size(14).color(Color::from_rgb8(127,171,255)),
                 text("个人远程桌面").size(33),
-                text("Rust 原生客户端  ·  Windows Host  ·  V0.9 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
+                text("Rust 原生客户端  ·  Windows Host  ·  V0.10 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
         container(text(if active {"●  服务已启动"} else {"○  尚未连接"}).size(14))
             .padding([12,20])
@@ -403,6 +415,17 @@ fn view(state: &App) -> Element<'_, Msg> {
         text("双方候选地址仅在端到端加密 WSS 消息中交换；UDP 只传输加密挑战响应。").size(13)
             .color(Color::from_rgb8(158,172,199)),
         text("若看到“UDP 握手成功”，仅说明 12 秒内双方可互发加密探测包，并非视频已切换。").size(13)
+            .color(Color::from_rgb8(204,178,130)),
+        checkbox("额外允许已验证 UDP 链路传输 20 秒低画质 JPEG 预览（默认关闭）",
+            state.allow_udp_preview.load(Ordering::SeqCst))
+            .on_toggle(Msg::AllowUdpPreview).size(16),
+        text(format!("当前 UDP 预览：{}",
+            if state.udp_active.load(Ordering::SeqCst) { "正在传输，WSS 视频暂缓" }
+            else { "未运行，WSS 正常传输" }
+        )).size(13),
+        text("只有 Android 主动请求且双方通过加密验证时，才传输640×360 JPEG预览。").size(13)
+            .color(Color::from_rgb8(158,172,199)),
+        text("未完成全部 UDP 硬件兼容测试，不包含 UDP 远程输入。超时自动切回 WSS。").size(13)
             .color(Color::from_rgb8(204,178,130)),
         text("默认关闭。需要 VPS 已启用 STUN UDP 3478；不支持完整 ICE/TURN 或 QUIC 视频。").size(13)
             .color(Color::from_rgb8(204,178,130)),

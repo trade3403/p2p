@@ -4,14 +4,14 @@
 //! WebSocket relay. The temporary UDP channel exchanges only encrypted
 //! 16-byte challenge/response messages, NEVER video or input.
 //! The same bound socket performs STUN and hole-punch probes (unlike V0.8).
-use crate::{protocol, stun};
+use crate::{protocol, stun, udp_video, video};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, Sender},
         Arc,
     },
@@ -22,6 +22,9 @@ use tokio::sync::mpsc::UnboundedSender;
 pub const SIGNAL: u8 = 10;
 pub const HELLO: u8 = 11;
 pub const ACK: u8 = 12;
+pub const PREVIEW_START: u8 = 13;
+pub const PREVIEW_ACK: u8 = 15;
+const START_BYTES: &[u8] = b"P2P-UDP-START-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signal {
@@ -65,10 +68,14 @@ pub fn parse_candidate(data: &[u8], expected_role: &str) -> Option<SocketAddrV4>
 pub struct Probe {
     pub peer_tx: Sender<SocketAddrV4>,
     abort: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
 }
 
 impl Drop for Probe {
-    fn drop(&mut self) { self.abort.store(true, Ordering::SeqCst); }
+    fn drop(&mut self) {
+        self.abort.store(true, Ordering::SeqCst);
+        self.active.store(false, Ordering::SeqCst);
+    }
 }
 
 pub fn start(
@@ -77,19 +84,26 @@ pub fn start(
     session_running: Arc<AtomicBool>,
     log: Sender<String>,
     outbound_signal: UnboundedSender<Vec<u8>>,
+    preview_allowed: Arc<AtomicBool>,
+    preview_active: Arc<AtomicBool>,
+    monitor_index: Arc<AtomicUsize>,
+    lan_active: Arc<AtomicBool>,
 ) -> Probe {
     let (peer_tx, rx) = mpsc::channel();
     let abort = Arc::new(AtomicBool::new(false));
     let shutdown = abort.clone();
+    let active = preview_active.clone();
     std::thread::spawn(move || {
         if let Err(error) = run(
             &key, &relay_url, &session_running, &shutdown,
             &log, &outbound_signal, rx,
+            &preview_allowed, &preview_active, &monitor_index, &lan_active,
         ) {
-            let _ = log.send(format!("UDP 直连验证失败：{error:#}；继续使用 VPS 中转"));
+            let _ = log.send(format!("UDP 预览失败：{error:#}；已使用 VPS 兜底"));
         }
+        preview_active.store(false, Ordering::SeqCst);
     });
-    Probe { peer_tx, abort }
+    Probe { peer_tx, abort, active }
 }
 
 fn run(
@@ -100,6 +114,10 @@ fn run(
     log: &Sender<String>,
     outbound: &UnboundedSender<Vec<u8>>,
     peers: mpsc::Receiver<SocketAddrV4>,
+    preview_allowed: &AtomicBool,
+    preview_active: &AtomicBool,
+    monitor_index: &AtomicUsize,
+    lan_active: &AtomicBool,
 ) -> Result<()> {
     let sock = UdpSocket::bind("0.0.0.0:0").context("UDP bind blocked")?;
     let (mapped, _) = stun::probe_bound_socket(&sock, relay_url)?;
@@ -115,6 +133,10 @@ fn run(
     let challenge = &challenge[..16];
     let mut remote: Option<SocketAddrV4> = None;
     let mut confirmed_at: Option<Instant> = None;
+    let mut preview_until: Option<Instant> = None;
+    let mut last_frame_at = Instant::now() - Duration::from_millis(350);
+    let mut last_media_ack = Instant::now();
+    let mut frame_id = 0u32;
     let mut last_sent = Instant::now() - Duration::from_millis(300);
     let mut last_candidate = Instant::now();
     let started = Instant::now();
@@ -122,10 +144,45 @@ fn run(
 
     while session_running.load(Ordering::SeqCst)
         && !abort.load(Ordering::SeqCst)
-        && started.elapsed() < Duration::from_secs(12)
+        && (started.elapsed() < Duration::from_secs(12) || preview_until.is_some())
     {
-        if confirmed_at.map(|at| at.elapsed() >= Duration::from_secs(1)).unwrap_or(false) {
-            return Ok(()); // Grace period for the remote side's final HELLO/ACK.
+        if let Some(until) = preview_until {
+            if Instant::now() >= until || lan_active.load(Ordering::SeqCst)
+                || last_media_ack.elapsed() >= Duration::from_secs(3)
+            {
+                preview_active.store(false, Ordering::SeqCst);
+                let _ = log.send("UDP JPEG 预览已结束，恢复 VPS WSS 画面".into());
+                return Ok(());
+            }
+            if last_frame_at.elapsed() >= Duration::from_millis(330) {
+                #[cfg(windows)]
+                {
+                    let jpeg = video::capture_udp_jpeg(monitor_index.load(Ordering::SeqCst))?;
+                    frame_id = frame_id.wrapping_add(1).max(1);
+                    let packets = match udp_video::encode_jpeg(key, frame_id, &jpeg) {
+                        Ok(packets) => packets,
+                        Err(_) => {
+                            preview_active.store(false, Ordering::SeqCst);
+                            let _ = log.send(
+                                "UDP JPEG 超出预览帧上限，已恢复 VPS 画面".into()
+                            );
+                            return Ok(());
+                        }
+                    };
+                    if let Some(peer) = remote {
+                        for packet in packets {
+                            sock.send_to(&packet, peer)?;
+                        }
+                    }
+                    last_frame_at = Instant::now();
+                }
+            }
+        } else if confirmed_at.map(|at| at.elapsed() >= Duration::from_secs(4))
+            .unwrap_or(false)
+        {
+            // Give the Android preview-start packet time to arrive. If it
+            // never arrives, this remains a V0.9 connectivity-only test.
+            return Ok(());
         }
         while let Ok(peer) = peers.try_recv() {
             remote = Some(peer);
@@ -152,11 +209,33 @@ fn run(
                     if kind == HELLO && plaintext.len() == 16 {
                         let ack = protocol::encrypt(key, ACK, &plaintext)?;
                         let _ = sock.send_to(&ack, from);
+                    } else if kind == PREVIEW_START && plaintext.as_slice() == START_BYTES
+                        && confirmed_at.is_some()
+                        && preview_allowed.load(Ordering::SeqCst)
+                        && !lan_active.load(Ordering::SeqCst)
+                    {
+                        if preview_until.is_none() {
+                            preview_until = Some(Instant::now() + Duration::from_secs(20));
+                            last_media_ack = Instant::now();
+                            preview_active.store(true, Ordering::SeqCst);
+                            let _ = log.send(
+                                "UDP JPEG 预览已启用：640×360、约3 FPS、最多20秒".into()
+                            );
+                        }
+                    } else if kind == PREVIEW_ACK && plaintext.len() == 4
+                        && preview_until.is_some()
+                    {
+                        let ack_id = u32::from_be_bytes(plaintext[..4].try_into()?);
+                        if ack_id != 0 && ack_id <= frame_id &&
+                            frame_id.saturating_sub(ack_id) <= 3
+                        {
+                            last_media_ack = Instant::now();
+                        }
                     } else if kind == ACK && plaintext.as_slice() == challenge {
                         if confirmed_at.is_none() {
                             confirmed_at = Some(Instant::now());
                             let _ = log.send(
-                                "UDP 加密直连握手成功（仅连通性测试）；视频仍通过 VPS 中转".into()
+                                "UDP 加密直连握手成功；等待 Android 预览请求（未授权则继续 VPS）".into()
                             );
                         }
                     }

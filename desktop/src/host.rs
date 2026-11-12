@@ -17,6 +17,8 @@ pub struct HostConfig {
     pub lan_direct: Arc<AtomicBool>,
     pub lan_active: Arc<AtomicBool>,
     pub allow_udp_probe: Arc<AtomicBool>,
+    pub allow_udp_preview: Arc<AtomicBool>,
+    pub udp_active: Arc<AtomicBool>,
     pub h264_enabled: Arc<AtomicBool>,
     pub target_fps: Arc<AtomicU32>,
     pub sent_frames: Arc<AtomicU64>,
@@ -128,6 +130,7 @@ where
         config.h264_enabled.clone(),
         config.target_fps.clone(),
         config.dropped_frames.clone(),
+        config.udp_active.clone(),
     );
     let mut metadata_tick = tokio::time::interval(Duration::from_secs(5));
     let (udp_signal_tx, mut udp_signal_rx) =
@@ -149,7 +152,8 @@ where
                 if !config.running.load(Ordering::SeqCst) { break; }
                 // When an authenticated LAN viewer is active, do not waste
                 // uplink bandwidth relaying frames to the VPS.
-                if !is_lan_session && config.lan_active.load(Ordering::SeqCst) { continue; }
+                if !is_lan_session && (config.lan_active.load(Ordering::SeqCst)
+                    || config.udp_active.load(Ordering::SeqCst)) { continue; }
                 let Some((kind, bytes)) = frame else {
                     return Err(anyhow!("screen capture worker exited unexpectedly"));
                 };
@@ -191,6 +195,10 @@ where
                                             config.running.clone(),
                                             config.messages.clone(),
                                             udp_signal_tx.clone(),
+                                            config.allow_udp_preview.clone(),
+                                            config.udp_active.clone(),
+                                            config.monitor_index.clone(),
+                                            config.lan_active.clone(),
                                         );
                                         udp_probe = Some(probe);
                                     }

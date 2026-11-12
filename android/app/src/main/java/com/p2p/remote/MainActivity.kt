@@ -86,6 +86,8 @@ class MainActivity : ComponentActivity() {
     private var udpProbe: UdpPunchProbe? = null
     private var udpAttempted by mutableStateOf(false)
     private var udpReport by mutableStateOf("未执行公网 UDP 双端验证")
+    private var udpPreviewFrames by mutableIntStateOf(0)
+    @Volatile private var udpLastFrameAtMs = 0L
     private var lastPingNonce = 0L
     private var lastPingTimeMs = 0L
     private var frame by mutableStateOf<Bitmap?>(null)
@@ -213,10 +215,11 @@ class MainActivity : ComponentActivity() {
                             horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                             Button(onClick={startUdpPunch()},
                                 enabled=online && !usingLan && activeToken.length >= 32 && !udpAttempted
-                            ) { Text("测试公网 UDP 直连") }
+                            ) { Text("测试 UDP 并申请预览") }
                             Text(udpReport,color=Muted,fontSize=12.sp,modifier=Modifier.weight(1f))
                         }
-                        Text("仅检测加密 UDP 双向通信；不会切换屏幕传输链路。",
+                        Text("UDP 预览帧数：$udpPreviewFrames · 低画质测试最多20秒，失败自动回退 WSS",color=Muted,fontSize=12.sp)
+                        Text("仅在 Windows 单独授权时切换 JPEG 预览；远程控制始终通过 WSS。",
                             color=Muted,fontSize=12.sp)
                         Text("端到端信令 RTT：${rttMs?.let{"$it ms"} ?: "等待响应"}",
                             color=Muted,fontSize=12.sp)
@@ -506,12 +509,18 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         1 -> {
+                            if (udpLastFrameAtMs != 0L &&
+                                SystemClock.elapsedRealtime() - udpLastFrameAtMs < 1500L) return
                             val decoded = BitmapFactory.decodeByteArray(original.second, 0, original.second.size)
                             if (decoded != null) main.post {
                                 if (socket === webSocket && requested) {
                                     if(h264Active) avcDecoder.reset()
                                     frame = decoded
                                     h264Active = false
+                                    if(udpLastFrameAtMs != 0L) {
+                                        udpLastFrameAtMs = 0L
+                                        transport = "VPS WSS 中转"
+                                    }
                                     receivingFrames = true
                                     lastFrameAtMs = SystemClock.elapsedRealtime()
                                     retryAttempt = 0
@@ -520,10 +529,16 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         5 -> {
+                            if (udpLastFrameAtMs != 0L &&
+                                SystemClock.elapsedRealtime() - udpLastFrameAtMs < 1500L) return
                             val accessUnit = AvcPayload.parse(original.second)
                             if(accessUnit != null) {
                                 main.post {
                                     if(socket===webSocket && requested){
+                                        if(udpLastFrameAtMs != 0L) {
+                                            udpLastFrameAtMs = 0L
+                                            transport = "VPS WSS 中转"
+                                        }
                                         h264Width=accessUnit.width
                                         h264Height=accessUnit.height
                                         h264Active=true
@@ -564,6 +579,7 @@ class MainActivity : ComponentActivity() {
                     udpProbe = null
                     udpAttempted = false
                     udpReport = "连接已断开，待新会话重新验证"
+                    udpLastFrameAtMs = 0L
                     rttMs = null
                     lastPingTimeMs = 0L
                     receivingFrames = false
@@ -604,6 +620,7 @@ class MainActivity : ComponentActivity() {
                     udpProbe = null
                     udpAttempted = false
                     udpReport = "连接已断开，待新会话重新验证"
+                    udpLastFrameAtMs = 0L
                     rttMs = null
                     lastPingTimeMs = 0L
                     receivingFrames = false
@@ -667,6 +684,8 @@ class MainActivity : ComponentActivity() {
         val key = secret?.copyOf() ?: return
         if (!requested || !online || usingLan || activeToken.length < 32 || udpAttempted) return
         udpAttempted = true
+        udpPreviewFrames = 0
+        udpLastFrameAtMs = 0L
         udpReport = "已申请双方加密 UDP 连通性探测"
         udpProbe?.stop()
         val probe = UdpPunchProbe(
@@ -682,7 +701,35 @@ class MainActivity : ComponentActivity() {
                 }
             },
             updateStatus = { result ->
-                main.post { if (requested && socket === ws) udpReport = result }
+                main.post {
+                    if (requested && socket === ws) {
+                        udpReport = result
+                        if (result.contains("恢复 VPS") || result.contains("继续 VPS") ||
+                            result.contains("保留 VPS")) {
+                            udpLastFrameAtMs = 0L
+                            transport = "VPS WSS 中转"
+                        }
+                    }
+                }
+            },
+            onJpeg = { jpeg ->
+                // Decode on UDP worker, update Compose state on the UI thread.
+                val decoded = BitmapFactory.decodeByteArray(jpeg,0,jpeg.size)
+                if (decoded != null) {
+                    main.post {
+                        if(requested && socket === ws && online) {
+                            frame = decoded
+                            if(h264Active) avcDecoder.reset()
+                            h264Active = false
+                            receivingFrames = true
+                            udpPreviewFrames++
+                            udpLastFrameAtMs = SystemClock.elapsedRealtime()
+                            lastFrameAtMs = udpLastFrameAtMs
+                            transport = "公网加密 UDP JPEG 预览（输入继续走 WSS）"
+                            status = "正在接收 UDP JPEG 画面 · VPS 备份已就绪"
+                        }
+                    }
+                }
             },
         )
         udpProbe = probe
@@ -742,6 +789,8 @@ class MainActivity : ComponentActivity() {
         udpProbe = null
         udpAttempted = false
         udpReport = "未执行公网 UDP 双端验证"
+        udpLastFrameAtMs = 0L
+        udpPreviewFrames = 0
         retryTask?.let { main.removeCallbacks(it) }
         retryTask = null
         stopWatchdog()
