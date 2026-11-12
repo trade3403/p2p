@@ -1,0 +1,26 @@
+# Android
+.gradle/
+**/build/
+local.properties
+*.keystore
+*.jks
+*.apk
+*.aab
+# .NET / Visual Studio
+**/bin/
+**/obj/
+.vs/
+*.user
+# Secrets and packaged artifacts
+.env
+.env.*
+!*.example
+*.pfx
+*.p12
+*.key
+*.mobileprovision
+*.ipa
+/dist/
+/artifacts/
+*.zip
+.DS_Store

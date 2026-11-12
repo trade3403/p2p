@@ -1,0 +1,78 @@
+name: Build Windows and Android
+
+on:
+  push:
+    branches: [main, develop, 'feature/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows EXE (test)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore windows/P2PHost/P2PHost.csproj
+      - name: Compile
+        run: dotnet build windows/P2PHost/P2PHost.csproj --no-restore -c Release -warnaserror
+      - name: Publish portable self-contained Windows EXE
+        run: dotnet publish windows/P2PHost/P2PHost.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/windows
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item README.md dist/windows/README.md
+          Compress-Archive -Path dist/windows/* -DestinationPath P2PRemote-Windows-v0.1.0-x64-test.zip
+          (Get-FileHash P2PRemote-Windows-v0.1.0-x64-test.zip -Algorithm SHA256).Hash | Out-File P2PRemote-Windows-v0.1.0-x64-test.sha256 -Encoding ASCII
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Windows-v0.1.0-x64-test
+          path: |
+            P2PRemote-Windows-v0.1.0-x64-test.zip
+            P2PRemote-Windows-v0.1.0-x64-test.sha256
+          retention-days: 14
+
+  android:
+    name: Android APK (test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build debug APK
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+      - name: Rename and hash test APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk ../P2PRemote-Android-v0.1.0-debug.apk
+          cd .. && sha256sum P2PRemote-Android-v0.1.0-debug.apk > P2PRemote-Android-v0.1.0-debug.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Android-v0.1.0-debug
+          path: |
+            P2PRemote-Android-v0.1.0-debug.apk
+            P2PRemote-Android-v0.1.0-debug.sha256
+          retention-days: 14
