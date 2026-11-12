@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Forms;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -49,7 +50,8 @@ public sealed class HostServer
     {
         if (_app is not { } app) return;
         _app = null;
-        await app.StopAsync(TimeSpan.FromSeconds(3));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        await app.StopAsync(timeout.Token);
         await app.DisposeAsync();
     }
 
@@ -139,7 +141,7 @@ public sealed class HostServer
             if (!_canInput()) continue;
             try
             {
-                using var message = JsonDocument.Parse(bytes.AsSpan(0, result.Count));
+                using var message = JsonDocument.Parse(bytes.AsMemory(0, result.Count));
                 var command = message.RootElement;
                 var type = command.GetProperty("type").GetString();
                 if (type == "text")
