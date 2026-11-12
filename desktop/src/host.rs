@@ -19,12 +19,38 @@ pub fn start(config: HostConfig) {
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
-            Err(error) => { let _ = config.messages.send(format!("运行时错误: {error}")); return; }
+            Err(error) => {
+                let _ = config.messages.send(format!("运行时初始化失败: {error}"));
+                config.running.store(false, Ordering::SeqCst);
+                return;
+            }
         };
-        if let Err(error) = runtime.block_on(run(&config)) {
-            let _ = config.messages.send(format!("连接失败: {error:#}"));
+        let mut failures = 0u32;
+        while config.running.load(Ordering::SeqCst) {
+            match runtime.block_on(run(&config)) {
+                Ok(()) => {
+                    if !config.running.load(Ordering::SeqCst) { break; }
+                    let _ = config.messages.send("连接已断开，准备重新连接".into());
+                }
+                Err(error) => {
+                    if !config.running.load(Ordering::SeqCst) { break; }
+                    if crate::reconnect::authentication_rejected(&error) {
+                        let _ = config.messages.send("中转访问口令错误（HTTP 401/403），已停止自动重试".into());
+                        break;
+                    }
+                    let _ = config.messages.send(format!("中转连接中断: {error:#}"));
+                }
+            }
+            let retry = crate::reconnect::retry_delay(failures);
+            failures = failures.saturating_add(1);
+            let _ = config.messages.send(format!("连接恢复中 · {} 秒后重试（点击停止可取消）", retry.as_secs()));
+            let started = std::time::Instant::now();
+            while config.running.load(Ordering::SeqCst) && started.elapsed() < retry {
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
         config.running.store(false, Ordering::SeqCst);
+        let _ = config.messages.send("远程服务已停止".into());
     });
 }
 
@@ -47,8 +73,9 @@ async fn run(config: &HostConfig) -> Result<()> {
         .append_pair("role", "host");
     let mut request = endpoint.as_str().into_client_request()?;
     request.headers_mut().insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", config.relay_token))?);
-    let (socket, _) = connect_async(request).await.context("relay not reachable")?;
-    let _ = config.messages.send("已连接中转服务器 · 远控可用".into());
+    let (socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request))
+        .await.context("relay connection timed out")??;
+    let _ = config.messages.send("已连接中转服务器 · 等待已授权手机连接".into());
     let (mut outgoing, mut incoming) = socket.split();
     let mut ticker = tokio::time::interval(Duration::from_millis(150));
     loop {
@@ -59,7 +86,8 @@ async fn run(config: &HostConfig) -> Result<()> {
                 {
                     if let Ok(jpg) = capture_jpeg() {
                         let packet = protocol::encrypt(&config.secret, protocol::FRAME, &jpg)?;
-                        outgoing.send(Message::Binary(packet)).await?;
+                        tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
+                            .await.context("video send timed out")??;
                     }
                 }
             }
