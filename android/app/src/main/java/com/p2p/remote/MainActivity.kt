@@ -69,6 +69,11 @@ class MainActivity : ComponentActivity() {
     private var requested by mutableStateOf(false)
     private var receivingFrames by mutableStateOf(false)
     private var activeEndpoint = ""
+    private var lanEndpoint = ""
+    private var lanAttempted = false
+    private var usingLan = false
+    private var lanVerified = false
+    private var transport by mutableStateOf("未连接")
     private var activeToken = ""
     private var retryAttempt = 0
     private var retryTask: Runnable? = null
@@ -106,6 +111,10 @@ class MainActivity : ComponentActivity() {
                     ?: "wss://remote.example.com"
             ) }
             var relayToken by remember { mutableStateOf("") }
+            var lanIp by remember { mutableStateOf(
+                getSharedPreferences("public_settings", MODE_PRIVATE)
+                    .getString("lan_ipv4", "") ?: ""
+            ) }
             var sessionKey by remember { mutableStateOf("") }
             var textToSend by remember { mutableStateOf("") }
             var clipboardToSend by remember { mutableStateOf("") }
@@ -115,7 +124,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(8.dp))
                     Text("P2P  /  REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("我的远程桌面",fontSize=29.sp,fontWeight=FontWeight.Bold)
-                    Text("Android 控制端  ·  V0.6 测试版",fontSize=13.sp,color=Muted)
+                    Text("Android 控制端  ·  V0.7 测试版",fontSize=13.sp,color=Muted)
                     PanelCard {
                         Text("01   已授权的家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text(if(savedPairAvailable)"已在 Android Keystore 加密保存一台电脑"
@@ -130,7 +139,7 @@ class MainActivity : ComponentActivity() {
                                     server=saved.relayUrl
                                     relayToken=saved.relayToken
                                     sessionKey=saved.sessionKey
-                                    if(!requested) connect(server,relayToken,sessionKey)
+                                    if(!requested) connect(server,relayToken,sessionKey,lanIp)
                                 }
                             },
                             enabled=savedPairAvailable && !requested,
@@ -170,12 +179,23 @@ class MainActivity : ComponentActivity() {
                         Text("02   手动连接家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text("跨公网使用 VPS 中转，无需家庭固定 IP",fontSize=12.sp,color=Muted)
                         OutlinedTextField(value=server,onValueChange={server=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("中转服务器 WSS 地址")})
+                        OutlinedTextField(
+                            value=lanIp,
+                            onValueChange={lanIp=it.take(24)},
+                            modifier=Modifier.fillMaxWidth(),
+                            singleLine=true,
+                            label={Text("可选：家中电脑的局域网 IPv4")},
+                            placeholder={Text("例如 192.168.1.100")}
+                        )
+                        Text("同一 Wi-Fi 优先直连，失败自动回退 VPS；不支持公网 IP 或 NAT 自动打洞。",
+                            color=Muted,fontSize=12.sp)
                         OutlinedTextField(value=relayToken,onValueChange={relayToken=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("中转服务器访问口令")})
                         OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("Windows 显示的 64 位会话密钥")})
-                        Button(onClick={ if (requested) disconnect() else connect(server, relayToken, sessionKey) },modifier=Modifier.fillMaxWidth()) {
+                        Button(onClick={ if (requested) disconnect() else connect(server, relayToken, sessionKey, lanIp) },modifier=Modifier.fillMaxWidth()) {
                             Text(if(requested)"停止连接 / 取消重试" else "连接电脑")
                         }
                         Text(status,color=if(receivingFrames)Color(0xFF72D9AB) else Muted,fontSize=13.sp)
+                        Text("当前链路：$transport",color=Accent,fontSize=13.sp)
                         Text("只有主动点击加密保存才会存储可信配对；网络中断期间允许当前会话自动重连",color=Muted,fontSize=12.sp)
                     }
                     PanelCard {
@@ -309,7 +329,7 @@ class MainActivity : ComponentActivity() {
         Column(Modifier.fillMaxWidth().background(Panel,RoundedCornerShape(18.dp)).padding(17.dp),verticalArrangement=Arrangement.spacedBy(12.dp),content=content)
     }
 
-    private fun connect(server: String, relayToken: String, keyText: String) {
+    private fun connect(server: String, relayToken: String, keyText: String, lanIp: String) {
         val key = try { decodeKey(keyText) } catch (_: Exception) {
             status = "会话密钥必须是 64 位十六进制字符串"
             return
@@ -324,41 +344,82 @@ class MainActivity : ComponentActivity() {
             status = "中转 URL 不允许包含账号、查询参数或密钥"
             return
         }
-        if (relayToken.length < 32) {
-            status = "请填写至少 32 字符的服务器访问口令"
+        if (relayToken.length < 32 && LanEndpoint.url(lanIp) == null) {
+            status = "请填写有效的 VPS 口令，或填写同一局域网内的电脑 IPv4 地址"
             return
         }
         val room = sha256("p2p-v02-room:".toByteArray(Charsets.UTF_8) + key).toHex()
         activeEndpoint = "$normalized/relay?room=$room&role=viewer"
+        lanEndpoint = LanEndpoint.url(lanIp) ?: ""
+        lanAttempted = false
+        usingLan = false
+        lanVerified = false
+        transport = "连接中"
         activeToken = relayToken
         secret = key
         requested = true
         retryAttempt = 0
         getSharedPreferences("public_settings", MODE_PRIVATE).edit()
-            .putString("relay_url", normalized).apply()
+            .putString("relay_url", normalized)
+            .putString("lan_ipv4", lanIp.trim()).apply()
         openConnection()
     }
 
     private fun openConnection() {
         if (!requested) return
-        status = if (retryAttempt == 0) "正在连接中转服务器..." else "正在重新连接中转服务器..."
+        val tryLan = !lanAttempted && lanEndpoint.isNotEmpty()
+        if (tryLan) lanAttempted = true
+        usingLan = tryLan
+        lanVerified = false
+        transport = if(tryLan) "局域网加密直连 · 验证中" else "VPS WSS 中转"
+        status = if(tryLan) "尝试局域网直连..." else
+            if (retryAttempt == 0) "正在连接中转服务器..." else "正在重新连接中转服务器..."
         val request = try {
-            Request.Builder().url(activeEndpoint).header("Authorization", "Bearer $activeToken").build()
+            val builder = Request.Builder().url(if(tryLan) lanEndpoint else activeEndpoint)
+            if(!tryLan) builder.header("Authorization", "Bearer $activeToken")
+            builder.build()
         } catch (_: Exception) {
-            status = "中转服务器地址无效"
-            requested = false
-            secret = null
-            activeToken = ""
+            status = "连接地址无效"
+            if(tryLan){
+                usingLan=false
+                openConnection()
+            }else{
+                requested = false
+                secret = null
+                activeToken = ""
+            }
             return
         }
         val ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 main.post {
                     if (socket === webSocket && requested) {
-                        online = true
                         receivingFrames = false
-                        status = "已连接中转服务器，等待家庭电脑画面"
-                        startWatchdog()
+                        if(tryLan) {
+                            status = "局域网连接建立 · 正在验证会话密钥"
+                            val currentKey = secret
+                            if(currentKey == null ||
+                                !webSocket.send(
+                                    encryptPacket(
+                                        currentKey, 6, "P2P-LAN-HELLO-v1".toByteArray(Charsets.UTF_8)
+                                    ).toByteString()
+                                )
+                            ) {
+                                webSocket.cancel()
+                            } else {
+                                main.postDelayed({
+                                    if(socket === webSocket && requested && !lanVerified) {
+                                        status = "局域网验证超时，准备切换 VPS"
+                                        webSocket.cancel()
+                                    }
+                                }, 4000L)
+                            }
+                        }else{
+                            online = true
+                            transport = "VPS WSS 中转"
+                            status = "已连接中转服务器，等待家庭电脑画面"
+                            startWatchdog()
+                        }
                     }
                 }
             }
@@ -369,7 +430,26 @@ class MainActivity : ComponentActivity() {
                 try {
                     val key = secret ?: return
                     val original = decryptPacket(key, bytes.toByteArray())
+                    if (tryLan && !lanVerified && original.first != 7) return
                     when (original.first) {
+                        7 -> {
+                            if(tryLan &&
+                                original.second.contentEquals(
+                                    "P2P-LAN-READY-v1".toByteArray(Charsets.UTF_8)
+                                )
+                            ){
+                                main.post {
+                                    if(socket===webSocket && requested){
+                                        lanVerified = true
+                                        online = true
+                                        receivingFrames = false
+                                        transport = "局域网 P2P 直连"
+                                        status = "已通过局域网加密验证 · 等待画面"
+                                        startWatchdog()
+                                    }
+                                }
+                            }
+                        }
                         1 -> {
                             val decoded = BitmapFactory.decodeByteArray(original.second, 0, original.second.size)
                             if (decoded != null) main.post {
@@ -430,7 +510,20 @@ class MainActivity : ComponentActivity() {
                     h264Active = false
                     avcDecoder.reset()
                     stopWatchdog()
-                    if (response?.code == 401 || response?.code == 403) {
+                    if(tryLan) {
+                        lanVerified = false
+                        usingLan = false
+                        transport = "局域网不可达，已切换 VPS"
+                        status = "局域网直连失败，改走 VPS 中转"
+                        if(activeToken.length >= 32){
+                            openConnection()
+                        }else{
+                            requested=false
+                            secret=null
+                            transport="局域网直连失败"
+                            status="局域网直连不可用，且未配置 VPS 访问口令"
+                        }
+                    } else if (response?.code == 401 || response?.code == 403) {
                         requested = false
                         secret = null
                         activeToken = ""
@@ -451,7 +544,22 @@ class MainActivity : ComponentActivity() {
                     h264Active = false
                     avcDecoder.reset()
                     stopWatchdog()
-                    scheduleRetry("连接已断开（$code）")
+                    if (tryLan) {
+                        lanVerified = false
+                        usingLan = false
+                        transport = "局域网已断开，切换 VPS"
+                        status = "局域网连接断开，改走 VPS 中转"
+                        if(activeToken.length >= 32){
+                            openConnection()
+                        }else{
+                            requested=false
+                            secret=null
+                            transport="局域网连接中断"
+                            status="局域网直连已断开，且未配置 VPS 回退"
+                        }
+                    } else {
+                        scheduleRetry("连接已断开（$code）")
+                    }
                 }
             }
         })
@@ -511,6 +619,11 @@ class MainActivity : ComponentActivity() {
         secret = null
         activeToken = ""
         activeEndpoint = ""
+        lanEndpoint = ""
+        lanAttempted = false
+        usingLan = false
+        lanVerified = false
+        transport = "未连接"
         status = "已断开，不会后台自动连接"
     }
 

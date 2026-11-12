@@ -14,6 +14,8 @@ pub struct HostConfig {
     pub allow_input: Arc<AtomicBool>,
     pub allow_clipboard: Arc<AtomicBool>,
     pub monitor_index: Arc<AtomicUsize>,
+    pub lan_direct: Arc<AtomicBool>,
+    pub lan_active: Arc<AtomicBool>,
     pub h264_enabled: Arc<AtomicBool>,
     pub target_fps: Arc<AtomicU32>,
     pub sent_frames: Arc<AtomicU64>,
@@ -22,6 +24,9 @@ pub struct HostConfig {
 }
 
 pub fn start(config: HostConfig) {
+    if config.lan_direct.load(Ordering::SeqCst) {
+        crate::lan::spawn(config.clone());
+    }
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
@@ -31,6 +36,16 @@ pub fn start(config: HostConfig) {
                 return;
             }
         };
+        if config.relay_token.trim().is_empty() {
+            // Direct-only mode: do not keep failing a VPS authorization request.
+            let _ = config.messages.send(
+                "当前仅启用局域网 P2P 直连，无 VPS 自动回退".into()
+            );
+            while config.running.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            return;
+        }
         let mut failures = 0u32;
         while config.running.load(Ordering::SeqCst) {
             match runtime.block_on(run(&config)) {
@@ -41,7 +56,18 @@ pub fn start(config: HostConfig) {
                 Err(error) => {
                     if !config.running.load(Ordering::SeqCst) { break; }
                     if crate::reconnect::authentication_rejected(&error) {
-                        let _ = config.messages.send("中转访问口令错误（HTTP 401/403），已停止自动重试".into());
+                        if config.lan_direct.load(Ordering::SeqCst) {
+                            let _ = config.messages.send(
+                                "VPS 访问口令错误；局域网加密直连仍保持运行".into()
+                            );
+                            while config.running.load(Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_millis(200));
+                            }
+                        } else {
+                            let _ = config.messages.send(
+                                "中转访问口令错误（HTTP 401/403），已停止自动重试".into()
+                            );
+                        }
                         break;
                     }
                     let _ = config.messages.send(format!("中转连接中断: {error:#}"));
@@ -82,6 +108,19 @@ async fn run(config: &HostConfig) -> Result<()> {
     let (socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request))
         .await.context("relay connection timed out")??;
     let _ = config.messages.send("已连接中转服务器 · 等待已授权手机连接".into());
+    serve_session(config, socket, false).await
+}
+
+/// Shared authenticated session pump for VPS WSS and opt-in LAN WebSocket.
+/// Only the LAN path performs an additional encrypted HELLO proof before calling this.
+pub(crate) async fn serve_session<S>(
+    config: &HostConfig,
+    socket: tokio_tungstenite::WebSocketStream<S>,
+    is_lan_session: bool,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let (mut outgoing, mut incoming) = socket.split();
     let mut frames = crate::video::spawn_frames(
         config.monitor_index.clone(),
@@ -94,6 +133,9 @@ async fn run(config: &HostConfig) -> Result<()> {
         tokio::select! {
             frame = frames.recv() => {
                 if !config.running.load(Ordering::SeqCst) { break; }
+                // When an authenticated LAN viewer is active, do not waste
+                // uplink bandwidth relaying frames to the VPS.
+                if !is_lan_session && config.lan_active.load(Ordering::SeqCst) { continue; }
                 let Some((kind, bytes)) = frame else {
                     return Err(anyhow!("screen capture worker exited unexpectedly"));
                 };
@@ -113,6 +155,11 @@ async fn run(config: &HostConfig) -> Result<()> {
                 }
             }
             next = incoming.next() => {
+                // Never accept two simultaneous remote controllers.
+                if !is_lan_session && config.lan_active.load(Ordering::SeqCst) {
+                    if matches!(next, Some(Ok(Message::Close(_))) | None) { break; }
+                    continue;
+                }
                 match next {
                     Some(Ok(Message::Binary(packet))) => {
                         if let Ok((protocol::CONTROL, bytes)) = protocol::decrypt(&config.secret, &packet) {

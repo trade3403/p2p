@@ -5,6 +5,7 @@ mod local_settings;
 mod remote_ops;
 mod trusted_profile;
 mod video;
+mod lan;
 
 use iced::{widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
@@ -28,6 +29,8 @@ struct App {
     unattended_input: bool,
     trust_saved: bool,
     monitor_index: Arc<AtomicUsize>,
+    lan_direct: Arc<AtomicBool>,
+    lan_active: Arc<AtomicBool>,
     h264_enabled: Arc<AtomicBool>,
     target_fps: Arc<AtomicU32>,
     sent_frames: Arc<AtomicU64>,
@@ -54,6 +57,8 @@ impl Default for App {
             allow_input: Arc::new(AtomicBool::new(false)),
             allow_clipboard: Arc::new(AtomicBool::new(false)),
             monitor_index: Arc::new(AtomicUsize::new(0)),
+            lan_direct: Arc::new(AtomicBool::new(false)),
+            lan_active: Arc::new(AtomicBool::new(false)),
             h264_enabled: Arc::new(AtomicBool::new(false)),
             target_fps: Arc::new(AtomicU32::new(12)),
             sent_frames: Arc::new(AtomicU64::new(0)),
@@ -81,6 +86,8 @@ impl Default for App {
                 allow_input: app.allow_input.clone(),
                 allow_clipboard: app.allow_clipboard.clone(),
                 monitor_index: app.monitor_index.clone(),
+                lan_direct: app.lan_direct.clone(),
+                lan_active: app.lan_active.clone(),
                 h264_enabled: app.h264_enabled.clone(),
                 target_fps: app.target_fps.clone(),
                 sent_frames: app.sent_frames.clone(),
@@ -104,7 +111,7 @@ impl Drop for App {
 #[derive(Debug, Clone)]
 enum Msg { Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
-    H264(bool), Fps(u32), Start, Stop, NewKey, Tick }
+    H264(bool), Fps(u32), Lan(bool), Start, Stop, NewKey, Tick }
 
 fn update(state: &mut App, msg: Msg) {
     match msg {
@@ -112,6 +119,9 @@ fn update(state: &mut App, msg: Msg) {
         Msg::Token(s) if !state.running.load(Ordering::SeqCst) => state.relay_token = s,
         Msg::Allow(value) => state.allow_input.store(value, Ordering::SeqCst),
         Msg::Clipboard(value) => state.allow_clipboard.store(value, Ordering::SeqCst),
+        Msg::Lan(value) if !state.running.load(Ordering::SeqCst) => {
+            state.lan_direct.store(value, Ordering::SeqCst);
+        },
         Msg::H264(value) => state.h264_enabled.store(value, Ordering::SeqCst),
         Msg::Fps(value) if matches!(value, 6|12|20) => state.target_fps.store(value, Ordering::SeqCst),
         Msg::LoginStart(value) => state.launch_on_login = value,
@@ -173,8 +183,9 @@ fn update(state: &mut App, msg: Msg) {
             }
         },
         Msg::Start if !state.running.load(Ordering::SeqCst) => {
-            if state.relay_token.trim().is_empty() {
-                state.status = "必须填写 VPS RELAY_ACCESS_TOKEN".into(); return;
+            if state.relay_token.trim().is_empty() &&
+                !state.lan_direct.load(Ordering::SeqCst) {
+                state.status = "请填写 VPS 口令或选择局域网直连".into(); return;
             }
             if let Err(err) = local_settings::save_relay_url(state.server.trim()) {
                 state.status = format!("服务器地址无效或无法保存：{err}");
@@ -188,6 +199,8 @@ fn update(state: &mut App, msg: Msg) {
                 allow_input: state.allow_input.clone(),
                 allow_clipboard: state.allow_clipboard.clone(),
                 monitor_index: state.monitor_index.clone(),
+                lan_direct: state.lan_direct.clone(),
+                lan_active: state.lan_active.clone(),
                 h264_enabled: state.h264_enabled.clone(),
                 target_fps: state.target_fps.clone(),
                 sent_frames: state.sent_frames.clone(),
@@ -231,7 +244,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let top = row![
         column![text("P2P  /  REMOTE").size(14).color(Color::from_rgb8(127,171,255)),
                 text("个人远程桌面").size(33),
-                text("Rust 原生客户端  ·  Windows Host  ·  V0.6 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
+                text("Rust 原生客户端  ·  Windows Host  ·  V0.7 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
         container(text(if active {"●  服务已启动"} else {"○  尚未连接"}).size(14))
             .padding([12,20])
@@ -239,7 +252,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     ].align_y(iced::Alignment::Center);
 
     let connection = card(column![
-        heading("01 / 连接设置", "VPS 使用 WSS 转发加密数据，家庭电脑不需要固定公网 IP"),
+        heading("01 / 连接设置", "局域网可选 P2P 直连；跨公网仍通过 VPS 的 WSS 中转"),
         text("中转服务器地址").size(13),
         text_input("wss://remote.example.com", &state.server).on_input(Msg::Server).padding(13).size(15),
         text("中转访问口令（与 VPS 的 RELAY_ACCESS_TOKEN 一致）").size(13),
@@ -254,8 +267,22 @@ fn view(state: &App) -> Element<'_, Msg> {
             .align_y(iced::Alignment::Center),
     ].spacing(15));
 
+    let direct = card(column![
+        heading("02 / 局域网 P2P 直连", "LAN 同一子网优先，手机直连失败会自动回退 VPS"),
+        checkbox("允许局域网加密直连（TCP 43821，仅当前远控会话有效）",
+            state.lan_direct.load(Ordering::SeqCst))
+            .on_toggle(Msg::Lan).size(16),
+        text("该选项仅在停止服务时可修改；不会创建 Windows 防火墙规则。").size(13)
+            .color(Color::from_rgb8(204,178,130)),
+        text("手机输入此电脑的私有 IPv4 地址（Windows ipconfig 查看）。仅 RFC1918 网段可访问。").size(13)
+            .color(Color::from_rgb8(158,172,199)),
+        text("局域网直连采用加密握手认证，访问口令不会通过 ws:// 私网链接发送。").size(13)
+            .color(Color::from_rgb8(158,172,199)),
+        text("本版未实现 STUN/ICE 打洞；不同 Wi-Fi/5G 不一定能直连，仍需 VPS。").size(13)
+            .color(Color::from_rgb8(204,178,130)),
+    ].spacing(13));
     let safety = card(column![
-        heading("02 / 权限与隐私", "当前会话权限可以随时关闭；持久化无人值守授权必须单独明确选择"),
+        heading("03 / 权限与隐私", "当前会话权限可以随时关闭；持久化无人值守授权必须单独明确选择"),
         checkbox("允许 Android 端操作鼠标及输入文字", state.allow_input.load(Ordering::SeqCst)).on_toggle(Msg::Allow).size(16),
         checkbox("允许 Android 端按需读写 Windows 剪贴板文字", state.allow_clipboard.load(Ordering::SeqCst)).on_toggle(Msg::Clipboard).size(16),
         text("默认关闭剪贴板授权；不后台读取，不自动同步。每次传递由手机端手动触发。").size(13)
@@ -264,7 +291,7 @@ fn view(state: &App) -> Element<'_, Msg> {
         text("仅当前登录的 Windows 用户桌面。UAC、安全桌面、锁屏、系统服务均不支持。").size(13).color(Color::from_rgb8(204,178,130)),
     ].spacing(15));
     let trust = card(column![
-        heading("03 / 可信设备配对", "单台 Android 设备记住凭据；Windows DPAPI 加密、仅当前系统用户可恢复"),
+        heading("04 / 可信设备配对", "单台 Android 设备记住凭据；Windows DPAPI 加密、仅当前系统用户可恢复"),
         text(format!("设备指纹：{}", &protocol::room_id(&state.secret)[..12])).size(15),
         checkbox("我同意 Windows 用户登录后自动启动并连接 VPS", state.launch_on_login)
             .on_toggle(Msg::LoginStart).size(16),
@@ -283,7 +310,7 @@ fn view(state: &App) -> Element<'_, Msg> {
             .color(Color::from_rgb8(158,172,199)),
     ].spacing(15));
     let video = card(column![
-        heading("04 / 画质与网络", "优先验证真实 H.264 链路；默认 JPEG，手动打开软件 H.264"),
+        heading("05 / 画质与网络", "优先验证真实 H.264 链路；默认 JPEG，手动打开软件 H.264"),
         checkbox("启用 H.264 软件编码（Android MediaCodec 解码）",
             state.h264_enabled.load(Ordering::SeqCst)).on_toggle(Msg::H264).size(16),
         text("H.264 软件编码最高 1280×720；JPEG 默认约 6 FPS，H.264 帧率可选。").size(13)
@@ -303,19 +330,25 @@ fn view(state: &App) -> Element<'_, Msg> {
             .color(Color::from_rgb8(204,178,130)),
     ].spacing(15));
     let status = card(column![
-        heading("05 / 运行状态", "实时连接状态 · 自动断线重连（最长等待 30 秒）"),
+        heading("06 / 运行状态", "实时连接状态 · 自动断线重连（最长等待 30 秒）"),
         text(&state.status).size(18),
         row![
-            text(format!("当前显示器序号：{}", state.monitor_index.load(Ordering::SeqCst) + 1)).size(14),
+            text(format!(
+                "当前显示器序号：{} · {}",
+                state.monitor_index.load(Ordering::SeqCst) + 1,
+                if state.lan_active.load(Ordering::SeqCst) {
+                    "正在使用局域网直连，已暂停向 VPS 上传视频"
+                } else { "局域网未连接，使用 VPS 或等待连接" }
+            )).size(14),
             button("切换到下一显示器").on_press(Msg::NextMonitor).padding(10)
         ].spacing(14).align_y(iced::Alignment::Center),
-        text("Android V0.6：自动识别 JPEG/H.264，两端须使用相同的大版本。").size(13)
+        text("Android V0.7：同网段优先填写局域网 IPv4；连接失败回退 VPS。").size(13)
             .color(Color::from_rgb8(158,172,199)),
         text("仅在点击加密保存后，本机才以当前 Windows 用户 DPAPI 保护口令与配对密钥。").size(13)
             .color(Color::from_rgb8(158,172,199)),
     ].spacing(14));
 
-    container(scrollable(container(column![top, connection, safety, trust, video, status].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
+    container(scrollable(container(column![top, connection, direct, safety, trust, video, status].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
         .width(Length::Fill).height(Length::Fill)
         .center_x(Length::Fill).into()
 }
