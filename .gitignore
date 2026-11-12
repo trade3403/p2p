@@ -1,26 +1,16 @@
-# Android
-.gradle/
-**/build/
-local.properties
-*.keystore
-*.jks
-*.apk
-*.aab
-# .NET / Visual Studio
-**/bin/
-**/obj/
-.vs/
-*.user
-# Secrets and packaged artifacts
+# never commit secrets or build products
 .env
-.env.*
-!*.example
+**/.env
+!**/.env.example
 *.pfx
 *.p12
+*.keystore
+*.jks
+*.pem
 *.key
-*.mobileprovision
-*.ipa
-/dist/
-/artifacts/
+**/target/
+**/.gradle/
+**/build/
+*.apk
+*.exe
 *.zip
-.DS_Store
