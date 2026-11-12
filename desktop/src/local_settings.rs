@@ -14,7 +14,7 @@ fn settings_path() -> Option<PathBuf> {
         .map(|base| PathBuf::from(base).join("P2PRemote").join("settings.json"))
 }
 
-fn is_safe_address(value: &str) -> bool {
+pub fn is_safe_address(value: &str) -> bool {
     if value.len() > 512 { return false; }
     let Ok(url) = url::Url::parse(value) else { return false; };
     (url.scheme() == "wss" || url.scheme() == "https")
