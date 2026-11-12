@@ -28,6 +28,19 @@ func TestV09EncryptedCandidateSignalingRelaysAsOpaqueBytes(t *testing.T) {
     if err != nil { t.Fatalf("viewer connect: %v", err) }
     defer viewer.Close()
 
+    // Wait until both websocket handlers have installed their hub room slots.
+    // HTTP 101 may reach the client before claim() completes.
+    deadline := time.Now().Add(2*time.Second)
+    for {
+        h.mu.Lock()
+        entry := h.rooms[room]
+        ready := entry != nil && entry.host != nil && entry.viewer != nil
+        h.mu.Unlock()
+        if ready { break }
+        if time.Now().After(deadline) { t.Fatal("both peers did not join the room") }
+        time.Sleep(10*time.Millisecond)
+    }
+
     payload := append([]byte{10}, bytes.Repeat([]byte{0x3a}, 45)...)
     if err = viewer.WriteMessage(websocket.BinaryMessage, payload); err != nil {
         t.Fatal(err)

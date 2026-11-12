@@ -43,19 +43,19 @@ internal class UdpPunchProbe(
                     socket = udp
                     val observation = StunProbe.probeOnSocket(udp, relayUrl)
                     if (closed.get()) return@thread
-                    signal(
-                        JSONObject()
-                            .put("v", 1)
-                            .put("type", "candidate")
-                            .put("role", "viewer")
-                            .put("ip", observation.address.address.hostAddress)
-                            .put("port", observation.address.port)
-                            .toString()
-                    )
+                    val candidateJson = JSONObject()
+                        .put("v", 1)
+                        .put("type", "candidate")
+                        .put("role", "viewer")
+                        .put("ip", observation.address.address.hostAddress)
+                        .put("port", observation.address.port)
+                        .toString()
+                    signal(candidateJson)
                     updateStatus("UDP 本地映射已发现，等待电脑候选地址")
                     udp.soTimeout = 180
                     val started = System.nanoTime()
                     var lastSent = 0L
+                    var lastCandidate = System.nanoTime()
                     var confirmedAt = 0L
                     val buffer = ByteArray(256)
                     while (!closed.get() && System.nanoTime() - started < 12_000_000_000L) {
@@ -64,6 +64,12 @@ internal class UdpPunchProbe(
                         }
                         val peer = remote
                         val now = System.nanoTime()
+                        if (peer == null && now - lastCandidate >= 1_500_000_000L) {
+                            // The WSS relay may drop candidate messages if its
+                            // bounded queue is saturated by video frames.
+                            signal(candidateJson)
+                            lastCandidate = now
+                        }
                         if (peer != null && now - lastSent >= 300_000_000L) {
                             val hello = UdpPunchProtocol.encrypt(key, UdpPunchProtocol.HELLO, challenge)
                             udp.send(DatagramPacket(hello, hello.size, peer))
@@ -94,7 +100,7 @@ internal class UdpPunchProbe(
                             return@thread
                         }
                     }
-                    if (!closed.get()) {
+                    if (!closed.get() && confirmedAt == 0L) {
                         updateStatus("UDP 双端探测超时，可能受对称 NAT 或防火墙限制；保留 VPS")
                     }
                 }

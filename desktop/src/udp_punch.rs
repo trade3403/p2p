@@ -108,7 +108,7 @@ fn run(
         "v": 1, "type": "candidate", "role": "host",
         "ip": mapped.ip().to_string(), "port": mapped.port()
     }))?;
-    outbound.send(candidate).map_err(|_| anyhow::anyhow!("signal channel closed"))?;
+    outbound.send(candidate.clone()).map_err(|_| anyhow::anyhow!("signal channel closed"))?;
     let _ = log.send("V0.9 UDP 映射已发现，等待 Android 候选地址与加密握手".into());
 
     let challenge = crate::protocol::new_secret(); // use first 16 bytes as opaque challenge
@@ -116,6 +116,7 @@ fn run(
     let mut remote: Option<SocketAddrV4> = None;
     let mut confirmed_at: Option<Instant> = None;
     let mut last_sent = Instant::now() - Duration::from_millis(300);
+    let mut last_candidate = Instant::now();
     let started = Instant::now();
     let mut packet = [0u8; 256];
 
@@ -128,6 +129,12 @@ fn run(
         }
         while let Ok(peer) = peers.try_recv() {
             remote = Some(peer);
+        }
+        // Best-effort relay has a bounded queue and may drop signaling under
+        // screen-frame backpressure. Retransmit candidate while waiting.
+        if remote.is_none() && last_candidate.elapsed() >= Duration::from_millis(1500) {
+            let _ = outbound.send(candidate.clone());
+            last_candidate = Instant::now();
         }
         if let Some(peer) = remote {
             if last_sent.elapsed() >= Duration::from_millis(300) {
@@ -161,7 +168,9 @@ fn run(
             Err(err) => return Err(err).context("UDP receive failed"),
         }
     }
-    if session_running.load(Ordering::SeqCst) && !abort.load(Ordering::SeqCst) {
+    if confirmed_at.is_none() && session_running.load(Ordering::SeqCst)
+        && !abort.load(Ordering::SeqCst)
+    {
         let _ = log.send("UDP 双端探测超时（可能为对称 NAT/防火墙）；继续 VPS 中转".into());
     }
     Ok(())
