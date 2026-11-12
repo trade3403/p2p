@@ -2,7 +2,7 @@ use crate::protocol;
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::{sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, mpsc::Sender}, time::Duration};
+use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::Sender}, time::Duration};
 use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, http::HeaderValue, Message}};
 
 #[derive(Clone)]
@@ -14,6 +14,10 @@ pub struct HostConfig {
     pub allow_input: Arc<AtomicBool>,
     pub allow_clipboard: Arc<AtomicBool>,
     pub monitor_index: Arc<AtomicUsize>,
+    pub h264_enabled: Arc<AtomicBool>,
+    pub target_fps: Arc<AtomicU32>,
+    pub sent_frames: Arc<AtomicU64>,
+    pub dropped_frames: Arc<AtomicU64>,
     pub messages: Sender<String>,
 }
 
@@ -79,20 +83,24 @@ async fn run(config: &HostConfig) -> Result<()> {
         .await.context("relay connection timed out")??;
     let _ = config.messages.send("已连接中转服务器 · 等待已授权手机连接".into());
     let (mut outgoing, mut incoming) = socket.split();
-    let mut ticker = tokio::time::interval(Duration::from_millis(150));
+    let mut frames = crate::video::spawn_frames(
+        config.monitor_index.clone(),
+        config.h264_enabled.clone(),
+        config.target_fps.clone(),
+        config.dropped_frames.clone(),
+    );
     let mut metadata_tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
+            frame = frames.recv() => {
                 if !config.running.load(Ordering::SeqCst) { break; }
-                #[cfg(windows)]
-                {
-                    if let Ok(jpg) = capture_jpeg(config.monitor_index.load(Ordering::SeqCst)) {
-                        let packet = protocol::encrypt(&config.secret, protocol::FRAME, &jpg)?;
-                        tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
-                            .await.context("video send timed out")??;
-                    }
-                }
+                let Some((kind, bytes)) = frame else {
+                    return Err(anyhow!("screen capture worker exited unexpectedly"));
+                };
+                let packet = protocol::encrypt(&config.secret, kind, &bytes)?;
+                tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
+                    .await.context("video send timed out")??;
+                config.sent_frames.fetch_add(1, Ordering::Relaxed);
             }
             _ = metadata_tick.tick() => {
                 #[cfg(windows)]
@@ -162,19 +170,6 @@ async fn run(config: &HostConfig) -> Result<()> {
     let _ = outgoing.close().await;
     let _ = config.messages.send("连接已断开".into());
     Ok(())
-}
-
-#[cfg(windows)]
-fn capture_jpeg(index: usize) -> Result<Vec<u8>> {
-    use image::{codecs::jpeg::JpegEncoder, DynamicImage, RgbaImage, imageops::FilterType};
-    let screen = screenshots::Screen::all()?.into_iter().nth(index).context("selected display missing")?;
-    let capture = screen.capture()?;
-    let (w, h) = (capture.width(), capture.height());
-    let rgba = RgbaImage::from_raw(w, h, capture.into_raw()).context("bad screenshot buffer")?;
-    let img = DynamicImage::ImageRgba8(rgba).resize(1280, 800, FilterType::Triangle);
-    let mut output = Vec::new();
-    JpegEncoder::new_with_quality(&mut output, 58).encode_image(&img)?;
-    Ok(output)
 }
 
 #[derive(Deserialize)]

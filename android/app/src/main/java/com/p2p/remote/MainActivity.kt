@@ -4,11 +4,15 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.Surface
+import android.view.TextureView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -23,6 +27,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -71,6 +76,22 @@ class MainActivity : ComponentActivity() {
     private var lastFrameAtMs = 0L
     private var status by mutableStateOf("等待配置服务器")
     private var frame by mutableStateOf<Bitmap?>(null)
+    private var h264Active by mutableStateOf(false)
+    private var h264Width by mutableIntStateOf(1280)
+    private var h264Height by mutableIntStateOf(720)
+    private val avcDecoder by lazy {
+        H264SurfaceDecoder(
+            onRendered = { main.post {
+                if (requested && h264Active) {
+                    receivingFrames = true
+                    lastFrameAtMs = SystemClock.elapsedRealtime()
+                    retryAttempt = 0
+                    status = "已连接家庭电脑 · H.264 正在播放"
+                }
+            } },
+            onDecoderError = { message -> main.post { if (requested) status = message } },
+        )
+    }
     private var clipboardResult by mutableStateOf("")
     private var monitorCount by mutableIntStateOf(1)
     private var selectedMonitor by mutableIntStateOf(0)
@@ -94,7 +115,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(8.dp))
                     Text("P2P  /  REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("我的远程桌面",fontSize=29.sp,fontWeight=FontWeight.Bold)
-                    Text("Android 控制端  ·  V0.5 测试版",fontSize=13.sp,color=Muted)
+                    Text("Android 控制端  ·  V0.6 测试版",fontSize=13.sp,color=Muted)
                     PanelCard {
                         Text("01   已授权的家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text(if(savedPairAvailable)"已在 Android Keystore 加密保存一台电脑"
@@ -164,27 +185,80 @@ class MainActivity : ComponentActivity() {
                             Text(if(receivingFrames)"● 正在接收画面" else if(online)"○ 等待家庭电脑" else "○ 未连接",fontSize=12.sp,color=if(receivingFrames)Color(0xFF72D9AB) else Muted)
                         }
                         val bitmap = frame
-                        Box(Modifier.fillMaxWidth().height(260.dp).background(Color(0xFF0F1625),RoundedCornerShape(12.dp)),contentAlignment=Alignment.Center) {
-                            if(bitmap!=null) {
-                                Image(bitmap=bitmap.asImageBitmap(),contentDescription="授权的 Windows 桌面",modifier=Modifier.fillMaxSize().pointerInput(bitmap.width,bitmap.height,online){
-                                    if(!online)return@pointerInput
+                        val displayWidth = if(h264Active) h264Width else (bitmap?.width ?: 1280)
+                        val displayHeight = if(h264Active) h264Height else (bitmap?.height ?: 720)
+                        Box(
+                            Modifier.fillMaxWidth().height(260.dp)
+                                .background(Color(0xFF0F1625),RoundedCornerShape(12.dp))
+                                .pointerInput(online, h264Active, displayWidth, displayHeight) {
+                                    if (!online) return@pointerInput
                                     awaitEachGesture {
-                                        val down=awaitFirstDown(requireUnconsumed=false)
-                                        val first=coordinate(down.position,size.width.toFloat(),size.height.toFloat(),bitmap.width,bitmap.height)
-                                        pointerX=first.first;pointerY=first.second
+                                        val down = awaitFirstDown(requireUnconsumed=false)
+                                        val first = coordinate(
+                                            down.position,size.width.toFloat(),size.height.toFloat(),
+                                            displayWidth,displayHeight
+                                        )
+                                        pointerX=first.first; pointerY=first.second
                                         sendControl("down",first.first,first.second)
                                         do {
-                                            val e=awaitPointerEvent()
-                                            val change=e.changes.firstOrNull() ?: break
-                                            val p=coordinate(change.position,size.width.toFloat(),size.height.toFloat(),bitmap.width,bitmap.height)
-                                            pointerX=p.first;pointerY=p.second
-                                            if(change.pressed) sendControl("move",p.first,p.second)
-                                            else {sendControl("up",p.first,p.second);break}
-                                        }while(true)
+                                            val event=awaitPointerEvent()
+                                            val change=event.changes.firstOrNull() ?: break
+                                            val position=coordinate(
+                                                change.position,size.width.toFloat(),size.height.toFloat(),
+                                                displayWidth,displayHeight
+                                            )
+                                            pointerX=position.first; pointerY=position.second
+                                            if(change.pressed) sendControl("move",position.first,position.second)
+                                            else {
+                                                sendControl("up",position.first,position.second)
+                                                break
+                                            }
+                                        } while(true)
                                     }
-                                },contentScale=androidx.compose.ui.layout.ContentScale.Fit)
-                            } else Text("连接后在这里显示电脑屏幕",color=Muted,fontSize=13.sp)
+                                },
+                            contentAlignment=Alignment.Center
+                        ) {
+                            if(h264Active){
+                                AndroidView(
+                                    factory={ context ->
+                                        TextureView(context).apply {
+                                            surfaceTextureListener=object:TextureView.SurfaceTextureListener {
+                                                override fun onSurfaceTextureAvailable(texture:SurfaceTexture,width:Int,height:Int) {
+                                                    avcDecoder.attachSurface(Surface(texture))
+                                                }
+                                                override fun onSurfaceTextureSizeChanged(texture:SurfaceTexture,width:Int,height:Int) {}
+                                                override fun onSurfaceTextureDestroyed(texture:SurfaceTexture):Boolean {
+                                                    avcDecoder.attachSurface(null)
+                                                    return true
+                                                }
+                                                override fun onSurfaceTextureUpdated(texture:SurfaceTexture) {}
+                                            }
+                                        }
+                                    },
+                                    update={ view ->
+                                        view.post {
+                                            if(view.width>0 && view.height>0 && displayWidth>0 && displayHeight>0){
+                                                val factor=min(view.width.toFloat()/displayWidth,view.height.toFloat()/displayHeight)
+                                                val xScale=displayWidth*factor/view.width
+                                                val yScale=displayHeight*factor/view.height
+                                                val matrix=Matrix()
+                                                matrix.setScale(xScale,yScale,view.width/2f,view.height/2f)
+                                                view.setTransform(matrix)
+                                            }
+                                        }
+                                    },
+                                    modifier=Modifier.fillMaxSize()
+                                )
+                                if(!receivingFrames) Text("H.264 解码中；首次关键帧可能需要数秒",color=Muted,fontSize=12.sp)
+                            }else if(bitmap!=null){
+                                Image(bitmap=bitmap.asImageBitmap(),contentDescription="授权的 Windows 桌面",
+                                    modifier=Modifier.fillMaxSize(),contentScale=androidx.compose.ui.layout.ContentScale.Fit)
+                            }else{
+                                Text("连接后在这里显示电脑屏幕",color=Muted,fontSize=13.sp)
+                            }
                         }
+                        Text(if(h264Active)"视频模式：H.264 · Android MediaCodec"
+                            else "视频模式：JPEG（兼容模式）",color=Muted,fontSize=12.sp)
                         Text("触摸 = 左键 · 滑动 = 拖拽（电脑端需要授权）",color=Muted,fontSize=12.sp)
                         Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(7.dp)) {
                             Text("显示器 ${selectedMonitor+1}/$monitorCount",fontSize=13.sp,color=Muted,modifier=Modifier.weight(1f))
@@ -300,12 +374,28 @@ class MainActivity : ComponentActivity() {
                             val decoded = BitmapFactory.decodeByteArray(original.second, 0, original.second.size)
                             if (decoded != null) main.post {
                                 if (socket === webSocket && requested) {
+                                    if(h264Active) avcDecoder.reset()
                                     frame = decoded
+                                    h264Active = false
                                     receivingFrames = true
                                     lastFrameAtMs = SystemClock.elapsedRealtime()
                                     retryAttempt = 0
                                     status = "已连接家庭电脑 · 正在接收画面"
                                 }
+                            }
+                        }
+                        5 -> {
+                            val accessUnit = AvcPayload.parse(original.second)
+                            if(accessUnit != null) {
+                                main.post {
+                                    if(socket===webSocket && requested){
+                                        h264Width=accessUnit.width
+                                        h264Height=accessUnit.height
+                                        h264Active=true
+                                        frame=null
+                                    }
+                                }
+                                avcDecoder.offer(accessUnit.bytes)
                             }
                         }
                         3 -> {
@@ -337,6 +427,8 @@ class MainActivity : ComponentActivity() {
                     online = false
                     receivingFrames = false
                     frame = null
+                    h264Active = false
+                    avcDecoder.reset()
                     stopWatchdog()
                     if (response?.code == 401 || response?.code == 403) {
                         requested = false
@@ -356,6 +448,8 @@ class MainActivity : ComponentActivity() {
                     online = false
                     receivingFrames = false
                     frame = null
+                    h264Active = false
+                    avcDecoder.reset()
                     stopWatchdog()
                     scheduleRetry("连接已断开（$code）")
                 }
@@ -409,6 +503,8 @@ class MainActivity : ComponentActivity() {
         receivingFrames = false
         retryAttempt = 0
         frame = null
+        h264Active = false
+        avcDecoder.reset()
         clipboardResult = ""
         monitorCount = 1
         selectedMonitor = 0
@@ -442,7 +538,12 @@ class MainActivity : ComponentActivity() {
         if(!online)return
         try{ws.send(encryptPacket(s,2,data.toString().toByteArray()).toByteString())}catch(_:Exception){}
     }
-    override fun onDestroy(){disconnect();client.dispatcher.executorService.shutdown();super.onDestroy()}
+    override fun onDestroy(){
+        disconnect()
+        avcDecoder.close()
+        client.dispatcher.executorService.shutdown()
+        super.onDestroy()
+    }
 }
 
 private fun coordinate(point:Offset,viewW:Float,viewH:Float,imageW:Int,imageH:Int):Pair<Float,Float>{
