@@ -16,6 +16,7 @@ pub struct HostConfig {
     pub monitor_index: Arc<AtomicUsize>,
     pub lan_direct: Arc<AtomicBool>,
     pub lan_active: Arc<AtomicBool>,
+    pub allow_udp_probe: Arc<AtomicBool>,
     pub h264_enabled: Arc<AtomicBool>,
     pub target_fps: Arc<AtomicU32>,
     pub sent_frames: Arc<AtomicU64>,
@@ -129,8 +130,21 @@ where
         config.dropped_frames.clone(),
     );
     let mut metadata_tick = tokio::time::interval(Duration::from_secs(5));
+    let (udp_signal_tx, mut udp_signal_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let mut udp_probe: Option<crate::udp_punch::Probe> = None;
     loop {
         tokio::select! {
+            signal = udp_signal_rx.recv() => {
+                if let Some(payload) = signal {
+                    if config.running.load(Ordering::SeqCst) {
+                        let packet = protocol::encrypt(
+                            &config.secret, crate::udp_punch::SIGNAL, &payload
+                        )?;
+                        outgoing.send(Message::Binary(packet)).await?;
+                    }
+                }
+            }
             frame = frames.recv() => {
                 if !config.running.load(Ordering::SeqCst) { break; }
                 // When an authenticated LAN viewer is active, do not waste
@@ -163,7 +177,31 @@ where
                 match next {
                     Some(Ok(Message::Binary(packet))) => {
                         if let Ok((kind, bytes)) = protocol::decrypt(&config.secret, &packet) {
-                            if kind == protocol::PING && bytes.len() == 8 {
+                            if kind == crate::udp_punch::SIGNAL && !is_lan_session
+                                && config.allow_udp_probe.load(Ordering::SeqCst)
+                            {
+                                if crate::udp_punch::is_request(&bytes) {
+                                    // One bounded test per authenticated VPS session.
+                                    // Never start a listener just because an untrusted
+                                    // relay packet arrived: SIGNAL is AES-GCM verified.
+                                    if udp_probe.is_none() {
+                                        let probe = crate::udp_punch::start(
+                                            config.secret,
+                                            config.server.clone(),
+                                            config.running.clone(),
+                                            config.messages.clone(),
+                                            udp_signal_tx.clone(),
+                                        );
+                                        udp_probe = Some(probe);
+                                    }
+                                } else if let Some(peer) =
+                                    crate::udp_punch::parse_candidate(&bytes, "viewer")
+                                {
+                                    if let Some(probe) = udp_probe.as_ref() {
+                                        let _ = probe.peer_tx.send(peer);
+                                    }
+                                }
+                            } else if kind == protocol::PING && bytes.len() == 8 {
                                 // Authenticated application-level ping works on both
                                 // LAN direct and WSS relay; no user data is exposed.
                                 let pong = protocol::encrypt(&config.secret, protocol::PONG, &bytes)?;
@@ -221,6 +259,7 @@ where
             }
         }
     }
+    drop(udp_probe);
     let _ = outgoing.close().await;
     let _ = config.messages.send("连接已断开".into());
     Ok(())

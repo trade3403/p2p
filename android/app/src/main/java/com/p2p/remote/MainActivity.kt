@@ -83,6 +83,9 @@ class MainActivity : ComponentActivity() {
     private var status by mutableStateOf("等待配置服务器")
     private var stunReport by mutableStateOf("STUN UDP 尚未探测")
     private var rttMs by mutableStateOf<Long?>(null)
+    private var udpProbe: UdpPunchProbe? = null
+    private var udpAttempted by mutableStateOf(false)
+    private var udpReport by mutableStateOf("未执行公网 UDP 双端验证")
     private var lastPingNonce = 0L
     private var lastPingTimeMs = 0L
     private var frame by mutableStateOf<Bitmap?>(null)
@@ -129,7 +132,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(8.dp))
                     Text("P2P  /  REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("我的远程桌面",fontSize=29.sp,fontWeight=FontWeight.Bold)
-                    Text("Android 控制端  ·  V0.8 测试版",fontSize=13.sp,color=Muted)
+                    Text("Android 控制端  ·  V0.9 测试版",fontSize=13.sp,color=Muted)
                     PanelCard {
                         Text("01   已授权的家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text(if(savedPairAvailable)"已在 Android Keystore 加密保存一台电脑"
@@ -206,6 +209,15 @@ class MainActivity : ComponentActivity() {
                         }
                         Text(status,color=if(receivingFrames)Color(0xFF72D9AB) else Muted,fontSize=13.sp)
                         Text("当前链路：$transport",color=Accent,fontSize=13.sp)
+                        Row(verticalAlignment=Alignment.CenterVertically,
+                            horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                            Button(onClick={startUdpPunch()},
+                                enabled=online && !usingLan && activeToken.length >= 32 && !udpAttempted
+                            ) { Text("测试公网 UDP 直连") }
+                            Text(udpReport,color=Muted,fontSize=12.sp,modifier=Modifier.weight(1f))
+                        }
+                        Text("仅检测加密 UDP 双向通信；不会切换屏幕传输链路。",
+                            color=Muted,fontSize=12.sp)
                         Text("端到端信令 RTT：${rttMs?.let{"$it ms"} ?: "等待响应"}",
                             color=Muted,fontSize=12.sp)
                         Text("只有主动点击加密保存才会存储可信配对；网络中断期间允许当前会话自动重连",color=Muted,fontSize=12.sp)
@@ -438,6 +450,23 @@ class MainActivity : ComponentActivity() {
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (socket !== webSocket || !requested) return
+                // Signaling must not be dropped by a busy JPEG/H.264 decoder.
+                // AES-GCM authenticates this outer message kind as AAD.
+                if (bytes.size > 0 && (bytes[0].toInt() and 255) == 10) {
+                    try {
+                        val key = secret ?: return
+                        val message = decryptPacket(key, bytes.toByteArray())
+                        if (message.first == 10 && message.second.size in 2..256 && !tryLan) {
+                            val candidate = JSONObject(message.second.toString(Charsets.UTF_8))
+                            main.post {
+                                if (socket === webSocket && requested) {
+                                    udpProbe?.setCandidate(candidate)
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                    return
+                }
                 if (!decoding.compareAndSet(false, true)) return
                 try {
                     val key = secret ?: return
@@ -531,6 +560,10 @@ class MainActivity : ComponentActivity() {
                     if (socket !== webSocket || !requested) return@post
                     socket = null
                     online = false
+                    udpProbe?.stop()
+                    udpProbe = null
+                    udpAttempted = false
+                    udpReport = "连接已断开，待新会话重新验证"
                     rttMs = null
                     lastPingTimeMs = 0L
                     receivingFrames = false
@@ -567,6 +600,10 @@ class MainActivity : ComponentActivity() {
                     if (socket !== webSocket || !requested) return@post
                     socket = null
                     online = false
+                    udpProbe?.stop()
+                    udpProbe = null
+                    udpAttempted = false
+                    udpReport = "连接已断开，待新会话重新验证"
                     rttMs = null
                     lastPingTimeMs = 0L
                     receivingFrames = false
@@ -625,6 +662,49 @@ class MainActivity : ComponentActivity() {
         }.also { main.postDelayed(it, 5_000L) }
     }
 
+    private fun startUdpPunch() {
+        val ws = socket ?: return
+        val key = secret?.copyOf() ?: return
+        if (!requested || !online || usingLan || activeToken.length < 32 || udpAttempted) return
+        udpAttempted = true
+        udpReport = "已申请双方加密 UDP 连通性探测"
+        udpProbe?.stop()
+        val probe = UdpPunchProbe(
+            relayUrl = activeEndpoint.substringBeforeLast("/relay?"),
+            secret = key,
+            signal = { json ->
+                main.post {
+                    if (requested && socket === ws) {
+                        try { ws.send(encryptPacket(key, 10,
+                            json.toByteArray(Charsets.UTF_8)).toByteString()) }
+                        catch (_: Exception) {}
+                    }
+                }
+            },
+            updateStatus = { result ->
+                main.post { if (requested && socket === ws) udpReport = result }
+            },
+        )
+        udpProbe = probe
+        try {
+            // Send request BEFORE STUN: the host must create its receive queue
+            // before our encrypted candidate can arrive through the relay.
+            val request = JSONObject().put("v",1).put("type","request").toString()
+            val accepted = ws.send(
+                encryptPacket(key,10,request.toByteArray(Charsets.UTF_8)).toByteString()
+            )
+            if (accepted) {
+                probe.start()
+            } else {
+                udpReport = "UDP 请求未发送，保留 VPS"
+                probe.stop()
+            }
+        } catch (_: Exception) {
+            udpReport = "UDP 请求未发送，保留 VPS"
+            probe.stop()
+        }
+    }
+
     private fun sendPing() {
         val currentKey = secret ?: return
         val ws = socket ?: return
@@ -658,6 +738,10 @@ class MainActivity : ComponentActivity() {
 
     private fun disconnect() {
         requested = false
+        udpProbe?.stop()
+        udpProbe = null
+        udpAttempted = false
+        udpReport = "未执行公网 UDP 双端验证"
         retryTask?.let { main.removeCallbacks(it) }
         retryTask = null
         stopWatchdog()

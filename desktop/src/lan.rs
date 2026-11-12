@@ -142,6 +142,7 @@ mod tests {
             monitor_index: Arc::new(AtomicUsize::new(0)),
             lan_direct: Arc::new(AtomicBool::new(true)),
             lan_active: Arc::new(AtomicBool::new(false)),
+            allow_udp_probe: Arc::new(AtomicBool::new(false)),
             h264_enabled: Arc::new(AtomicBool::new(false)),
             target_fps: Arc::new(AtomicU32::new(6)),
             sent_frames: Arc::new(AtomicU64::new(0)),

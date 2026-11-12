@@ -7,6 +7,7 @@ mod trusted_profile;
 mod video;
 mod lan;
 mod stun;
+mod udp_punch;
 
 use iced::{widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
@@ -32,6 +33,7 @@ struct App {
     monitor_index: Arc<AtomicUsize>,
     lan_direct: Arc<AtomicBool>,
     lan_active: Arc<AtomicBool>,
+    allow_udp_probe: Arc<AtomicBool>,
     h264_enabled: Arc<AtomicBool>,
     target_fps: Arc<AtomicU32>,
     sent_frames: Arc<AtomicU64>,
@@ -61,6 +63,7 @@ impl Default for App {
             monitor_index: Arc::new(AtomicUsize::new(0)),
             lan_direct: Arc::new(AtomicBool::new(false)),
             lan_active: Arc::new(AtomicBool::new(false)),
+            allow_udp_probe: Arc::new(AtomicBool::new(false)),
             h264_enabled: Arc::new(AtomicBool::new(false)),
             target_fps: Arc::new(AtomicU32::new(12)),
             sent_frames: Arc::new(AtomicU64::new(0)),
@@ -91,6 +94,7 @@ impl Default for App {
                 monitor_index: app.monitor_index.clone(),
                 lan_direct: app.lan_direct.clone(),
                 lan_active: app.lan_active.clone(),
+                allow_udp_probe: app.allow_udp_probe.clone(),
                 h264_enabled: app.h264_enabled.clone(),
                 target_fps: app.target_fps.clone(),
                 sent_frames: app.sent_frames.clone(),
@@ -114,7 +118,7 @@ impl Drop for App {
 #[derive(Debug, Clone)]
 enum Msg { Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
-    H264(bool), Fps(u32), Lan(bool), ProbeNetwork, Start, Stop, NewKey, Tick }
+    H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), ProbeNetwork, Start, Stop, NewKey, Tick }
 
 fn update(state: &mut App, msg: Msg) {
     match msg {
@@ -140,6 +144,9 @@ fn update(state: &mut App, msg: Msg) {
                 let _ = tx.send(result);
             });
         }
+        Msg::AllowUdpProbe(value) if !state.running.load(Ordering::SeqCst) => {
+            state.allow_udp_probe.store(value, Ordering::SeqCst);
+        },
         Msg::Lan(value) if !state.running.load(Ordering::SeqCst) => {
             state.lan_direct.store(value, Ordering::SeqCst);
         },
@@ -222,6 +229,7 @@ fn update(state: &mut App, msg: Msg) {
                 monitor_index: state.monitor_index.clone(),
                 lan_direct: state.lan_direct.clone(),
                 lan_active: state.lan_active.clone(),
+                allow_udp_probe: state.allow_udp_probe.clone(),
                 h264_enabled: state.h264_enabled.clone(),
                 target_fps: state.target_fps.clone(),
                 sent_frames: state.sent_frames.clone(),
@@ -271,7 +279,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let top = row![
         column![text("P2P  /  REMOTE").size(14).color(Color::from_rgb8(127,171,255)),
                 text("个人远程桌面").size(33),
-                text("Rust 原生客户端  ·  Windows Host  ·  V0.8 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
+                text("Rust 原生客户端  ·  Windows Host  ·  V0.9 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
         container(text(if active {"●  服务已启动"} else {"○  尚未连接"}).size(14))
             .padding([12,20])
@@ -381,11 +389,26 @@ fn view(state: &App) -> Element<'_, Msg> {
         text(&state.diagnostics).size(14),
         text("STUN 探测使用独立短期 UDP Socket：不交换真实候选地址，也不传输密钥。").size(13)
             .color(Color::from_rgb8(204,178,130)),
-        text("公网 NAT 穿透/ICE 将在后续阶段实施；本版仅验证探测和中转往返时间。").size(13)
+        text("V0.9 通过加密候选交换尝试真实 UDP 双端握手；画面仍通过 VPS WSS。").size(13)
             .color(Color::from_rgb8(158,172,199)),
     ].spacing(14));
 
-    container(scrollable(container(column![top, connection, direct, safety, trust, video, status, diagnostics].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
+    let udp = card(column![
+        heading("08 / 公网 UDP 双端连通性", "Android 主动发起，电脑明确允许后才尝试"),
+        checkbox("允许已配对 Android 发起 UDP 直连测试（不会传输屏幕画面）",
+            state.allow_udp_probe.load(Ordering::SeqCst))
+            .on_toggle(Msg::AllowUdpProbe).size(16),
+        text("请在启动服务前勾选。手机连接 VPS 后点击“测试 UDP 直连”；本机无须手动开放 UDP 端口。").size(13)
+            .color(Color::from_rgb8(158,172,199)),
+        text("双方候选地址仅在端到端加密 WSS 消息中交换；UDP 只传输加密挑战响应。").size(13)
+            .color(Color::from_rgb8(158,172,199)),
+        text("若看到“UDP 握手成功”，仅说明 12 秒内双方可互发加密探测包，并非视频已切换。").size(13)
+            .color(Color::from_rgb8(204,178,130)),
+        text("默认关闭。需要 VPS 已启用 STUN UDP 3478；不支持完整 ICE/TURN 或 QUIC 视频。").size(13)
+            .color(Color::from_rgb8(204,178,130)),
+    ].spacing(13));
+
+    container(scrollable(container(column![top, connection, direct, safety, trust, video, status, diagnostics, udp].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
         .width(Length::Fill).height(Length::Fill)
         .center_x(Length::Fill).into()
 }

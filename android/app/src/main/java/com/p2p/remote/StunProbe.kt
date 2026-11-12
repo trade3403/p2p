@@ -51,24 +51,37 @@ internal object StunProbe {
         return null
     }
 
-    fun probe(relayUrl: String): Observation {
+    fun probe(relayUrl: String): Observation =
+        DatagramSocket().use { socket -> probeOnSocket(socket, relayUrl) }
+
+    /**
+     * V0.9: a caller-owned socket discovers its mapping and remains bound for
+     * authenticated peer-to-peer datagrams after this function returns.
+     */
+    fun probeOnSocket(socket: DatagramSocket, relayUrl: String): Observation {
         val parsed = URI(relayUrl.trim())
-        require(parsed.scheme == "wss" || parsed.scheme == "https") { "需要 HTTPS/WSS 中转地址" }
-        require(parsed.rawUserInfo == null && parsed.rawQuery == null && parsed.rawFragment == null)
+        require(parsed.scheme == "wss" || parsed.scheme == "https") {
+            "需要 HTTPS/WSS 中转地址"
+        }
+        require(parsed.rawUserInfo == null && parsed.rawQuery == null &&
+            parsed.rawFragment == null)
         val host = requireNotNull(parsed.host) { "缺少中转域名" }
-        val addr = InetAddress.getAllByName(host).firstOrNull { it is Inet4Address }
+        val addr = InetAddress.getAllByName(host)
+            .firstOrNull { it is Inet4Address }
             ?: throw IllegalArgumentException("STUN 服务器缺少 IPv4 地址")
         val req = request()
-        DatagramSocket().use { socket ->
-            socket.soTimeout = 2000
-            socket.connect(addr, PORT)
-            val started = System.nanoTime()
-            socket.send(DatagramPacket(req,req.size))
-            val response = DatagramPacket(ByteArray(512),512)
-            socket.receive(response)
-            val external = parseResponse(response.data.copyOf(response.length),req)
-                ?: error("STUN 回复无效或事务 ID 不匹配")
-            return Observation(external,(System.nanoTime()-started)/1_000_000L)
+        socket.soTimeout = 2000
+        val started = System.nanoTime()
+        // Do not socket.connect(): this same UDP socket must later accept
+        // datagrams from the remote peer, not just the STUN server.
+        socket.send(DatagramPacket(req, req.size, addr, PORT))
+        val response = DatagramPacket(ByteArray(512), 512)
+        socket.receive(response)
+        require(response.address == addr && response.port == PORT) {
+            "STUN 回复来自意外地址"
         }
+        val external = parseResponse(response.data.copyOf(response.length), req)
+            ?: error("STUN 回复无效或事务 ID 不匹配")
+        return Observation(external, (System.nanoTime() - started) / 1_000_000L)
     }
 }

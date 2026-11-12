@@ -58,7 +58,8 @@ pub fn parse_response(response: &[u8], req: &[u8;20]) -> Result<SocketAddrV4> {
     bail!("no IPv4 XOR-MAPPED-ADDRESS in STUN response")
 }
 
-pub fn probe_from_relay(relay_url: &str) -> Result<(SocketAddrV4, Duration)> {
+/// Resolve the private VPS hostname for the diagnostic UDP/STUN service.
+fn server_from_relay(relay_url: &str) -> Result<SocketAddr> {
     let url = url::Url::parse(relay_url.trim()).context("invalid relay URL")?;
     if !matches!(url.scheme(), "https" | "wss")
         || !url.username().is_empty() || url.password().is_some()
@@ -67,26 +68,49 @@ pub fn probe_from_relay(relay_url: &str) -> Result<(SocketAddrV4, Duration)> {
         bail!("a clean HTTPS/WSS relay address is required");
     }
     let host = url.host_str().ok_or_else(|| anyhow!("missing relay hostname"))?;
-    let server = (host,UDP_PORT).to_socket_addrs()
+    (host, UDP_PORT).to_socket_addrs()
         .context("STUN DNS lookup failed")?
-        .find(|addr| matches!(addr,SocketAddr::V4(_)))
-        .context("STUN server has no IPv4 address")?;
+        .find(|addr| matches!(addr, SocketAddr::V4(_)))
+        .context("STUN server has no IPv4 address")
+}
+
+pub fn probe_from_relay(relay_url: &str) -> Result<(SocketAddrV4, Duration)> {
+    let server = server_from_relay(relay_url)?;
     probe(server)
 }
 
-pub fn probe(server: SocketAddr) -> Result<(SocketAddrV4,Duration)> {
+/// V0.9: probe with a socket that REMAINS open so the discovered mapping can
+/// be used immediately for authenticated UDP checks. Caller owns its lifetime.
+pub fn probe_bound_socket(
+    socket: &UdpSocket, relay_url: &str,
+) -> Result<(SocketAddrV4, Duration)> {
+    let server = server_from_relay(relay_url)?;
+    probe_on_socket(socket, server)
+}
+
+pub fn probe(server: SocketAddr) -> Result<(SocketAddrV4, Duration)> {
     if !server.is_ipv4() { bail!("only IPv4 STUN diagnostics supported"); }
-    let sock = UdpSocket::bind("0.0.0.0:0").context("cannot bind local UDP")?;
-    sock.set_read_timeout(Some(Duration::from_secs(2)))?;
-    sock.set_write_timeout(Some(Duration::from_secs(2)))?;
-    sock.connect(server)?;
-    let req=request();
-    let start=Instant::now();
-    sock.send(&req).context("STUN request could not be sent")?;
-    let mut bytes=[0u8;STUN_MAX];
-    let n=sock.recv(&mut bytes).context("STUN response timeout or UDP blocked")?;
-    let address=parse_response(&bytes[..n],&req)?;
-    Ok((address,start.elapsed()))
+    let socket = UdpSocket::bind("0.0.0.0:0").context("cannot bind local UDP")?;
+    probe_on_socket(&socket, server)
+}
+
+pub fn probe_on_socket(
+    socket: &UdpSocket, server: SocketAddr,
+) -> Result<(SocketAddrV4, Duration)> {
+    if !server.is_ipv4() { bail!("only IPv4 STUN diagnostics supported"); }
+    socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let req = request();
+    let start = Instant::now();
+    socket.send_to(&req, server).context("STUN request could not be sent")?;
+    let mut bytes = [0u8; STUN_MAX];
+    let (n, source) = socket.recv_from(&mut bytes)
+        .context("STUN response timeout or UDP blocked")?;
+    if source != server {
+        bail!("STUN response from unexpected network peer");
+    }
+    let mapped = parse_response(&bytes[..n], &req)?;
+    Ok((mapped, start.elapsed()))
 }
 
 #[cfg(test)]
