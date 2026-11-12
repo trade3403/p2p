@@ -7,6 +7,7 @@ pub const FRAME: u8 = 1;
 pub const CONTROL: u8 = 2;
 pub const CLIPBOARD: u8 = 3;
 pub const MONITORS: u8 = 4;
+pub const AVC: u8 = 5;
 
 pub fn new_secret() -> [u8; 32] {
     let mut secret = [0u8; 32];

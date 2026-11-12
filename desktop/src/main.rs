@@ -4,9 +4,10 @@ mod reconnect;
 mod local_settings;
 mod remote_ops;
 mod trusted_profile;
+mod video;
 
 use iced::{widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input}, Border, Color, Element, Length, Subscription, Theme};
-use std::{sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
+use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
 
 fn main() -> iced::Result {
     iced::application("P2P Remote · 个人远程桌面", update, view)
@@ -27,6 +28,10 @@ struct App {
     unattended_input: bool,
     trust_saved: bool,
     monitor_index: Arc<AtomicUsize>,
+    h264_enabled: Arc<AtomicBool>,
+    target_fps: Arc<AtomicU32>,
+    sent_frames: Arc<AtomicU64>,
+    dropped_frames: Arc<AtomicU64>,
     status: String,
     tx: Sender<String>,
     rx: Receiver<String>,
@@ -49,6 +54,10 @@ impl Default for App {
             allow_input: Arc::new(AtomicBool::new(false)),
             allow_clipboard: Arc::new(AtomicBool::new(false)),
             monitor_index: Arc::new(AtomicUsize::new(0)),
+            h264_enabled: Arc::new(AtomicBool::new(false)),
+            target_fps: Arc::new(AtomicU32::new(12)),
+            sent_frames: Arc::new(AtomicU64::new(0)),
+            dropped_frames: Arc::new(AtomicU64::new(0)),
             launch_on_login: trusted.as_ref().map(|p| p.launch_on_login).unwrap_or(false),
             unattended_input: trusted.as_ref().map(|p| p.unattended_input).unwrap_or(false),
             trust_saved: trusted.is_some(),
@@ -72,6 +81,10 @@ impl Default for App {
                 allow_input: app.allow_input.clone(),
                 allow_clipboard: app.allow_clipboard.clone(),
                 monitor_index: app.monitor_index.clone(),
+                h264_enabled: app.h264_enabled.clone(),
+                target_fps: app.target_fps.clone(),
+                sent_frames: app.sent_frames.clone(),
+                dropped_frames: app.dropped_frames.clone(),
                 messages: app.tx.clone(),
             });
         }
@@ -91,7 +104,7 @@ impl Drop for App {
 #[derive(Debug, Clone)]
 enum Msg { Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
-    Start, Stop, NewKey, Tick }
+    H264(bool), Fps(u32), Start, Stop, NewKey, Tick }
 
 fn update(state: &mut App, msg: Msg) {
     match msg {
@@ -99,6 +112,8 @@ fn update(state: &mut App, msg: Msg) {
         Msg::Token(s) if !state.running.load(Ordering::SeqCst) => state.relay_token = s,
         Msg::Allow(value) => state.allow_input.store(value, Ordering::SeqCst),
         Msg::Clipboard(value) => state.allow_clipboard.store(value, Ordering::SeqCst),
+        Msg::H264(value) => state.h264_enabled.store(value, Ordering::SeqCst),
+        Msg::Fps(value) if matches!(value, 6|12|20) => state.target_fps.store(value, Ordering::SeqCst),
         Msg::LoginStart(value) => state.launch_on_login = value,
         Msg::UnattendedInput(value) => state.unattended_input = value,
         Msg::SaveTrust => {
@@ -173,6 +188,10 @@ fn update(state: &mut App, msg: Msg) {
                 allow_input: state.allow_input.clone(),
                 allow_clipboard: state.allow_clipboard.clone(),
                 monitor_index: state.monitor_index.clone(),
+                h264_enabled: state.h264_enabled.clone(),
+                target_fps: state.target_fps.clone(),
+                sent_frames: state.sent_frames.clone(),
+                dropped_frames: state.dropped_frames.clone(),
                 messages: state.tx.clone(),
             });
         }
@@ -212,7 +231,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let top = row![
         column![text("P2P  /  REMOTE").size(14).color(Color::from_rgb8(127,171,255)),
                 text("个人远程桌面").size(33),
-                text("Rust 原生客户端  ·  Windows Host  ·  V0.5 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
+                text("Rust 原生客户端  ·  Windows Host  ·  V0.6 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
         container(text(if active {"●  服务已启动"} else {"○  尚未连接"}).size(14))
             .padding([12,20])
@@ -263,20 +282,40 @@ fn view(state: &App) -> Element<'_, Msg> {
         text("此版使用单会话密钥；撤销会轮换密钥，使旧手机失效，不提供逐设备公钥管理。").size(13)
             .color(Color::from_rgb8(158,172,199)),
     ].spacing(15));
+    let video = card(column![
+        heading("04 / 画质与网络", "优先验证真实 H.264 链路；默认 JPEG，手动打开软件 H.264"),
+        checkbox("启用 H.264 软件编码（Android MediaCodec 解码）",
+            state.h264_enabled.load(Ordering::SeqCst)).on_toggle(Msg::H264).size(16),
+        text("H.264 软件编码最高 1280×720；JPEG 默认约 6 FPS，H.264 帧率可选。").size(13)
+            .color(Color::from_rgb8(163,178,205)),
+        row![
+            button("节省带宽 · 6 FPS").on_press(Msg::Fps(6)).padding(10),
+            button("标准 · 12 FPS").on_press(Msg::Fps(12)).padding(10),
+            button("流畅 · 20 FPS").on_press(Msg::Fps(20)).padding(10)
+        ].spacing(10),
+        text(format!(
+            "当前请求 {} FPS · 已发送 {} 帧 · 队列丢帧 {}",
+            state.target_fps.load(Ordering::SeqCst),
+            state.sent_frames.load(Ordering::Relaxed),
+            state.dropped_frames.load(Ordering::Relaxed)
+        )).size(14),
+        text("数值只是编码请求与丢帧统计，不代表实测 FPS；本版不具备 GPU 硬件编码。").size(12)
+            .color(Color::from_rgb8(204,178,130)),
+    ].spacing(15));
     let status = card(column![
-        heading("04 / 运行状态", "实时连接状态 · 自动断线重连（最长等待 30 秒）"),
+        heading("05 / 运行状态", "实时连接状态 · 自动断线重连（最长等待 30 秒）"),
         text(&state.status).size(18),
         row![
             text(format!("当前显示器序号：{}", state.monitor_index.load(Ordering::SeqCst) + 1)).size(14),
             button("切换到下一显示器").on_press(Msg::NextMonitor).padding(10)
         ].spacing(14).align_y(iced::Alignment::Center),
-        text("Android V0.5：可选择使用 Keystore 保存一次性输入的可信配对。").size(13)
+        text("Android V0.6：自动识别 JPEG/H.264，两端须使用相同的大版本。").size(13)
             .color(Color::from_rgb8(158,172,199)),
         text("仅在点击加密保存后，本机才以当前 Windows 用户 DPAPI 保护口令与配对密钥。").size(13)
             .color(Color::from_rgb8(158,172,199)),
     ].spacing(14));
 
-    container(scrollable(container(column![top, connection, safety, trust, status].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
+    container(scrollable(container(column![top, connection, safety, trust, video, status].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
         .width(Length::Fill).height(Length::Fill)
         .center_x(Length::Fill).into()
 }

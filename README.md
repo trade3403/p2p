@@ -1,45 +1,57 @@
-# P2P Remote V0.5 — Explicit Trusted Home-PC Pairing (test build)
+# P2P Remote V0.6 — H.264 Video Channel (Test Build)
 
-A private Windows Rust/Iced host + Android Kotlin Compose viewer + self-hosted Go HTTPS/WSS relay. **This is an unsigned development test build, not an audited unattended-access service.**
+Private Windows Rust + Iced remote host, Android Kotlin/Jetpack Compose viewer, and self-hosted Go WebSocket relay.
 
-## New in V0.5
+**V0.6 introduces a real, opt-in H.264 video data path. The Windows encoder is OpenH264 software encoding, not GPU hardware encoding.** Android decodes using the system MediaCodec API (hardware support depends on the phone). JPEG remains the default compatibility mode. Neither mode is a security-audited commercial product.
 
-- **Windows current-user trusted pairing:** click **加密保存可信配对** to protect the relay bearer token and 32-byte session key using Windows DPAPI (CurrentUser). The existing public relay URL remains in regular preferences.
-- **Explicit login auto-start:** optionally tick **我同意 Windows 用户登录后自动启动并连接 VPS** and Save. Adds only a per-user HKCU Run registry entry (`P2PRemote.exe --autostart`), never a hidden system service. No admin privileges, no unattended access before Windows user login.
-- **Explicit persistent input consent:** a separate opt-in **我同意下次自动连接后允许已配对手机控制鼠标/键盘** controls whether input authorization is restored at the next *user-login* auto-connect. Off by default. Clipboard permission never auto-enables.
-- **Revoke:** Windows **撤销所有已记住的配对** stops the session, turns input and clipboard off, removes saved DPAPI credentials, disables per-user login startup, and rotates the encryption session key. Old Android profiles cannot join the new room.
-- **Android local trusted computer:** button to store one PC profile using an AES-256-GCM key in AndroidKeyStore. Only ciphertext is stored in private SharedPreferences; explicit **连接已保存的家庭电脑** connects by user request. **清除此手机** removes local ciphertext, but is **not** a Windows-side revocation.
-- Closing the visible Windows app stops remote streaming and input. No invisible persistence after exit.
-- **No new server-side identity** in this iteration. The existing relay still has one bearer token plus a single shared session secret; this is not per-device public-key authentication, enterprise device management, or a remote account system.
+## Changes from V0.5
 
-## Security and scope
+- Windows: new frame-producer thread with bounded two-frame queue. Capture/encoding no longer blocks the async socket loop responsible for mouse, clipboard and connection commands.
+- Windows: H.264 Annex-B access units via OpenH264 v0.9.9, limited to 1280×720; JPEG quality 58 remains available. Codec initializes on demand when the user toggles H.264 on. It is reset when switching displays or video formats, and every 30 frames for periodic SPS/PPS/IDR recovery.
+- Android: MediaCodec AVC decoder rendering directly to TextureView. JPEG decoding and interaction controls continue to work.
+- Protocol: AES-256-GCM encrypted type 5: `uint16BE width | uint16BE height | Annex-B H.264 access unit`; old JPEG type 1, control type 2, clipboard type 3, monitors type 4 remain intact.
+- FPS presets: 6 / 12 / 20 requested FPS in H.264 mode; JPEG stays at approximately 6 FPS. Actual throughput depends on CPU, encoder, relay bandwidth, Android decoder and network.
+- Sender queue drops stale/overflow frames instead of growing memory indefinitely; drop counter and sent packet counter shown in Windows UI.
+- V0.5 trusted pairing (Windows DPAPI, Android Keystore) and explicit host permission controls remain unchanged.
 
-Use only your own or explicitly authorized devices. The pairing secret is a password; anyone with the relay token **and** secret could connect. Never share it in screenshots or GitHub. Windows DPAPI protects data under the current user; malware running as that user could still access it. Android Keystore does not automatically require biometric authentication. Lock-screen control, UAC secure desktop, unattended pre-login Windows service, system tray, audio, files, and H.264 hardware streaming **are not implemented**.
+## Install
 
-### How to test V0.5
+From this private repository, open **Actions → V0.6 Windows Android Relay**, choose the same successful run and download its two Artifacts:
 
-1. Deploy the Go relay on your own Linux VPS, configure DNS + Caddy HTTPS, and keep port 8080 private. Copy `deploy/.env.example` to `deploy/.env`, configure `RELAY_DOMAIN` and generate `RELAY_ACCESS_TOKEN` via `openssl rand -hex 32`.
-2. Start Windows V0.5 `P2PRemote.exe` and enter the WSS URL and relay token. Tick either optional login/start or persistent-input consent (both default off).
-3. Click **加密保存可信配对**. You can also manually click **启动远程服务**. Do not expose the session key publicly.
-4. Open Android V0.5, enter the same WSS address, bearer token and 64-hex session key. Tap **加密保存配对** for one-click future use.
-5. On Android tap **连接已保存的家庭电脑**. If persistent-input consent is off, allow remote input only from the running Windows UI, as before.
-6. For the login-start scenario, sign out and back into the *same Windows user account*. If opted in, the visible desktop program starts and initiates the relay connection. Android still requires an explicit tap to connect.
-7. Revoke from Windows to immediately stop and rotate the room key. Clearing Android local data alone does not revoke a Windows-side trusted pair.
+- `P2PRemote-Windows-v0.6.0-test` — ZIP containing portable `P2PRemote.exe` plus SHA256 hash.
+- `P2PRemote-Android-v0.6.0-debug` — debug-signed installable APK plus SHA256 hash.
 
-**Important:** The Windows EXE path is recorded at time of opt-in. Moving the portable EXE afterward will break auto-start until you re-save the profile.
+Android and Windows should both be V0.6 to use the new video packet kind; v0.5 Android does not decode type 5. Start in JPEG mode, validate a working connection, then enable H.264 on Windows.
 
-## Build and artifacts
+## VPS setup is still required
 
-In private GitHub repository `chengzi1994999/p2p`, open **Actions → V0.5 Windows Android Relay → a successful run → Artifacts**.
+A Linux VPS with DNS and Docker Compose is not automatically provisioned by GitHub Actions. In the checked-out repository:
 
-- `P2PRemote-Windows-v0.5.0-test`: Windows Rust/Iced EXE ZIP, SHA-256 checksum.
-- `P2PRemote-Android-v0.5.0-debug`: Android Compose debug APK and SHA-256 checksum.
-- Go relay `go test -race` and Docker build are also validated.
+```bash
+cp deploy/.env.example deploy/.env
+# configure RELAY_DOMAIN and a fresh RELAY_ACCESS_TOKEN; keep .env out of Git!
+docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build
+curl -fsS https://YOUR_DOMAIN/healthz
+```
 
-These are **unsigned test binaries**. Building them does not deploy your VPS or prove device-to-device performance. No VPS domain or access credentials are stored in Git.
+The VPS must terminate TLS through Caddy and must **not** expose relay TCP 8080 publicly. Windows and Android both use `wss://YOUR_DOMAIN`, the same relay token, and the owner's session key. No static home IP or router port forwarding is needed.
 
-## Git versioning
+## H.264 test checklist
 
-Development branch: `feature/v0.5-unattended-access` with PR and CI before merging to `main`. V0.1–V0.4 source stays in Git history. A stable tag/release must await real Windows/Android/VPS acceptance.
+1. Run Windows V0.6 and Android V0.6 on devices you own. Connect in JPEG mode and confirm the screen and explicit remote-input authorization work.
+2. Enable **H.264 软件编码** in Windows while the session is active.
+3. Android should display `H.264 · Android MediaCodec` and render the video in the same screen area. The first picture might need up to a few seconds until the next codec configuration/keyframe.
+4. Switch from H.264 back to JPEG, change monitor, disconnect/reconnect, and verify the view recovers.
+5. Change requested H.264 FPS among 6, 12 and 20; inspect sent/dropped counters. Numbers are *requests*, not measured FPS.
+6. To compare mobile vs LAN, log end-to-end latency, CPU, GPU utilization, frame loss, audio absence, bandwidth and 8-hour stability. These measurements have **not** been performed in CI.
 
-See [docs/V0.5-ACCEPTANCE.md](docs/V0.5-ACCEPTANCE.md).
+## Security and compatibility
+
+- All video and input payloads use the existing authenticated AES-256-GCM layer. A public VPS only forwards encrypted packets; the session key must be shared privately.
+- Remote input requires Windows owner's explicit permission. Windows login pre-desktop, UAC secure desktop and unattended service operation are **not** supported.
+- OpenH264 source is permissively licensed (BSD-2-Clause). H.264 patent and distribution obligations may need separate review before commercial distribution.
+- V0.6 does **not** implement Windows GPU/NVENC/AMF/QSV or Media Foundation hardware *encoding*. Android's system MediaCodec may select hardware or software based on device capabilities.
+- JPEG and H.264 paths are both best-effort prototype implementations; remote function, animation smoothness and codec compatibility must be verified on the actual devices.
+- V0.1–V0.5 history remains in Git; development branch `feature/v0.6-h264-video`. No stable release tag until on-device verification.
+
+See [docs/V0.6-ACCEPTANCE.md](docs/V0.6-ACCEPTANCE.md).
