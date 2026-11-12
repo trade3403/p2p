@@ -1,79 +1,54 @@
-# P2P Remote V0.3 · Windows Rust + Android Compose
+# P2P Remote V0.4 — Windows Rust + Android Compose + VPS relay
 
-**Development test build, not a security-audited commercial release.**
+**Closed-source private development test build. Do not use on computers you do not own or have permission to access.**
 
-P2P Remote lets you remotely view and (after explicit host authorization) control your own Windows PC from an Android device through a self-hosted HTTPS/WSS relay. Both devices initiate outbound connections, so a home broadband connection does **not** require a static IP or router port-forwarding.
+## What changed in V0.4
 
-## V0.3 changes
+- **Multi-monitor**: Windows Rust host enumerates displays, sends authenticated screen-count and selected-screen metadata; Android provides Previous/Next display controls. The active display is used for screen capture and mouse mapping.
+- **Input improvements**: Android adds a right-click button and scroll-up/scroll-down controls. Remote input still requires explicit authorization on Windows.
+- **Explicit clipboard text sharing**: Windows has a **separate, default-off clipboard permission**. Android can manually send text to the Windows clipboard or request the current Windows text, then copy the result to Android only on a separate tap. No silent clipboard polling, history capture, or automatic synchronization.
+- **Protocol**: existing AES-256-GCM authenticated packets retained. New type 3 carries encrypted clipboard text; type 4 carries encrypted monitor metadata; control messages use the existing authenticated type 2. Max clipboard payload 4096 UTF-8 bytes.
+- **CI**: Windows Rust Release EXE, Android Compose debug APK, Go relay Docker smoke build and tests. Every artifact is a TEST PACKAGE, not a code-signed commercial release.
 
-- Windows: Rust + Iced native desktop, automatic reconnection with bounded backoff (1–30 seconds), a visible stop control, and status messages.
-- Android: Kotlin + Jetpack Compose, network-failure reconnection, 20-second stalled-frame detection, a stop/cancel button, and clearer status indicators.
-- Both apps remember **only the non-sensitive relay address**. The relay bearer token and 64-character session key are held only in memory during an active session; enter them again after restarting.
-- End-to-end AES-256-GCM now authenticates **both packet contents and packet kind** (type is bound using AEAD AAD). V0.3 and V0.2 clients are **not protocol-compatible**. Upgrade both together.
-- Go relay includes additional unit tests for unauthorized and malformed join requests. Docker Compose/Caddy deployment is retained.
-- GitHub Actions now runs Windows Rust tests/build, Android unit tests/APK build, and Go race/security tests + Docker image build.
+## Install and test
 
-## Test-build downloads
+Download artifacts from GitHub **Actions → V0.4 Windows Android Relay → latest green successful run**:
+- `P2PRemote-Windows-v0.4.0-test` (ZIP containing portable EXE and SHA-256 hash).
+- `P2PRemote-Android-v0.4.0-debug` (APK and SHA-256 hash).
 
-Private GitHub repository → **Actions → V0.3 Windows Android Relay → successful run → Artifacts**.
+Use the **same version on both devices**. Install the test Windows EXE on your own Windows PC and the debug APK on your Android device. Both require a VPS relay running `deploy/compose.yml` behind Caddy and a WSS certificate. CI does not automatically deploy a VPS.
 
-Artifacts:
-- `P2PRemote-Windows-v0.3.0-test`: ZIP containing portable `P2PRemote.exe`.
-- `P2PRemote-Android-v0.3.0-debug`: debug installable APK.
-- Both packages include SHA-256 checksums. These builds are **unsigned test packages**.
+### Connection steps
 
-## VPS deployment (manual, server not provisioned)
+1. On the VPS, create `deploy/.env` from `deploy/.env.example`, configure your relay domain and a new `openssl rand -hex 32` token; run:
+   ```bash
+   docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build
+   ```
+2. Start Windows `P2PRemote.exe`, input `wss://YOUR_DOMAIN` and VPS bearer token, then start service. The screen-sharing session key appears locally; do not expose it publicly.
+3. On Android, input the same address, relay token, and 64-digit session key, and connect.
+4. For mouse/keyboard right-click/scroll, enable **允许 Android 端操作鼠标及输入文字** on Windows.
+5. For clipboard actions, separately enable **允许 Android 端按需读写 Windows 剪贴板文字**. Clipboard sharing does not start automatically.
+6. Android can select a monitor; Windows can also cycle monitors. Screen coordinates follow the selected display.
+7. Stop either app to end the connection; no stealth start or consent bypass.
 
-A publicly reachable Linux VPS, a domain you control, DNS pointing to its public IP, Docker Engine, and Docker Compose are needed. Never paste or commit root passwords, signing keys, or relay access tokens.
+The VPS relay transports encrypted bytes; it does not have your screen or clipboard session key. It **does** receive a relay bearer token for access control, so protect that token separately. Home broadband can have dynamic/private IP because both clients connect outbound to your VPS.
 
-```bash
-git clone git@github.com:chengzi1994999/p2p.git
-cd p2p
-cp deploy/.env.example deploy/.env
-# Edit deploy/.env with RELAY_DOMAIN and a newly generated RELAY_ACCESS_TOKEN
-# Generate a token on the VPS: openssl rand -hex 32
-docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build
-curl -fsS https://YOUR_DOMAIN/healthz
-```
+## Safety and known limitations
 
-Caddy terminates HTTPS/WSS; the Go relay's internal port **8080 must not be exposed publicly**.
+- No automatic clipboard sync or background monitoring. Clipboard read is explicit and guarded; do not transmit passwords or sensitive secrets.
+- No file transfer in V0.4. File transfer requires secure file picker, antivirus validation, user confirmation and bounded transfer quotas; tracked for a later dedicated milestone.
+- JPEG image transfer remains ~6 FPS; H.264 hardware encoding is not yet delivered. The VPS can add latency/bandwidth cost.
+- Windows lock-screen/UAC/secure desktop and unattended Windows service are not supported.
+- Requires actual VPS + Windows/Android device tests for functional acceptance. Green GitHub Actions alone proves only compilation/unit tests.
+- Windows and Android V0.4 must be used together for new operations; avoid mixing old clients.
 
-## Connect Windows to Android
+See [docs/V0.4-ACCEPTANCE.md](docs/V0.4-ACCEPTANCE.md). Legacy V0.1/V0.2/V0.3 remain in Git history.
 
-1. Start `P2PRemote.exe` on your own Windows PC. Enter `wss://YOUR_DOMAIN` and `RELAY_ACCESS_TOKEN`; click **启动远程服务**.
-2. Keep the **64-character session secret** visible only to yourself. The relay cannot decrypt the screen.
-3. Install Android debug APK. Enter the same WSS address, relay token, and session secret. Tap **连接电脑**.
-4. When the Android app displays the Windows screen, enable **允许 Android 端操作** in the Windows app if input control is needed; it is disabled by default.
-5. Disconnect from either side to end the session. Android and Windows reconnect **only while you have explicitly requested an active session**.
+## Source layout
 
-### What a green CI result proves
+- `desktop/`: Rust + Iced Windows host; monitor capture and clipboard permissions.
+- `android/`: Kotlin + Jetpack Compose viewer and explicit remote-operations toolbar.
+- `relay/`: Go WSS relay behind Caddy (`deploy/`).
+- `.github/workflows/v04.yml`: test build on private GitHub repository.
 
-A green workflow confirms **code compilation and automated tests**. It does not prove that a real VPS is deployed, an APK launches on every Android phone, input works across UAC/lock screens, the program is free of bugs, or that latency meets product targets. You must complete the manual acceptance checklist at [docs/V0.3-ACCEPTANCE.md](docs/V0.3-ACCEPTANCE.md).
-
-### Current limitations
-
-- Video still uses JPEG at ~6 FPS, not H.264 hardware encode; no audio, file transfer or multi-monitor switching.
-- Android currently supports only a **single active session**; closing the app ends it. No stealth/background remote access.
-- Relay credentials and session secret intentionally **are not stored**; copying them requires a trusted method.
-- Automatic retry handles transient network errors, not incorrect credentials (401/403 stops retry).
-- No unattended Windows service, secure-desktop access, P2P bypass or wake-on-LAN.
-- Commercial distribution requires independent dependency-license and security audits, code-signing, and real device tests.
-
-## Repository structure
-
-| Path | Purpose |
-|---|---|
-| `desktop/` | Rust/Iced Windows host, encryption, reconnect state |
-| `android/` | Kotlin Compose viewer, retry policy, Android tests |
-| `relay/` | Go WebSocket relay; opaque encrypted data only |
-| `deploy/` | Docker Compose + Caddy HTTPS deployment |
-| `.github/workflows/v03.yml` | Current CI test-build workflow |
-| `windows/` | V0.1 legacy C# host preserved for Git history |
-
-## Git versions
-
-- `main`: last merged build-verified version
-- `feature/v0.3-stable-remote`: V0.3 development and testing
-- `v0.3.0-rc1`: create only after actual two-client testing; a green CI alone does not warrant a stable release tag.
-
-Private, personal-use source. No license granting others permission to redistribute is included.
+**Version governance:** `main` stays build-verified; development happens on `feature/v0.4-remote-operations`. Use Pull Requests and run CI before merging. No production release tag before on-device verification.
