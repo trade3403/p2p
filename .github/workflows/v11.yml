@@ -246,7 +246,7 @@ jobs:
           retention-days: 14
 
   relay:
-    name: Go Relay Security and Container Tests (owner Ubuntu)
+    name: Go Relay Unit Tests and Compose Validation (owner Ubuntu)
     # Dedicated runner on Ubuntu VPS; NEVER deploy/restart production services here.
     # Do not execute untrusted pull request code on the production-adjacent runner.
     if: github.event_name != 'pull_request'
@@ -258,15 +258,13 @@ jobs:
         with:
           go-version: '1.23'
           cache: false
-      - name: Verify Linux runner and Docker prerequisites
+      - name: Verify Ubuntu runner and Go prerequisites
         run: |
           set -euo pipefail
           echo "Runner: ${RUNNER_NAME} / ${RUNNER_OS} / ${RUNNER_ARCH}"
           test "${RUNNER_OS}" = "Linux"
           go version
-          docker --version
-          docker compose version
-          docker info >/dev/null
+          # No docker.sock permission is needed for Go unit tests.
       - name: Download Go modules without modifying go.mod or go.sum
         working-directory: relay
         run: go mod download
@@ -278,5 +276,6 @@ jobs:
           RELAY_DOMAIN: relay.example.com
           RELAY_ACCESS_TOKEN: "0000000000000000000000000000000000000000000000000000000000000000"
         run: docker compose -f deploy/compose.yml -f deploy/compose.stun.yml config --quiet
-      - name: Build relay Docker image (no production deployment)
-        run: docker build -t p2p-relay:ci-${GITHUB_SHA::12} ./relay
+      # Intentionally do not build Docker images on this production-adjacent
+      # runner: its user has no Docker daemon access. Image build is an
+      # outstanding CI gate for a separate isolated Linux build runner.
