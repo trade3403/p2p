@@ -274,6 +274,8 @@ jobs:
       - name: Go race and security tests
         working-directory: relay
         run: go test -race -count=1 ./...
+      - name: Start isolated local Go Relay and run HTTP smoke checks
+        run: bash relay/ci-smoke.sh
       - name: Validate optional STUN UDP Compose profile
         env:
           RELAY_DOMAIN: relay.example.com
