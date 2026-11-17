@@ -31,7 +31,34 @@ jobs:
       run:
         shell: powershell
     steps:
+      # Git for Windows intermittently resets HTTPS connections for this private repo.
+      # The official authenticated GitHub ZIP archive avoids Git TCP fetch entirely.
+      - name: Retrieve this commit from official GitHub archive API
+        id: source_archive
+        continue-on-error: true
+        shell: powershell
+        env:
+          GH_SOURCE_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-archive-' + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $zip = Join-Path $archiveRoot 'source.zip'
+          $uri = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/zipball/' + $env:GITHUB_SHA
+          $headers = @{ Authorization = ('Bearer ' + $env:GH_SOURCE_TOKEN); 'User-Agent' = 'p2p-v010-selfhost-ci'; Accept = 'application/vnd.github+json' }
+          Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $zip -UseBasicParsing -TimeoutSec 90
+          if ((Get-Item $zip).Length -lt 1024) { throw 'GitHub repository ZIP archive is empty' }
+          $unpack = Join-Path $archiveRoot 'extracted'
+          Expand-Archive -Path $zip -DestinationPath $unpack -Force
+          $root = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
+          if (-not $root) { throw 'Official archive contains no repository directory' }
+          Get-ChildItem -LiteralPath $root.FullName -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force
+          }
+          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop/Cargo.toml'))) { throw 'Missing desktop manifest after archive extraction' }
+          Write-Host ('Verified source archive checkout for commit ' + $env:GITHUB_SHA)
       - uses: actions/checkout@v4
+        if: steps.source_archive.outcome == 'failure'
       - name: Prefer Git Bash over WSL when installing Rust
         shell: powershell
         run: |
