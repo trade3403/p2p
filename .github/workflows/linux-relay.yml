@@ -1,0 +1,135 @@
+name: Linux Relay Deploy Checks
+
+# Code/container verification only. Production VPS deploy is manual
+# (deploy/install.sh) or a protected workflow_dispatch environment.
+on:
+  push:
+    branches: [main, 'feature/**']
+    paths:
+      - 'relay/**'
+      - 'deploy/**'
+      - '.github/workflows/linux-relay.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'relay/**'
+      - 'deploy/**'
+      - '.github/workflows/linux-relay.yml'
+  workflow_dispatch:
+    inputs:
+      confirm_manual_ops:
+        description: 'Type verify-only — this workflow never SSHes into production'
+        required: true
+        default: 'verify-only'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-relay-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts-and-compose:
+    name: Bash + Compose validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check deploy scripts
+        run: bash -n deploy/install.sh deploy/update.sh deploy/verify.sh
+      - name: ShellCheck deploy scripts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -x deploy/install.sh deploy/update.sh deploy/verify.sh
+      - name: Compose config with ephemeral env (no real secrets)
+        run: |
+          TMPENV="$(mktemp)"
+          cat >"$TMPENV" <<EOF
+          RELAY_DOMAIN=p2p.aikissgo.com
+          RELAY_ACCESS_TOKEN=$(openssl rand -hex 32)
+          RELAY_IMAGE_TAG=p2p-relay:ci
+          EOF
+          chmod 0600 "$TMPENV"
+          docker compose --env-file "$TMPENV" -f deploy/compose.yml config > /tmp/compose.resolved.yml
+          # Guard: 8080 must not be published on the host.
+          if grep -E 'published:[" ]*8080|0\.0\.0\.0:8080' /tmp/compose.resolved.yml; then
+            echo 'relay 8080 must stay on the Docker network only' >&2
+            exit 1
+          fi
+          rm -f "$TMPENV"
+      - name: Record commit SHA for deploy pinning
+        run: |
+          echo "git_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Checked out ${GITHUB_SHA}"
+
+  go-relay:
+    name: Go race tests + image build + local auth probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: relay/go.sum
+      - name: Resolve modules
+        working-directory: relay
+        run: go mod tidy && git diff --exit-code go.mod go.sum || true
+      - name: go test -race
+        working-directory: relay
+        run: go test -race -count=1 ./...
+      - name: Build relay image pinned by SHA
+        run: |
+          docker build -t "p2p-relay:${GITHUB_SHA}" -t "p2p-relay:ci" ./relay
+          docker image inspect "p2p-relay:${GITHUB_SHA}" --format '{{.Id}}'
+      - name: Local healthz + unauthorized relay probe (no secrets in logs)
+        run: |
+          TOKEN="$(openssl rand -hex 32)"
+          docker network create p2p-ci-net
+          docker run -d --name p2p-relay-ci --network p2p-ci-net \
+            -e RELAY_ACCESS_TOKEN="${TOKEN}" "p2p-relay:${GITHUB_SHA}"
+          # Wait for listen
+          for i in $(seq 1 30); do
+            if docker run --rm --network p2p-ci-net curlimages/curl:8.11.1 \
+              -fsS "http://p2p-relay-ci:8080/healthz" | grep -qx ok; then
+              break
+            fi
+            sleep 1
+          done
+          BODY="$(docker run --rm --network p2p-ci-net curlimages/curl:8.11.1 -fsS http://p2p-relay-ci:8080/healthz)"
+          test "$BODY" = "ok"
+          CODE="$(docker run --rm --network p2p-ci-net curlimages/curl:8.11.1 \
+            -s -o /dev/null -w '%{http_code}' \
+            "http://p2p-relay-ci:8080/relay?room=$(printf 'a%.0s' {1..64})&role=viewer")"
+          test "$CODE" = "401"
+          # Wrong token still 401; do not print token.
+          CODE2="$(docker run --rm --network p2p-ci-net curlimages/curl:8.11.1 \
+            -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $(openssl rand -hex 32)" \
+            "http://p2p-relay-ci:8080/relay?room=$(printf 'a%.0s' {1..64})&role=viewer")"
+          test "$CODE2" = "401"
+          docker rm -f p2p-relay-ci
+          docker network rm p2p-ci-net
+
+  # Optional manual hook placeholder: never runs on pull_request from forks.
+  # Enable only after creating GitHub Environment "production-relay" with required reviewers
+  # and repository secrets (SSH key, host, user). Default job is skipped.
+  production-relay-guard:
+    name: Production deploy guard (manual approval required)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: production-relay
+    steps:
+      - name: Refuse silent production deploy
+        run: |
+          echo "This repository deploys Linux relay by running deploy/install.sh on the VPS."
+          echo "GitHub-hosted runners are NOT the Linux VPS."
+          echo "Windows self-hosted runners must not be used as the relay host."
+          echo "To enable remote SSH deploy later, add Secrets to environment production-relay"
+          echo "and replace this guard step — never auto-deploy from pull_request."
+          if [ "${{ github.event.inputs.confirm_manual_ops }}" != "verify-only" ]; then
+            echo "Refusing unexpected dispatch input" >&2
+            exit 1
+          fi

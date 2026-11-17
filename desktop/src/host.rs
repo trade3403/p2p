@@ -70,7 +70,7 @@ pub fn start(config: HostConfig) {
                         }
                         break;
                     }
-                    let _ = config.messages.send(format!("中转连接中断: {error:#}"));
+                    let _ = config.messages.send(crate::reconnect::describe_connect_error(&error));
                 }
             }
             let retry = crate::reconnect::retry_delay(failures);

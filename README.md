@@ -36,15 +36,22 @@ Both must be V0.7. V0.6 clients can still use the original WSS relay transport, 
 
 ## VPS relay (fallback mode)
 
-Existing `deploy/compose.yml` + Caddy still apply; the server is **not automatically deployed by GitHub CI**. DNS, TLS certificate and a sufficiently long `RELAY_ACCESS_TOKEN` are required.
+Formal production domain: **`p2p.aikissgo.com`**. Windows and Android **new installs** default to `wss://p2p.aikissgo.com`. Saved user settings / trusted pairings are **not** silently overwritten.
+
+Linux deploy scripts live under `deploy/` (`install.sh`, `update.sh`, `verify.sh`, `README-LINUX.md`). The server is **not automatically deployed by GitHub CI** — run install on the VPS after DNS is ready, or use a protected GitHub Environment later. See [deploy/README-LINUX.md](deploy/README-LINUX.md).
 
 ```bash
+# On the Ubuntu VPS (after DNS A record points here):
+sudo bash deploy/install.sh --domain p2p.aikissgo.com
+# Or manually:
 cp deploy/.env.example deploy/.env
-# Configure RELAY_DOMAIN and RELAY_ACCESS_TOKEN, e.g. openssl rand -hex 32
+# Set RELAY_DOMAIN=p2p.aikissgo.com and RELAY_ACCESS_TOKEN=$(openssl rand -hex 32)
 docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build
 ```
 
 Both devices initiate outbound WSS to the VPS, so a home broadband static IP or port forwarding is unnecessary for the fallback path. Never expose Go relay port 8080 directly to the Internet.
+
+**Auth model:** `RELAY_ACCESS_TOKEN` is a **shared** VPS access token for your personal devices — **not** a production multi-tenant / per-device IAM system. End-to-end AES-256-GCM session keys remain separate client secrets.
 
 ## Safety and limitations
 

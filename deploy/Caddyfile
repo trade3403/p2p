@@ -1,4 +1,5 @@
 {$RELAY_DOMAIN} {
-    encode zstd gzip
-    reverse_proxy relay:8080
+	encode zstd gzip
+	# Terminate TLS here; relay listens only on the Docker network.
+	reverse_proxy relay:8080
 }

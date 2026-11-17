@@ -254,7 +254,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let connection = card(column![
         heading("01 / 连接设置", "局域网可选 P2P 直连；跨公网仍通过 VPS 的 WSS 中转"),
         text("中转服务器地址").size(13),
-        text_input("wss://remote.example.com", &state.server).on_input(Msg::Server).padding(13).size(15),
+        text_input("wss://p2p.aikissgo.com", &state.server).on_input(Msg::Server).padding(13).size(15),
         text("中转访问口令（与 VPS 的 RELAY_ACCESS_TOKEN 一致）").size(13),
         text_input("输入服务器访问口令", &state.relay_token).on_input(Msg::Token).secure(true).padding(13).size(15),
         text("端到端加密会话密钥（仅分享给你的 Android 手机）").size(13),

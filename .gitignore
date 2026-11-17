@@ -2,6 +2,7 @@
 .env
 **/.env
 !**/.env.example
+deploy/backups/
 *.pfx
 *.p12
 *.keystore

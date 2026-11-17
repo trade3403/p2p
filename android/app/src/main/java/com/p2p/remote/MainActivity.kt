@@ -107,8 +107,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             var server by remember { mutableStateOf(
-                getSharedPreferences("public_settings", MODE_PRIVATE).getString("relay_url", "wss://remote.example.com")
-                    ?: "wss://remote.example.com"
+                getSharedPreferences("public_settings", MODE_PRIVATE).getString("relay_url", "wss://p2p.aikissgo.com")
+                    ?: "wss://p2p.aikissgo.com"
             ) }
             var relayToken by remember { mutableStateOf("") }
             var lanIp by remember { mutableStateOf(
@@ -527,9 +527,27 @@ class MainActivity : ComponentActivity() {
                         requested = false
                         secret = null
                         activeToken = ""
+                        transport = "认证失败"
                         status = "中转访问口令错误（HTTP ${response.code}），已停止重试"
                     } else {
-                        scheduleRetry("连接失败：${response?.code ?: error.localizedMessage ?: "网络错误"}")
+                        val detail = error.localizedMessage ?: ""
+                        val hint = when {
+                            detail.contains("Unable to resolve host", ignoreCase = true) ||
+                                detail.contains("No address associated", ignoreCase = true) ->
+                                "网络不可达：DNS 解析失败"
+                            detail.contains("CertPathValidatorException", ignoreCase = true) ||
+                                detail.contains("SSLHandshakeException", ignoreCase = true) ||
+                                detail.contains("Certificate", ignoreCase = true) ->
+                                "TLS 证书问题，请确认域名与 Caddy 证书"
+                            detail.contains("timeout", ignoreCase = true) ||
+                                detail.contains("timed out", ignoreCase = true) ->
+                                "连接超时：检查移动网络与 VPS 443"
+                            response?.code == 409 || detail.contains("already connected", ignoreCase = true) ->
+                                "房间冲突：同 role 已有连接"
+                            else -> "连接失败：${response?.code ?: detail.ifBlank { "网络不可达" }}"
+                        }
+                        transport = if (requested) "重连中" else transport
+                        scheduleRetry(hint)
                     }
                 }
             }
@@ -571,6 +589,7 @@ class MainActivity : ComponentActivity() {
         retryTask?.let { main.removeCallbacks(it) }
         val waitMs = ReconnectPolicy.delayMs(retryAttempt)
         retryAttempt = (retryAttempt + 1).coerceAtMost(31)
+        transport = "重连中"
         status = "$reason · ${waitMs / 1000} 秒后重连"
         retryTask = Runnable {
             retryTask = null

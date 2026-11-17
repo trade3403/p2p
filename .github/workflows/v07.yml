@@ -9,6 +9,7 @@ on:
       - 'relay/**'
       - 'deploy/**'
       - '.github/workflows/v07.yml'
+      - '.github/workflows/linux-relay.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:

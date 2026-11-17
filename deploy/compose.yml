@@ -1,16 +1,25 @@
 services:
   relay:
-    build: ../relay
+    build:
+      context: ../relay
+      dockerfile: Dockerfile
+    image: ${RELAY_IMAGE_TAG:-p2p-relay:local}
     restart: unless-stopped
     environment:
       RELAY_ACCESS_TOKEN: ${RELAY_ACCESS_TOKEN:?Set secure relay token}
+    # Intentionally expose (Docker network only), never publish 8080 to the host.
     expose:
       - "8080"
     read_only: true
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    networks:
+      - p2p_internal
+
   caddy:
-    image: caddy:2
+    image: caddy:2.9-alpine
     restart: unless-stopped
     environment:
       RELAY_DOMAIN: ${RELAY_DOMAIN:?Set domain}
@@ -23,6 +32,13 @@ services:
       - caddy_config:/config
     depends_on:
       - relay
+    networks:
+      - p2p_internal
+
 volumes:
   caddy_data:
   caddy_config:
+
+networks:
+  p2p_internal:
+    driver: bridge

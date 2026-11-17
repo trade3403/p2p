@@ -2,7 +2,7 @@
 use std::{fs, path::PathBuf};
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_RELAY: &str = "wss://remote.example.com";
+const DEFAULT_RELAY: &str = "wss://p2p.aikissgo.com";
 
 #[derive(Serialize, Deserialize)]
 struct PublicSettings {
@@ -56,8 +56,14 @@ mod tests {
     fn accepts_only_nonsecret_relay_addresses() {
         assert!(is_safe_address("wss://relay.example.com"));
         assert!(is_safe_address("https://relay.example.com"));
+        assert!(is_safe_address("wss://p2p.aikissgo.com"));
         assert!(!is_safe_address("ws://relay.example.com"));
         assert!(!is_safe_address("wss://user:pass@relay.example.com"));
         assert!(!is_safe_address("wss://relay.example.com/?token=secret"));
+    }
+
+    #[test]
+    fn default_relay_is_formal_domain() {
+        assert_eq!(DEFAULT_RELAY, "wss://p2p.aikissgo.com");
     }
 }

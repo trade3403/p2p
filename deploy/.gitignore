@@ -1,0 +1,15 @@
+# Never commit live secrets or local deploy state.
+.env
+.env.*
+!.env.example
+*.bak
+*.bak.*
+*.old
+token.txt
+relay-token*
+backups/
+*.pem
+*.key
+*.crt
+caddy_data/
+caddy_config/
