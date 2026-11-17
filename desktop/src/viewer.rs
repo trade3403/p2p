@@ -10,7 +10,7 @@ pub enum ViewerEvent {
     State(String),
     Connected,
     Disconnected,
-    Jpeg(Vec<u8>),
+    Jpeg(Vec<u8>,u32,u32),
     Monitors(String),
     Clipboard(String),
 }
@@ -84,7 +84,12 @@ async fn run(config: &ViewerConfig) -> Result<()> {
                                 protocol::FRAME if payload.len() <= 3*1024*1024 => {
                                     // Do not interpret arbitrary ciphertext as remote UI.
                                     if payload.starts_with(&[0xff,0xd8,0xff]) {
-                                        let _ = config.events.send(ViewerEvent::Jpeg(payload));
+                                        if let Ok(img) = ::image::load_from_memory_with_format(&payload, ::image::ImageFormat::Jpeg) {
+                                            if img.width() > 0 && img.height() > 0
+                                                && img.width() <= 8192 && img.height() <= 8192 {
+                                                let _ = config.events.send(ViewerEvent::Jpeg(payload,img.width(),img.height()));
+                                            }
+                                        }
                                     }
                                 },
                                 protocol::MONITORS => {
