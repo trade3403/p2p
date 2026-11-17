@@ -9,8 +9,9 @@ mod lan;
 mod stun;
 mod udp_punch;
 mod udp_video;
+mod viewer;
 
-use iced::{Font, widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input}, Border, Color, Element, Length, Subscription, Theme};
+use iced::{Font, widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
 
 fn main() -> iced::Result {
@@ -44,12 +45,25 @@ struct App {
     dropped_frames: Arc<AtomicU64>,
     status: String,
     diagnostics: String,
+    viewer_key: String,
+    viewer_text: String,
+    viewer_status: String,
+    viewer_monitors: String,
+    viewer_clipboard: String,
+    viewer_frame: Option<image::Handle>,
+    viewer_online: bool,
+    viewer_active: Arc<AtomicBool>,
+    viewer_tx: Sender<String>,
+    viewer_rx: Receiver<viewer::ViewerEvent>,
+    viewer_control_rx: Option<Receiver<String>>,
     tx: Sender<String>,
     rx: Receiver<String>,
 }
 impl Default for App {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
+        let (viewer_tx, viewer_control_rx) = mpsc::channel();
+        let (_viewer_event_tx, viewer_rx) = mpsc::channel();
         // Failed DPAPI decryption never silently recreates a trusted session.
         let trusted = trusted_profile::load().ok().flatten();
         let secret = trusted.as_ref()
@@ -79,6 +93,17 @@ impl Default for App {
             trust_saved: trusted.is_some(),
             status: "未连接 · 手动启动或启用登录后自动连接".into(),
             diagnostics: "尚未探测 STUN 公网 UDP 地址".into(),
+            viewer_key: String::new(),
+            viewer_text: String::new(),
+            viewer_status: "未连接远程 Windows".into(),
+            viewer_monitors: String::new(),
+            viewer_clipboard: String::new(),
+            viewer_frame: None,
+            viewer_online: false,
+            viewer_active: Arc::new(AtomicBool::new(false)),
+            viewer_tx,
+            viewer_rx,
+            viewer_control_rx: Some(viewer_control_rx),
             tx,
             rx,
         };
@@ -118,6 +143,7 @@ impl Default for App {
 impl Drop for App {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        self.viewer_active.store(false, Ordering::SeqCst);
         self.allow_input.store(false, Ordering::SeqCst);
         self.allow_clipboard.store(false, Ordering::SeqCst);
     }
@@ -126,10 +152,74 @@ impl Drop for App {
 #[derive(Debug, Clone)]
 enum Msg { Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
-    H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick }
+    H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet }
 
 fn update(state: &mut App, msg: Msg) {
     match msg {
+        Msg::ViewerKey(value) if !state.viewer_active.load(Ordering::SeqCst) => {
+            state.viewer_key = value.trim().to_owned();
+        }
+        Msg::ViewerText(value) => state.viewer_text = value.chars().take(250).collect(),
+        Msg::ViewerConnect if !state.viewer_active.load(Ordering::SeqCst) => {
+            let Ok(raw) = hex::decode(state.viewer_key.trim()) else {
+                state.viewer_status = "远程 Windows 密钥必须为 64 位十六进制".into();
+                return;
+            };
+            let Ok(secret) = <[u8;32]>::try_from(raw) else {
+                state.viewer_status = "远程 Windows 密钥必须是 32 字节".into();
+                return;
+            };
+            let Some(controls) = state.viewer_control_rx.take() else {
+                state.viewer_status = "上一会话正在关闭，请重新启动客户端".into();
+                return;
+            };
+            let (events, rx) = mpsc::channel();
+            state.viewer_rx = rx;
+            state.viewer_active.store(true, Ordering::SeqCst);
+            state.viewer_status = "正在连接远程 Windows...".into();
+            state.viewer_online = false;
+            state.viewer_frame = None;
+            viewer::start(viewer::ViewerConfig {
+                server: state.server.clone(),
+                token: state.relay_token.clone(),
+                secret,
+                active: state.viewer_active.clone(),
+                events,
+                controls,
+            });
+        }
+        Msg::ViewerDisconnect => {
+            state.viewer_active.store(false, Ordering::SeqCst);
+            state.viewer_online = false;
+            state.viewer_status = "手动断开连接".into();
+        }
+        Msg::ViewerMove(position) if state.viewer_online => {
+            let x = (position.x / 800.0).clamp(0.0, 1.0);
+            let y = (position.y / 450.0).clamp(0.0, 1.0);
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"move","x":x,"y":y}).to_string());
+        }
+        Msg::ViewerDown if state.viewer_online => {
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"down","x":0.5,"y":0.5}).to_string());
+        }
+        Msg::ViewerUp if state.viewer_online => {
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"up","x":0.5,"y":0.5}).to_string());
+        }
+        Msg::ViewerRight if state.viewer_online => {
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"right_click","x":0.5,"y":0.5}).to_string());
+        }
+        Msg::ViewerScroll(delta) if state.viewer_online => {
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"scroll","delta":delta}).to_string());
+        }
+        Msg::ViewerSendText if state.viewer_online && !state.viewer_text.is_empty() => {
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"text","text":state.viewer_text}).to_string());
+            state.viewer_text.clear();
+        }
+        Msg::ViewerMonitor(index) if state.viewer_online => {
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"monitor","index":index}).to_string());
+        }
+        Msg::ViewerClipboardGet if state.viewer_online => {
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"clipboard_get"}).to_string());
+        }
         Msg::Server(s) if !state.running.load(Ordering::SeqCst) => state.server = s,
         Msg::Token(s) if !state.running.load(Ordering::SeqCst) => state.relay_token = s,
         Msg::Allow(value) => state.allow_input.store(value, Ordering::SeqCst),
@@ -265,6 +355,26 @@ fn update(state: &mut App, msg: Msg) {
             };
         },
         Msg::Tick => {
+            while let Ok(event) = state.viewer_rx.try_recv() {
+                match event {
+                    viewer::ViewerEvent::State(s) => state.viewer_status = s,
+                    viewer::ViewerEvent::Connected => {
+                        state.viewer_online = true;
+                        state.viewer_status = "WSS 已连接，等待远程画面".into();
+                    }
+                    viewer::ViewerEvent::Disconnected => {
+                        state.viewer_online = false;
+                        state.viewer_active.store(false, Ordering::SeqCst);
+                        state.viewer_status = "连接已断开".into();
+                        let (tx, rx) = mpsc::channel();
+                        state.viewer_tx = tx;
+                        state.viewer_control_rx = Some(rx);
+                    }
+                    viewer::ViewerEvent::Jpeg(bytes) => state.viewer_frame = Some(image::Handle::from_bytes(bytes)),
+                    viewer::ViewerEvent::Monitors(value) => state.viewer_monitors = value,
+                    viewer::ViewerEvent::Clipboard(value) => state.viewer_clipboard = value,
+                }
+            }
             while let Ok(message) = state.rx.try_recv() {
                 if message.starts_with("[STUN]") {
                     state.diagnostics = message.trim_start_matches("[STUN] ").to_string();
@@ -432,7 +542,47 @@ fn view(state: &App) -> Element<'_, Msg> {
             .color(Color::from_rgb8(204,178,130)),
     ].spacing(13));
 
-    container(scrollable(container(column![top, connection, direct, safety, trust, video, status, diagnostics, udp].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
+
+    let remote_image: Element<'_, Msg> = if let Some(handle) = &state.viewer_frame {
+        mouse_area(image(handle.clone()).width(Length::Fixed(800.0)).height(Length::Fixed(450.0)))
+            .on_move(Msg::ViewerMove)
+            .on_press(Msg::ViewerDown)
+            .on_release(Msg::ViewerUp)
+            .into()
+    } else {
+        container(text("等待远程 Windows 桌面 JPEG 图像"))
+            .width(Length::Fixed(800.0)).height(Length::Fixed(450.0))
+            .center_x(Length::Fill).center_y(Length::Fill).into()
+    };
+    let viewer_panel = card(column![
+        heading("09 / Windows 控制 Windows", "Viewer 控制端 · 使用另一台 Windows 主机的会话密钥"),
+        text("双方需使用相同 Relay Token，远程 PC Host 必须启动并授权控制").size(13),
+        text_input("输入远程 PC 的 64 位会话密钥", &state.viewer_key).on_input(Msg::ViewerKey).secure(true).padding(12).size(15),
+        row![
+            button("连接远程 Windows").on_press_maybe((!state.viewer_active.load(Ordering::SeqCst)).then_some(Msg::ViewerConnect)),
+            button("断开 Viewer").on_press(Msg::ViewerDisconnect)
+        ].spacing(10),
+        text(&state.viewer_status).size(14),
+        text("Viewer 暂时只显示 JPEG；被控端请关闭 H.264 软件编码。仅支持 WSS 控制链路。").size(13),
+        remote_image,
+        row![
+            button("右键").on_press(Msg::ViewerRight),
+            button("上滚").on_press(Msg::ViewerScroll(-3)),
+            button("下滚").on_press(Msg::ViewerScroll(3)),
+            button("上一显示器").on_press(Msg::ViewerMonitor(0)),
+            button("下一显示器").on_press(Msg::ViewerMonitor(1))
+        ].spacing(9),
+        row![
+            text_input("向远程 Windows 输入文字", &state.viewer_text).on_input(Msg::ViewerText).padding(10),
+            button("发送文字").on_press(Msg::ViewerSendText)
+        ].spacing(9),
+        button("请求远程剪贴板文字").on_press(Msg::ViewerClipboardGet),
+        text(&state.viewer_clipboard).size(12),
+        text(&state.viewer_monitors).size(12),
+        text("本功能仅用于你拥有或获得授权的 Windows 主机。").size(12)
+    ].spacing(12));
+
+    container(scrollable(container(column![top, viewer_panel, connection, direct, safety, trust, video, status, diagnostics, udp].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
         .width(Length::Fill).height(Length::Fill)
         .center_x(Length::Fill).into()
 }
