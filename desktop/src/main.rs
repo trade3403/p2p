@@ -220,7 +220,7 @@ fn update(state: &mut App, msg: Msg) {
         Msg::ViewerDown if state.viewer_online && state.viewer_pointer_valid => {
             let _ = state.viewer_tx.send(serde_json::json!({"type":"down","x":state.viewer_pointer.0,"y":state.viewer_pointer.1}).to_string());
         }
-        Msg::ViewerUp if state.viewer_online && state.viewer_pointer_valid => {
+        Msg::ViewerUp if state.viewer_online => {
             let _ = state.viewer_tx.send(serde_json::json!({"type":"up","x":state.viewer_pointer.0,"y":state.viewer_pointer.1}).to_string());
         }
         Msg::ViewerRight if state.viewer_online && state.viewer_pointer_valid => {
