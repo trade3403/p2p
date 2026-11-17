@@ -1,0 +1,61 @@
+name: V0.10 Owner Runner Network Diagnostics
+
+on:
+  push:
+    branches: ['feature/v0.10-udp-jpeg-preview']
+    paths:
+      - '.github/workflows/v10-runner-network.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-network:
+    name: Windows self-hosted GitHub connectivity
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 12
+    steps:
+      - name: Diagnose HTTPS endpoints without checkout
+        shell: powershell
+        run: |
+          Write-Host ('Runner: ' + $env:RUNNER_NAME + ', OS: ' + $env:RUNNER_OS)
+          Write-Host ('Git version: ' + (git --version))
+          foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY')) {
+            $exists = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))
+            Write-Host ($name + ' configured: ' + $exists)
+          }
+          $gitProxy = (git config --global --get http.proxy 2>$null)
+          Write-Host ('Git global http.proxy configured: ' + (-not [string]::IsNullOrWhiteSpace($gitProxy)))
+          foreach ($url in @('https://github.com','https://api.github.com','https://codeload.github.com','https://raw.githubusercontent.com')) {
+            try {
+              $req = [System.Net.WebRequest]::Create($url)
+              $req.Method = 'HEAD'
+              $req.Timeout = 12000
+              $req.ReadWriteTimeout = 12000
+              $res = $req.GetResponse()
+              Write-Host ($url + ': HTTP ' + [int]$res.StatusCode)
+              $res.Close()
+            } catch [System.Net.WebException] {
+              $res = $_.Exception.Response
+              if ($res) {
+                Write-Host ($url + ': HTTP ' + [int]$res.StatusCode + ' (network reachable)')
+                $res.Close()
+              } else {
+                Write-Host ($url + ': NETWORK FAILURE: ' + $_.Exception.Status)
+              }
+            } catch { Write-Host ($url + ': FAILURE: ' + $_.Exception.GetType().Name) }
+          }
+      - name: Test authenticated GitHub REST API for safe source fallback
+        shell: powershell
+        env:
+          GH_RUNNER_TOKEN: ${{ github.token }}
+        run: |
+          try {
+            $headers = @{ Authorization = ('Bearer ' + $env:GH_RUNNER_TOKEN); 'User-Agent' = 'p2p-v010-runner-diagnostics'; 'X-GitHub-Api-Version' = '2022-11-28' }
+            $url = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/git/trees/' + $env:GITHUB_SHA
+            $tree = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -TimeoutSec 20
+            Write-Host ('Authenticated Git Tree API: success, entries=' + @($tree.tree).Count)
+          } catch {
+            Write-Host ('Authenticated Git Tree API: FAILED: ' + $_.Exception.GetType().Name)
+          }
