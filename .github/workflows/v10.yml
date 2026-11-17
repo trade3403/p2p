@@ -10,7 +10,7 @@ on:
       - 'deploy/**'
       - '.github/workflows/v10.yml'
   pull_request:
-    branches: [main, 'feature/v0.9-udp-connectivity']
+    branches: [main]  # Development feature PRs use the branch push run to avoid duplicate builds.
   workflow_dispatch:
 
 permissions:
@@ -82,9 +82,7 @@ jobs:
           $disk = (Get-PSDrive -Name ((Get-Location).Drive.Name)).Free
           Write-Host ("Free disk space: {0:N1} GB" -f ($disk / 1GB))
           if ($disk -lt 5GB) { throw "Insufficient free disk: require at least 5 GB" }
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: desktop
+      # This self-hosted PC retains desktop/target across jobs; avoid a large remote cache upload.
       - name: Run Rust tests (UDP punch, STUN, crypto, LAN)
         run: cargo test --manifest-path desktop/Cargo.toml
       - name: Build Windows Release EXE
