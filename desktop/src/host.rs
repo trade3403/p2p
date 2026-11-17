@@ -281,6 +281,7 @@ struct Control {
     text: Option<String>,
     index: Option<usize>,
     delta: Option<i32>,
+    key: Option<String>,
 }
 
 #[cfg(windows)]
@@ -291,6 +292,19 @@ fn handle_control(command: &Control, index: usize) {
         if let Some(value) = &command.text {
             if value.chars().count() <= 250 { let _ = enigo.text(value); }
         }
+        return;
+    }
+    if command.kind == "key" {
+        use enigo::Key;
+        let key = match command.key.as_deref() {
+            Some("enter") => Key::Return,
+            Some("backspace") => Key::Backspace,
+            Some("tab") => Key::Tab,
+            Some("escape") => Key::Escape,
+            Some("delete") => Key::Delete,
+            _ => return, // strict allowlist; never forward arbitrary OS shortcuts
+        };
+        let _ = enigo.key(key, Direction::Click);
         return;
     }
     if command.kind == "scroll" {
