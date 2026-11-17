@@ -2,7 +2,7 @@ name: V0.10 Windows Android Relay
 
 on:
   push:
-    branches: [main, 'feature/**']
+    branches: [main, 'feature/v0.10-*']
     paths:
       - 'desktop/**'
       - 'android/**'
