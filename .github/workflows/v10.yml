@@ -27,11 +27,24 @@ jobs:
     # Must be ONLINE and have default self-hosted / Windows / X64 labels.
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
     steps:
       - uses: actions/checkout@v4
+      - name: Prefer Git Bash over WSL when installing Rust
+        shell: powershell
+        run: |
+          $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          if (-not (Test-Path $bash)) { throw "Git Bash not installed at $bash" }
+          $gitBin = Split-Path -Parent $bash
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, $gitBin + [Environment]::NewLine, $utf8)
+          & $bash -c 'echo Git Bash ready'
+          if ($LASTEXITCODE -ne 0) { throw "Git Bash execution failed" }
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify self-hosted Windows environment
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "Self-hosted runner: $env:RUNNER_NAME"
           Write-Host "Runner OS: $env:RUNNER_OS / $env:RUNNER_ARCH"
@@ -50,7 +63,7 @@ jobs:
       - name: Build Windows Release EXE
         run: cargo build --manifest-path desktop/Cargo.toml --release
       - name: Package and hash portable EXE
-        shell: pwsh
+        shell: powershell
         run: |
           New-Item -ItemType Directory -Force dist/windows | Out-Null
           Copy-Item desktop/target/release/p2p-remote.exe dist/windows/P2PRemote.exe
