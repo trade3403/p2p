@@ -246,18 +246,30 @@ jobs:
           retention-days: 14
 
   relay:
-    name: Go Relay Security and Container Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: Go Relay Security and Container Tests (owner Ubuntu)
+    # Dedicated runner on Ubuntu VPS; NEVER deploy/restart production services here.
+    # Do not execute untrusted pull request code on the production-adjacent runner.
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, Linux, X64, p2p-linux-relay]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
           cache: false
-      - name: Resolve Go modules
+      - name: Verify Linux runner and Docker prerequisites
+        run: |
+          set -euo pipefail
+          echo "Runner: ${RUNNER_NAME} / ${RUNNER_OS} / ${RUNNER_ARCH}"
+          test "${RUNNER_OS}" = "Linux"
+          go version
+          docker --version
+          docker compose version
+          docker info >/dev/null
+      - name: Download Go modules without modifying go.mod or go.sum
         working-directory: relay
-        run: go mod tidy
+        run: go mod download
       - name: Go race and security tests
         working-directory: relay
         run: go test -race -count=1 ./...
@@ -266,5 +278,5 @@ jobs:
           RELAY_DOMAIN: relay.example.com
           RELAY_ACCESS_TOKEN: "0000000000000000000000000000000000000000000000000000000000000000"
         run: docker compose -f deploy/compose.yml -f deploy/compose.stun.yml config --quiet
-      - name: Build relay Docker image
-        run: docker build -t p2p-relay:v0.11.0-test ./relay
+      - name: Build relay Docker image (no production deployment)
+        run: docker build -t p2p-relay:ci-${GITHUB_SHA::12} ./relay
