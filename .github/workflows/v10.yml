@@ -189,13 +189,29 @@ jobs:
           "ANDROID_HOME=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "ANDROID_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          1..40 | ForEach-Object { 'y' } | & $manager "--sdk_root=$root" --licenses
-          if ($LASTEXITCODE -ne 0) { throw "Android SDK license setup failed: $LASTEXITCODE" }
-          Write-Host "Android CLI ready at $manager"
+          # Windows PowerShell does not reliably send its pipeline to .bat stdin.
+          # Use cmd.exe input redirection, then explicitly verify accepted licenses.
+          $answers = Join-Path $env:RUNNER_TEMP 'android-sdk-license-answers.txt'
+          [System.IO.File]::WriteAllText($answers, (('y' + [Environment]::NewLine) * 50), (New-Object System.Text.UTF8Encoding($false)))
+          $command = 'type "{0}" | "{1}" "--sdk_root={2}" --licenses' -f $answers, $manager, $root
+          $output = & $env:ComSpec /D /S /C $command 2>&1
+          $exit = $LASTEXITCODE
+          $output | Select-Object -Last 18 | ForEach-Object { Write-Host $_ }
+          $licensePath = Join-Path $root 'licenses\android-sdk-license'
+          if ($exit -ne 0 -or -not (Test-Path $licensePath)) {
+            throw "Android SDK licenses were NOT accepted correctly (exit=$exit)"
+          }
+          Write-Host "Android CLI and standard SDK licenses ready at $manager"
       - name: Install Android SDK 35
         run: |
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          $manager = Join-Path $env:ANDROID_SDK_ROOT 'cmdline-tools\latest\bin\sdkmanager.bat'
+          & $manager "--sdk_root=$env:ANDROID_SDK_ROOT" "platforms;android-35" "build-tools;35.0.0" "build-tools;34.0.0"
           if ($LASTEXITCODE -ne 0) { throw "Android SDK install failed: $LASTEXITCODE" }
+          foreach ($installed in @('platforms\android-35\android.jar','build-tools\34.0.0\aapt2.exe','build-tools\35.0.0\aapt2.exe')) {
+            if (-not (Test-Path (Join-Path $env:ANDROID_SDK_ROOT $installed))) {
+              throw "Missing Android SDK component after sdkmanager: $installed"
+            }
+          }
           Write-Host "Android SDK root: $env:ANDROID_SDK_ROOT"
           java -version
           gradle --version
