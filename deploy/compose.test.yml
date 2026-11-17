@@ -1,0 +1,22 @@
+# Staging relay on the existing Ubuntu host. Do NOT start the production
+# compose.yml stack a second time: it owns TCP 80/443.
+# Test traffic is restricted to host loopback. Your existing HTTPS reverse
+# proxy must forward p2ptest.aikissgo.com to 127.0.0.1:18080.
+name: p2p-relay-test
+services:
+  relay-test:
+    build:
+      context: ../relay
+    restart: unless-stopped
+    environment:
+      RELAY_ACCESS_TOKEN: ${TEST_RELAY_ACCESS_TOKEN:?Set a separate test-only relay token}
+      STUN_ENABLED: "false"
+    ports:
+      - "127.0.0.1:18080:8080/tcp"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
