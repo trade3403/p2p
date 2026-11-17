@@ -23,11 +23,25 @@ concurrency:
 jobs:
   windows:
     name: Rust Windows V0.10 EXE
-    runs-on: windows-latest
-    timeout-minutes: 90
+    # Owner PC-202310201945 self-hosted Windows runner.
+    # Must be ONLINE and have default self-hosted / Windows / X64 labels.
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Verify self-hosted Windows environment
+        shell: pwsh
+        run: |
+          Write-Host "Self-hosted runner: $env:RUNNER_NAME"
+          Write-Host "Runner OS: $env:RUNNER_OS / $env:RUNNER_ARCH"
+          Write-Host "Working directory: $env:GITHUB_WORKSPACE"
+          rustc --version
+          cargo --version
+          if (-not (Test-Path "desktop/Cargo.toml")) { throw "Missing desktop Cargo.toml" }
+          $disk = (Get-PSDrive -Name ((Get-Location).Drive.Name)).Free
+          Write-Host ("Free disk space: {0:N1} GB" -f ($disk / 1GB))
+          if ($disk -lt 5GB) { throw "Insufficient free disk: require at least 5 GB" }
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop
