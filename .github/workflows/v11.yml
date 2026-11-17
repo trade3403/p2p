@@ -265,9 +265,12 @@ jobs:
           test "${RUNNER_OS}" = "Linux"
           go version
           # No docker.sock permission is needed for Go unit tests.
-      - name: Download Go modules without modifying go.mod or go.sum
+      - name: Verify checked-in Go module checksums
         working-directory: relay
-        run: go mod download
+        run: |
+          go mod download
+          go mod verify
+          git diff --exit-code -- go.mod go.sum
       - name: Go race and security tests
         working-directory: relay
         run: go test -race -count=1 ./...
