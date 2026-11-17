@@ -10,12 +10,13 @@ mod stun;
 mod udp_punch;
 mod udp_video;
 
-use iced::{widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input}, Border, Color, Element, Length, Subscription, Theme};
+use iced::{Font, widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
 
 fn main() -> iced::Result {
     iced::application("P2P Remote · 个人远程桌面", update, view)
         .theme(|_| Theme::TokyoNight)
+        .default_font(Font::with_name("Microsoft YaHei UI"))
         .subscription(|_| Subscription::batch([iced::time::every(Duration::from_millis(250)).map(|_| Msg::Tick)]))
         .window_size((1080.0, 740.0))
         .run()
@@ -291,7 +292,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let top = row![
         column![text("P2P  /  REMOTE").size(14).color(Color::from_rgb8(127,171,255)),
                 text("个人远程桌面").size(33),
-                text("Rust 原生客户端  ·  Windows Host  ·  V0.10 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
+                text("Rust 原生客户端  ·  Windows Host  ·  V0.11 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
         container(text(if active {"●  服务已启动"} else {"○  尚未连接"}).size(14))
             .padding([12,20])
@@ -301,7 +302,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let connection = card(column![
         heading("01 / 连接设置", "局域网可选 P2P 直连；跨公网仍通过 VPS 的 WSS 中转"),
         text("中转服务器地址").size(13),
-        text_input("wss://remote.example.com", &state.server).on_input(Msg::Server).padding(13).size(15),
+        text_input("wss://p2p.aikissgo.com", &state.server).on_input(Msg::Server).padding(13).size(15),
         text("中转访问口令（与 VPS 的 RELAY_ACCESS_TOKEN 一致）").size(13),
         text_input("输入服务器访问口令", &state.relay_token).on_input(Msg::Token).secure(true).padding(13).size(15),
         text("端到端加密会话密钥（仅分享给你的 Android 手机）").size(13),
