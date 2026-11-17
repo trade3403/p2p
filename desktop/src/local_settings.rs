@@ -2,7 +2,7 @@
 use std::{fs, path::PathBuf};
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_RELAY: &str = "wss://p2p.aikissgo.com";
+const DEFAULT_RELAY: &str = "wss://p2ptest.aikissgo.com";
 
 #[derive(Serialize, Deserialize)]
 struct PublicSettings {
