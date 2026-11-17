@@ -194,8 +194,12 @@ jobs:
           $answers = Join-Path $env:RUNNER_TEMP 'android-sdk-license-answers.txt'
           [System.IO.File]::WriteAllText($answers, (('y' + [Environment]::NewLine) * 50), (New-Object System.Text.UTF8Encoding($false)))
           $command = 'type "{0}" | "{1}" "--sdk_root={2}" --licenses' -f $answers, $manager, $root
+          # PowerShell 5.1 raises NativeCommandError for warnings written to
+          # STDERR by sdkmanager.bat even when it exits successfully.
+          $ErrorActionPreference = 'Continue'
           $output = & $env:ComSpec /D /S /C $command 2>&1
           $exit = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
           $output | Select-Object -Last 18 | ForEach-Object { Write-Host $_ }
           $licensePath = Join-Path $root 'licenses\android-sdk-license'
           if ($exit -ne 0 -or -not (Test-Path $licensePath)) {
