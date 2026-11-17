@@ -27,6 +27,7 @@ jobs:
           }
           $gitProxy = (git config --global --get http.proxy 2>$null)
           Write-Host ('Git global http.proxy configured: ' + (-not [string]::IsNullOrWhiteSpace($gitProxy)))
+          $global:LASTEXITCODE = 0  # git config returns 1 when proxy is absent; that is not a failure
           foreach ($url in @('https://github.com','https://api.github.com','https://codeload.github.com','https://raw.githubusercontent.com')) {
             try {
               $req = [System.Net.WebRequest]::Create($url)
@@ -46,6 +47,19 @@ jobs:
               }
             } catch { Write-Host ($url + ': FAILURE: ' + $_.Exception.GetType().Name) }
           }
+      - name: Test Git transport modes without credentials
+        shell: powershell
+        run: |
+          $env:GIT_TERMINAL_PROMPT = '0'
+          $probe = 'https://github.com/actions/checkout.git'
+          Write-Host 'Checking public git protocol without printing GitHub tokens.'
+          git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=7 ls-remote $probe HEAD 2>$null | Out-Null
+          $defaultExit = $LASTEXITCODE
+          Write-Host ('Git default TLS/HTTP ls-remote result: ' + $defaultExit)
+          git -c http.version=HTTP/1.1 -c http.sslBackend=schannel -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=7 ls-remote $probe HEAD 2>$null | Out-Null
+          $compatExit = $LASTEXITCODE
+          Write-Host ('Git HTTP/1.1 + Schannel ls-remote result: ' + $compatExit)
+          $global:LASTEXITCODE = 0  # Diagnostic failures are reported, not fatal to subsequent API probe.
       - name: Test authenticated GitHub REST API for safe source fallback
         shell: powershell
         env:
