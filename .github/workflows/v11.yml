@@ -276,6 +276,13 @@ jobs:
         run: go test -race -count=1 ./...
       - name: Start isolated local Go Relay and run HTTP smoke checks
         run: bash relay/ci-smoke.sh
+      - name: Validate isolated p2ptest staging Compose (no Docker daemon)
+        env:
+          TEST_RELAY_ACCESS_TOKEN: "0000000000000000000000000000000000000000000000000000000000000000"
+        run: |
+          docker compose -f deploy/compose.test.yml config --quiet
+          # Ensure no public host port is exposed by staging.
+          docker compose -f deploy/compose.test.yml config --format json | python3 -c 'import json,sys; d=json.load(sys.stdin); p=d["services"]["relay-test"]["ports"]; assert len(p)==1 and p[0]["host_ip"]=="127.0.0.1" and p[0]["published"]=="18080", p; print("staging relay bound to loopback only")'
       - name: Validate optional STUN UDP Compose profile
         env:
           RELAY_DOMAIN: relay.example.com
