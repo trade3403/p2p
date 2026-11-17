@@ -52,6 +52,7 @@ struct App {
     viewer_clipboard: String,
     viewer_frame: Option<image::Handle>,
     viewer_online: bool,
+    viewer_pointer: (f32, f32),
     viewer_active: Arc<AtomicBool>,
     viewer_tx: Sender<String>,
     viewer_rx: Receiver<viewer::ViewerEvent>,
@@ -100,6 +101,7 @@ impl Default for App {
             viewer_clipboard: String::new(),
             viewer_frame: None,
             viewer_online: false,
+            viewer_pointer: (0.5, 0.5),
             viewer_active: Arc::new(AtomicBool::new(false)),
             viewer_tx,
             viewer_rx,
@@ -196,16 +198,17 @@ fn update(state: &mut App, msg: Msg) {
         Msg::ViewerMove(position) if state.viewer_online => {
             let x = (position.x / 800.0).clamp(0.0, 1.0);
             let y = (position.y / 450.0).clamp(0.0, 1.0);
+            state.viewer_pointer = (x,y);
             let _ = state.viewer_tx.send(serde_json::json!({"type":"move","x":x,"y":y}).to_string());
         }
         Msg::ViewerDown if state.viewer_online => {
-            let _ = state.viewer_tx.send(serde_json::json!({"type":"down","x":0.5,"y":0.5}).to_string());
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"down","x":state.viewer_pointer.0,"y":state.viewer_pointer.1}).to_string());
         }
         Msg::ViewerUp if state.viewer_online => {
-            let _ = state.viewer_tx.send(serde_json::json!({"type":"up","x":0.5,"y":0.5}).to_string());
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"up","x":state.viewer_pointer.0,"y":state.viewer_pointer.1}).to_string());
         }
         Msg::ViewerRight if state.viewer_online => {
-            let _ = state.viewer_tx.send(serde_json::json!({"type":"right_click","x":0.5,"y":0.5}).to_string());
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"right_click","x":state.viewer_pointer.0,"y":state.viewer_pointer.1}).to_string());
         }
         Msg::ViewerScroll(delta) if state.viewer_online => {
             let _ = state.viewer_tx.send(serde_json::json!({"type":"scroll","delta":delta}).to_string());
