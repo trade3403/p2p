@@ -10,6 +10,7 @@ mod stun;
 mod udp_punch;
 mod udp_video;
 mod viewer;
+mod viewer_geometry;
 
 use iced::{Font, widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
@@ -53,6 +54,9 @@ struct App {
     viewer_frame: Option<image::Handle>,
     viewer_online: bool,
     viewer_pointer: (f32, f32),
+    viewer_frame_size: (u32,u32),
+    viewer_pointer_valid: bool,
+    viewer_monitor_info: Option<viewer_geometry::Monitors>,
     viewer_active: Arc<AtomicBool>,
     viewer_tx: Sender<String>,
     viewer_rx: Receiver<viewer::ViewerEvent>,
@@ -102,6 +106,9 @@ impl Default for App {
             viewer_frame: None,
             viewer_online: false,
             viewer_pointer: (0.5, 0.5),
+            viewer_frame_size: (0,0),
+            viewer_pointer_valid: false,
+            viewer_monitor_info: None,
             viewer_active: Arc::new(AtomicBool::new(false)),
             viewer_tx,
             viewer_rx,
@@ -154,7 +161,7 @@ impl Drop for App {
 #[derive(Debug, Clone)]
 enum Msg { Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
-    H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet }
+    H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet, ViewerClipboardSet, ViewerKeyPress(&'static str) }
 
 fn update(state: &mut App, msg: Msg) {
     match msg {
@@ -181,6 +188,9 @@ fn update(state: &mut App, msg: Msg) {
             state.viewer_status = "正在连接远程 Windows...".into();
             state.viewer_online = false;
             state.viewer_frame = None;
+            state.viewer_monitor_info = None;
+            state.viewer_frame_size = (0,0);
+            state.viewer_pointer_valid = false;
             viewer::start(viewer::ViewerConfig {
                 server: state.server.clone(),
                 token: state.relay_token.clone(),
@@ -196,18 +206,24 @@ fn update(state: &mut App, msg: Msg) {
             state.viewer_status = "手动断开连接".into();
         }
         Msg::ViewerMove(position) if state.viewer_online => {
-            let x = (position.x / 800.0).clamp(0.0, 1.0);
-            let y = (position.y / 450.0).clamp(0.0, 1.0);
-            state.viewer_pointer = (x,y);
-            let _ = state.viewer_tx.send(serde_json::json!({"type":"move","x":x,"y":y}).to_string());
+            if let Some((x,y)) = viewer_geometry::normalized_pointer(
+                position.x,position.y,800.0,450.0,
+                state.viewer_frame_size.0,state.viewer_frame_size.1
+            ) {
+                state.viewer_pointer = (x,y);
+                state.viewer_pointer_valid = true;
+                let _ = state.viewer_tx.send(serde_json::json!({"type":"move","x":x,"y":y}).to_string());
+            } else {
+                state.viewer_pointer_valid = false;
+            }
         }
-        Msg::ViewerDown if state.viewer_online => {
+        Msg::ViewerDown if state.viewer_online && state.viewer_pointer_valid => {
             let _ = state.viewer_tx.send(serde_json::json!({"type":"down","x":state.viewer_pointer.0,"y":state.viewer_pointer.1}).to_string());
         }
-        Msg::ViewerUp if state.viewer_online => {
+        Msg::ViewerUp if state.viewer_online && state.viewer_pointer_valid => {
             let _ = state.viewer_tx.send(serde_json::json!({"type":"up","x":state.viewer_pointer.0,"y":state.viewer_pointer.1}).to_string());
         }
-        Msg::ViewerRight if state.viewer_online => {
+        Msg::ViewerRight if state.viewer_online && state.viewer_pointer_valid => {
             let _ = state.viewer_tx.send(serde_json::json!({"type":"right_click","x":state.viewer_pointer.0,"y":state.viewer_pointer.1}).to_string());
         }
         Msg::ViewerScroll(delta) if state.viewer_online => {
@@ -222,6 +238,13 @@ fn update(state: &mut App, msg: Msg) {
         }
         Msg::ViewerClipboardGet if state.viewer_online => {
             let _ = state.viewer_tx.send(serde_json::json!({"type":"clipboard_get"}).to_string());
+        }
+        Msg::ViewerClipboardSet if state.viewer_online && !state.viewer_text.is_empty() => {
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"clipboard_set","text":state.viewer_text}).to_string());
+            state.viewer_status = "剪贴板文字已请求发送（需被控端授权）".into();
+        }
+        Msg::ViewerKeyPress(key) if state.viewer_online => {
+            let _ = state.viewer_tx.send(serde_json::json!({"type":"key","key":key}).to_string());
         }
         Msg::Server(s) if !state.running.load(Ordering::SeqCst) => state.server = s,
         Msg::Token(s) if !state.running.load(Ordering::SeqCst) => state.relay_token = s,
@@ -373,8 +396,17 @@ fn update(state: &mut App, msg: Msg) {
                         state.viewer_tx = tx;
                         state.viewer_control_rx = Some(rx);
                     }
-                    viewer::ViewerEvent::Jpeg(bytes) => state.viewer_frame = Some(image::Handle::from_bytes(bytes)),
-                    viewer::ViewerEvent::Monitors(value) => state.viewer_monitors = value,
+                    viewer::ViewerEvent::Jpeg(bytes,width,height) => {
+                        state.viewer_frame_size = (width,height);
+                        state.viewer_frame = Some(image::Handle::from_bytes(bytes));
+                    },
+                    viewer::ViewerEvent::Monitors(value) => {
+                        state.viewer_monitor_info = viewer_geometry::Monitors::parse(&value);
+                        state.viewer_monitors = match state.viewer_monitor_info {
+                            Some(info) => format!("远程显示器 {}/{}", info.selected+1, info.count),
+                            None => "远程显示器元数据无效".into(),
+                        };
+                    },
                     viewer::ViewerEvent::Clipboard(value) => state.viewer_clipboard = value,
                 }
             }
@@ -572,14 +604,24 @@ fn view(state: &App) -> Element<'_, Msg> {
             button("右键").on_press(Msg::ViewerRight),
             button("上滚").on_press(Msg::ViewerScroll(-3)),
             button("下滚").on_press(Msg::ViewerScroll(3)),
-            button("上一显示器").on_press(Msg::ViewerMonitor(0)),
-            button("下一显示器").on_press(Msg::ViewerMonitor(1))
+            button("上一显示器").on_press_maybe(state.viewer_monitor_info.map(|m| Msg::ViewerMonitor(m.previous()))),
+            button("下一显示器").on_press_maybe(state.viewer_monitor_info.map(|m| Msg::ViewerMonitor(m.next())))
         ].spacing(9),
         row![
             text_input("向远程 Windows 输入文字", &state.viewer_text).on_input(Msg::ViewerText).padding(10),
             button("发送文字").on_press(Msg::ViewerSendText)
         ].spacing(9),
-        button("请求远程剪贴板文字").on_press(Msg::ViewerClipboardGet),
+        row![
+            button("Enter").on_press(Msg::ViewerKeyPress("enter")),
+            button("Backspace").on_press(Msg::ViewerKeyPress("backspace")),
+            button("Tab").on_press(Msg::ViewerKeyPress("tab")),
+            button("Esc").on_press(Msg::ViewerKeyPress("escape")),
+            button("Delete").on_press(Msg::ViewerKeyPress("delete"))
+        ].spacing(9),
+        row![
+            button("读取远程剪贴板").on_press(Msg::ViewerClipboardGet),
+            button("把输入文字发送到远程剪贴板").on_press(Msg::ViewerClipboardSet)
+        ].spacing(9),
         text(&state.viewer_clipboard).size(12),
         text(&state.viewer_monitors).size(12),
         text("本功能仅用于你拥有或获得授权的 Windows 主机。").size(12)
