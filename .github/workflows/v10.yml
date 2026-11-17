@@ -93,7 +93,7 @@ jobs:
           New-Item -ItemType Directory -Force dist/windows | Out-Null
           Copy-Item desktop/target/release/p2p-remote.exe dist/windows/P2PRemote.exe
           Copy-Item README.md dist/windows/README.md
-          Compress-Archive -Path dist/windows/* -DestinationPath P2PRemote-Windows-v0.10.0-test.zip
+          Compress-Archive -Path dist/windows/* -DestinationPath P2PRemote-Windows-v0.10.0-test.zip -Force
           (Get-FileHash P2PRemote-Windows-v0.10.0-test.zip -Algorithm SHA256).Hash | Out-File P2PRemote-Windows-v0.10.0-test.sha256 -Encoding ASCII
       - uses: actions/upload-artifact@v4
         with:
@@ -156,11 +156,42 @@ jobs:
         with:
           gradle-version: '8.10.2'
           cache-disabled: true
-      - name: Configure Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          packages: 'platform-tools'
-          log-accepted-android-sdk-licenses: 'false'
+      - name: Install official Android commandline tools (Windows)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:USERPROFILE '.android\sdk'
+          $bin = Join-Path $root 'cmdline-tools\latest\bin'
+          $manager = Join-Path $bin 'sdkmanager.bat'
+          if (-not (Test-Path $manager)) {
+            $archive = Join-Path $env:RUNNER_TEMP 'android-commandline-tools-15859902.zip'
+            $url = 'https://dl.google.com/android/repository/commandlinetools-win-15859902_latest.zip'
+            Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing -TimeoutSec 240
+            $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            $expected = '90ae805d20434428bffcb699c290860f19bb5f66a67e6b330067e3de801fb04a'
+            if ($actual -ne $expected) { throw "Official Android SDK commandline-tools SHA256 mismatch" }
+            $stage = Join-Path $env:RUNNER_TEMP 'android-cli-unpacked'
+            New-Item -ItemType Directory -Force -Path $stage | Out-Null
+            Expand-Archive -LiteralPath $archive -DestinationPath $stage -Force
+            $unpacked = Join-Path $stage 'cmdline-tools'
+            if (-not (Test-Path (Join-Path $unpacked 'bin\sdkmanager.bat'))) {
+              throw 'Official Android CLI ZIP has unexpected directory layout'
+            }
+            $parent = Join-Path $root 'cmdline-tools'
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+            $latest = Join-Path $parent 'latest'
+            if (Test-Path $latest) { Remove-Item $latest -Recurse -Force }
+            Move-Item -LiteralPath $unpacked -Destination $latest
+          }
+          if (-not (Test-Path $manager)) { throw "Android SDK manager not found" }
+          $env:ANDROID_HOME = $root
+          $env:ANDROID_SDK_ROOT = $root
+          "ANDROID_HOME=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ANDROID_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          1..40 | ForEach-Object { 'y' } | & $manager "--sdk_root=$root" --licenses
+          if ($LASTEXITCODE -ne 0) { throw "Android SDK license setup failed: $LASTEXITCODE" }
+          Write-Host "Android CLI ready at $manager"
       - name: Install Android SDK 35
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
