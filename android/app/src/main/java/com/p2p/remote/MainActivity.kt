@@ -117,8 +117,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             var server by remember { mutableStateOf(
-                getSharedPreferences("public_settings", MODE_PRIVATE).getString("relay_url", "wss://remote.example.com")
-                    ?: "wss://remote.example.com"
+                getSharedPreferences("public_settings", MODE_PRIVATE).getString("relay_url", "wss://p2p.aikissgo.com")
+                    ?: "wss://p2p.aikissgo.com"
             ) }
             var relayToken by remember { mutableStateOf("") }
             var lanIp by remember { mutableStateOf(
