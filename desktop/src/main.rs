@@ -7,6 +7,8 @@ mod host;
 mod protocol;
 #[allow(dead_code)]
 mod pairing_crypto;
+#[allow(dead_code)]
+mod pairing_api;
 mod reconnect;
 mod local_settings;
 mod remote_ops;
