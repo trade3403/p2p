@@ -35,6 +35,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
@@ -269,6 +270,19 @@ class MainActivity : ComponentActivity() {
                             }) { Text("粘贴密钥") }
                         }
 
+                        val parsedNumber = remember(sessionKey) {
+                            runCatching { DeviceNumber.fromSecret(decodeKey(sessionKey)) }.getOrNull()
+                        }
+                        if(parsedNumber!=null) {
+                            Row(verticalAlignment=Alignment.CenterVertically) {
+                                Text("电脑设备号：$parsedNumber",color=Accent,fontSize=15.sp,
+                                    modifier=Modifier.weight(1f))
+                                TextButton(onClick={
+                                    val mgr=getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    mgr.setPrimaryClip(ClipData.newPlainText("P2P Remote 设备号",parsedNumber))
+                                }) { Text("复制设备号") }
+                            }
+                        }
                         Button(onClick={ if (requested) disconnect() else connect(server, relayToken, sessionKey, lanIp) },modifier=Modifier.fillMaxWidth()) {
                             Text(if(requested)"停止连接 / 取消重试" else "连接电脑")
                         }
@@ -318,7 +332,8 @@ class MainActivity : ComponentActivity() {
                         Box(
                             Modifier.fillMaxWidth()
                                 .height(if(remoteExpanded) (screenHeightDp-180).coerceAtLeast(390).dp else 360.dp)
-                                .background(Color(0xFF0F1625),RoundedCornerShape(12.dp)),
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF0F1625)),
                             contentAlignment=Alignment.Center
                         ) {
                             // Zoom applies only to video; overlay receives unscaled coordinates.
