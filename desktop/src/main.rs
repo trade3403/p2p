@@ -280,8 +280,11 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
         }
         Msg::ViewerMove(position) if state.viewer_online => {
             if let Some((x,y)) = viewer_geometry::normalized_pointer(
-                position.x, position.y, state.viewer_scale.dimensions().0,
-                state.viewer_scale.dimensions().1,
+                position.x, position.y,
+                viewer_geometry::viewer_dimensions(state.viewer_fullscreen,
+                    state.window_size, state.viewer_scale.dimensions()).0,
+                viewer_geometry::viewer_dimensions(state.viewer_fullscreen,
+                    state.window_size, state.viewer_scale.dimensions()).1,
                 state.viewer_frame_size.0, state.viewer_frame_size.1
             ) {
                 state.viewer_pointer = (x,y);
@@ -685,7 +688,11 @@ fn view(state: &App) -> Element<'_, Msg> {
     ].spacing(13));
 
 
-    let (viewer_width, viewer_height) = state.viewer_scale.dimensions();
+    // The fullscreen viewer is a genuine OS fullscreen window. Size is tracked
+    // from iced resize events; both image and pointer use the same viewport.
+    let (viewer_width, viewer_height) = viewer_geometry::viewer_dimensions(
+        state.viewer_fullscreen, state.window_size, state.viewer_scale.dimensions()
+    );
     let remote_image: Element<'_, Msg> = if let Some(handle) = &state.viewer_frame {
         mouse_area(image(handle.clone())
                 .width(Length::Fixed(viewer_width))
@@ -705,53 +712,124 @@ fn view(state: &App) -> Element<'_, Msg> {
                     width: 1.0, radius: 12.0.into() }))
             .into()
     };
-    let viewer_panel = card(column![
-        heading("远程控制", "通过加密 WSS 连接另一台已授权的 Windows 电脑"),
-        text("双方需使用相同 Relay Token，远程 PC Host 必须启动并授权控制").size(13),
-        text_input("输入远程 PC 的 64 位会话密钥", &state.viewer_key).on_input(Msg::ViewerKey).secure(true).padding(12).size(15),
-        row![
-            button("连接远程 Windows").on_press_maybe((!state.viewer_active.load(Ordering::SeqCst)).then_some(Msg::ViewerConnect)),
-            button("断开 Viewer").on_press(Msg::ViewerDisconnect)
-        ].spacing(10),
-        text(&state.viewer_status).size(14)
-            .color(if state.viewer_online { Color::from_rgb8(98, 208, 166) }
-                else { Color::from_rgb8(181, 190, 204) }),
-        row![
-            text("画面大小").size(13),
-            button("紧凑").on_press(Msg::ViewerZoom(ViewerScale::Compact)).padding(9),
-            button("标准").on_press(Msg::ViewerZoom(ViewerScale::Standard)).padding(9),
-            button("放大").on_press(Msg::ViewerZoom(ViewerScale::Large)).padding(9),
-            text(format!("{} × {}", viewer_width as u32, viewer_height as u32))
-                .size(12).color(Color::from_rgb8(153, 164, 185))
-        ].spacing(9).align_y(iced::Alignment::Center),
-        text("Windows Viewer 当前仅支持 JPEG；被控端请关闭 H.264。宽屏/非宽屏均按黑边准确映射鼠标。").size(13),
-        remote_image,
-        row![
-            button("右键").on_press_maybe((state.viewer_online && state.viewer_pointer_valid).then_some(Msg::ViewerRight)),
-            button("上滚").on_press_maybe(state.viewer_online.then_some(Msg::ViewerScroll(-3))),
-            button("下滚").on_press_maybe(state.viewer_online.then_some(Msg::ViewerScroll(3))),
-            button("上一显示器").on_press_maybe(state.viewer_monitor_info.map(|m| Msg::ViewerMonitor(m.previous()))),
-            button("下一显示器").on_press_maybe(state.viewer_monitor_info.map(|m| Msg::ViewerMonitor(m.next())))
-        ].spacing(9),
-        row![
-            text_input("向远程 Windows 输入文字", &state.viewer_text).on_input(Msg::ViewerText).padding(10),
-            button("发送文字").on_press(Msg::ViewerSendText)
-        ].spacing(9),
-        row![
-            button("Enter").on_press(Msg::ViewerKeyPress("enter")),
-            button("Backspace").on_press(Msg::ViewerKeyPress("backspace")),
-            button("Tab").on_press(Msg::ViewerKeyPress("tab")),
-            button("Esc").on_press(Msg::ViewerKeyPress("escape")),
-            button("Delete").on_press(Msg::ViewerKeyPress("delete"))
-        ].spacing(9),
-        row![
-            button("读取远程剪贴板").on_press(Msg::ViewerClipboardGet),
-            button("把输入文字发送到远程剪贴板").on_press(Msg::ViewerClipboardSet)
-        ].spacing(9),
-        text(&state.viewer_clipboard).size(12),
-        text(&state.viewer_monitors).size(12),
-        text("本功能仅用于你拥有或获得授权的 Windows 主机。").size(12)
-    ].spacing(12));
+    // The host reports 1–16 screens. Prev/next work for every screen;
+    // show quick-select buttons for the first six without overflowing.
+    let monitor_bar: Element<'_, Msg> = if let Some(info) = state.viewer_monitor_info {
+        let mut chooser = row![text(format!("显示器 {}/{}", info.selected+1,info.count)).size(13)]
+            .spacing(7).align_y(iced::Alignment::Center);
+        for index in 0..info.count.min(6) {
+            chooser = chooser.push(button(format!("{}", index+1)).padding(8)
+                .on_press_maybe(state.viewer_online.then_some(Msg::ViewerMonitor(index))));
+        }
+        chooser.into()
+    } else {
+        row![text("等待远程显示器信息").size(13)].into()
+    };
+    let viewer_panel: Element<'_, Msg> = if state.viewer_fullscreen {
+        container(column![
+            row![
+                text("P2P REMOTE  /  远程全屏").size(17),
+                text(&state.viewer_status).size(13),
+                horizontal_space(),
+                button("退出全屏").on_press(Msg::ToggleViewerFullscreen).padding(10),
+                button("断开连接").on_press(Msg::ViewerDisconnect).padding(10)
+            ].spacing(12).align_y(iced::Alignment::Center),
+            remote_image,
+            row![
+                monitor_bar,
+                horizontal_space(),
+                button("上一屏").on_press_maybe(state.viewer_monitor_info
+                    .filter(|_|state.viewer_online).map(|m|Msg::ViewerMonitor(m.previous()))),
+                button("下一屏").on_press_maybe(state.viewer_monitor_info
+                    .filter(|_|state.viewer_online).map(|m|Msg::ViewerMonitor(m.next())))
+            ].spacing(12).align_y(iced::Alignment::Center),
+            row![
+                text("快捷操作").size(12),
+                button("右键").on_press_maybe((state.viewer_online && state.viewer_pointer_valid).then_some(Msg::ViewerRight)),
+                button("↑").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("up"))),
+                button("↓").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("down"))),
+                button("←").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("left"))),
+                button("→").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("right"))),
+                button("Esc").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("escape")))
+            ].spacing(8).align_y(iced::Alignment::Center)
+        ].spacing(12)).padding(16).width(Length::Fill).into()
+    } else {
+        card(column![
+            heading("远程控制", "通过加密 WSS 连接另一台已授权的 Windows 电脑"),
+            text("双方需使用相同 Relay Token，远程 PC Host 必须启动并授权控制").size(13),
+            text_input("输入远程 PC 的 64 位会话密钥", &state.viewer_key)
+                .on_input(Msg::ViewerKey).secure(true).padding(12).size(15),
+            row![
+                button("连接远程 Windows")
+                    .on_press_maybe((!state.viewer_active.load(Ordering::SeqCst)).then_some(Msg::ViewerConnect)),
+                button("断开 Viewer").on_press(Msg::ViewerDisconnect),
+                button("进入全屏").on_press(Msg::ToggleViewerFullscreen)
+            ].spacing(10),
+            text(&state.viewer_status).size(14)
+                .color(if state.viewer_online { Color::from_rgb8(98, 208, 166) }
+                    else { Color::from_rgb8(181, 190, 204) }),
+            row![
+                text("画面大小").size(13),
+                button("紧凑").on_press(Msg::ViewerZoom(ViewerScale::Compact)).padding(9),
+                button("标准").on_press(Msg::ViewerZoom(ViewerScale::Standard)).padding(9),
+                button("放大").on_press(Msg::ViewerZoom(ViewerScale::Large)).padding(9),
+                text(format!("{} × {}", viewer_width as u32, viewer_height as u32))
+                    .size(12).color(Color::from_rgb8(153, 164, 185))
+            ].spacing(9).align_y(iced::Alignment::Center),
+            text("Viewer 仍使用 WSS/JPEG，远程 Host 请关闭 H.264 编码。").size(13),
+            remote_image,
+            row![
+                monitor_bar,
+                button("上一屏").on_press_maybe(state.viewer_monitor_info
+                    .filter(|_|state.viewer_online).map(|m|Msg::ViewerMonitor(m.previous()))),
+                button("下一屏").on_press_maybe(state.viewer_monitor_info
+                    .filter(|_|state.viewer_online).map(|m|Msg::ViewerMonitor(m.next())))
+            ].spacing(9).align_y(iced::Alignment::Center),
+            row![
+                button("右键").on_press_maybe((state.viewer_online && state.viewer_pointer_valid).then_some(Msg::ViewerRight)),
+                button("上滚").on_press_maybe(state.viewer_online.then_some(Msg::ViewerScroll(-3))),
+                button("下滚").on_press_maybe(state.viewer_online.then_some(Msg::ViewerScroll(3)))
+            ].spacing(9),
+            row![
+                text_input("向远程 Windows 输入文字", &state.viewer_text)
+                    .on_input(Msg::ViewerText).padding(10),
+                button("发送文字").on_press_maybe(state.viewer_online.then_some(Msg::ViewerSendText))
+            ].spacing(9),
+            row![
+                button("↑").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("up"))),
+                button("↓").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("down"))),
+                button("←").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("left"))),
+                button("→").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("right"))),
+                button("Home").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("home"))),
+                button("End").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("end"))),
+                button("PgUp").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("page_up"))),
+                button("PgDn").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("page_down")))
+            ].spacing(8),
+            row![
+                button("Enter").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("enter"))),
+                button("Backspace").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("backspace"))),
+                button("Tab").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("tab"))),
+                button("Esc").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("escape"))),
+                button("Delete").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("delete"))),
+                button("空格").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("space")))
+            ].spacing(8),
+            row![
+                button("全选").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("ctrl_a"))),
+                button("复制").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("ctrl_c"))),
+                button("粘贴").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("ctrl_v"))),
+                button("剪切").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("ctrl_x"))),
+                button("撤销").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("ctrl_z"))),
+                button("重做").on_press_maybe(state.viewer_online.then_some(Msg::ViewerKeyPress("ctrl_y")))
+            ].spacing(8),
+            row![
+                button("读取远程剪贴板").on_press_maybe(state.viewer_online.then_some(Msg::ViewerClipboardGet)),
+                button("将输入文字送入远程剪贴板").on_press_maybe(state.viewer_online.then_some(Msg::ViewerClipboardSet))
+            ].spacing(9),
+            text(&state.viewer_clipboard).size(12),
+            text(&state.viewer_monitors).size(12),
+            text("快捷键仅在 Host 明确允许远程输入时生效，不支持 UAC 和安全桌面。").size(12)
+        ].spacing(12))
+    };
 
     // Sunlogin-inspired information architecture, with original P2P branding:
     // one primary task per screen instead of ten stacked configuration panels.
@@ -786,6 +864,12 @@ fn view(state: &App) -> Element<'_, Msg> {
     let body = scrollable(
         container(column![top, page_content].spacing(22)).padding(24).width(Length::Fill)
     ).width(Length::Fill).height(Length::Fill);
+    if state.viewer_fullscreen {
+        return container(scrollable(
+            container(column![top, page_content].spacing(8)).padding(12)
+        )).width(Length::Fill).height(Length::Fill)
+            .center_x(Length::Fill).into();
+    }
     container(row![side, body].height(Length::Fill))
         .width(Length::Fill).height(Length::Fill).into()
 }
