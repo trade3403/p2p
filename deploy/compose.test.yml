@@ -11,8 +11,11 @@ services:
     environment:
       RELAY_ACCESS_TOKEN: ${TEST_RELAY_ACCESS_TOKEN:?Set a separate test-only relay token}
       STUN_ENABLED: "false"
+      DEVICE_STORE_PATH: /data/devices.json
     ports:
       - "127.0.0.1:18080:8080/tcp"
+    volumes:
+      - relay_test_data:/data
     read_only: true
     cap_drop:
       - ALL
@@ -20,3 +23,6 @@ services:
       - no-new-privileges:true
     pids_limit: 128
     mem_limit: 256m
+volumes:
+  relay_test_data:
+
