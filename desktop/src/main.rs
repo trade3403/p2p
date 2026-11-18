@@ -505,6 +505,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             });
         }
         Msg::ViewerDisconnect => {
+            state.viewer_pairing_cancel.store(true, Ordering::SeqCst);
             if state.viewer_online {
                 let _ = state.viewer_tx.send(serde_json::json!({
                     "type":"up", "x":state.viewer_pointer.0, "y":state.viewer_pointer.1
