@@ -280,7 +280,7 @@ class MainActivity : ComponentActivity() {
                             color=Muted,fontSize=12.sp)
                         OutlinedTextField(
                             value=deviceNumber,
-                            onValueChange={deviceNumber=it.filter(Char::isDigit).take(9)},
+                            onValueChange={deviceNumber=it.filter { c -> c in '0'..'9' }.take(9)},
                             modifier=Modifier.fillMaxWidth(),
                             singleLine=true,
                             label={Text("9位设备号")},
@@ -288,7 +288,7 @@ class MainActivity : ComponentActivity() {
                         )
                         OutlinedTextField(
                             value=pairingCode,
-                            onValueChange={pairingCode=it.filter(Char::isDigit).take(6)},
+                            onValueChange={pairingCode=it.filter { c -> c in '0'..'9' }.take(6)},
                             modifier=Modifier.fillMaxWidth(),
                             singleLine=true,
                             visualTransformation=PasswordVisualTransformation(),
