@@ -509,13 +509,26 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                        Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(value=textToSend,onValueChange={textToSend=it},
-                                modifier=Modifier.weight(1f),singleLine=true,label={Text("发送文字到电脑")})
-                            Button(onClick={sendControlText(textToSend);textToSend=""},enabled=online && textToSend.isNotBlank()){
-                                Text("发送")
+                        Text("微信聊天：先在上方远程画面点选聊天输入框，再输入文字；是否按回车发送由你决定。",
+                            fontSize=12.sp,color=Muted)
+                        Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                            OutlinedTextField(value=textToSend,onValueChange={textToSend=it.take(500)},
+                                modifier=Modifier.weight(1f),singleLine=true,label={Text("输入到远程聊天框")})
+                            Button(onClick={sendControlText(textToSend);textToSend=""},
+                                enabled=online && hostAllowsInput!=false && textToSend.isNotBlank()){
+                                Text("输入")
                             }
                         }
+                        Button(
+                            onClick={
+                                val message=textToSend
+                                sendControlText(message)
+                                sendRemoteKey("enter")
+                                textToSend=""
+                            },
+                            enabled=online && hostAllowsInput!=false && textToSend.isNotBlank(),
+                            modifier=Modifier.fillMaxWidth()
+                        ) { Text("输入并按 Enter 发送聊天") }
                     }
                     }
                     if (mobilePage==2) {
