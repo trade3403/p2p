@@ -1,14 +1,14 @@
-name: P2P Remote V0.14.3 Pairing Reliability
+name: P2P Remote V0.15.0 UI Redesign
 
 on:
   push:
-    branches: ['feature/v0.14-*']
+    branches: ['feature/v0.15-*']
     paths:
       - 'desktop/**'
       - 'android/**'
       - 'relay/**'
       - 'installer/**'
-      - 'docs/V0.14*'
+      - 'docs/V0.15*'
       - '.github/workflows/v14.yml'
   workflow_dispatch:
 
@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: p2p-v14-windows-${{ github.ref }}
+  group: p2p-v15-ui-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -59,7 +59,7 @@ jobs:
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
-          name: P2PRemote-Android-v0.14.3-debug
+          name: P2PRemote-Android-v0.15.0-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
 
@@ -210,7 +210,7 @@ jobs:
             makensis /V3 P2PRemote.nsi
             if ($LASTEXITCODE -ne 0) { throw "NSIS installer compilation failed with exit code $LASTEXITCODE" }
           } finally { Pop-Location }
-          if (-not (Test-Path "P2PRemote-Setup-v0.14.3.exe")) { throw "NSIS output file was not generated" }
+          if (-not (Test-Path "P2PRemote-Setup-v0.15.0.exe")) { throw "NSIS output file was not generated" }
           Write-Host "Built per-user NSIS installer; user profile and logs remain outside install directory."
 
       - name: Hash Windows installer
@@ -219,35 +219,35 @@ jobs:
           $installer = Resolve-Path 'P2PRemote-Setup-v0.14.0.exe'
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           ($hash + '  P2PRemote-Setup-v0.14.0.exe') |
-            Out-File 'P2PRemote-Setup-v0.14.3.sha256' -Encoding ASCII
+            Out-File 'P2PRemote-Setup-v0.15.0.sha256' -Encoding ASCII
           Write-Host "Installer SHA256: $hash"
 
       - name: Package phase-one portable test build and SHA-256
         run: |
           $ErrorActionPreference = 'Stop'
-          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\v0.14.3-portable'
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\v0.15.0-portable'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item 'desktop/target/release/p2p-remote.exe' (Join-Path $dist 'P2PRemote.exe') -Force
           New-Item -ItemType File -Path (Join-Path $dist 'portable.flag') | Out-Null
           @'
-          P2P Remote V0.14.3 - Pairing reliability engineering build
+          P2P Remote V0.15.0 - UI redesign engineering build
           Includes a per-user NSIS installer and a portable ZIP for engineering validation.
           Configuration, DPAPI-protected device identity and logs are stored in the data folder beside this executable.
           Portable data is isolated from the installed version; DPAPI remains bound to this Windows user and machine.
           Close hides the main window to the notification area when tray initialization succeeds.
           Use the tray menu's "完全退出" command to stop all sessions and exit.
           '@ | Set-Content -Path (Join-Path $dist 'README.txt') -Encoding UTF8
-          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.14.3.zip'
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.15.0.zip'
           Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           ($hash + '  P2PRemote-Portable-v0.14.2.zip') |
-            Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.14.3.sha256') -Encoding ASCII
+            Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.15.0.sha256') -Encoding ASCII
           Write-Host "Portable package SHA256: $hash"
 
       - name: Upload phase-one artifact
         uses: actions/upload-artifact@v4
         with:
-          name: P2PRemote-Windows-v0.14.3
+          name: P2PRemote-Windows-v0.15.0
           path: |
             P2PRemote-Portable-v0.14.2.zip
             P2PRemote-Portable-v0.14.2.sha256
