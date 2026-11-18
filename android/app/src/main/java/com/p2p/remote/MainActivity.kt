@@ -316,48 +316,16 @@ class MainActivity : ComponentActivity() {
                             }) { Text("还原") }
                         }
                         Box(
-                            Modifier.fillMaxWidth().height(240.dp)
-                                .background(Color(0xFF0F1625),RoundedCornerShape(12.dp))
-                                .pointerInput(online, h264Active, displayWidth, displayHeight) {
-                                    if (!online) return@pointerInput
-                                    awaitEachGesture {
-                                        val down = awaitFirstDown(requireUnconsumed=false)
-                                        val first = RemoteGeometry.normalizedPointer(
-                                            down.position.x,down.position.y,
-                                            size.width.toFloat(),size.height.toFloat(),
-                                            displayWidth,displayHeight
-                                        )
-                                        if(first==null) return@awaitEachGesture
-                                        pointerX=first.first; pointerY=first.second
-                                        pointerValid=true
-                                        sendControl("down",first.first,first.second)
-                                        try {
-                                            do {
-                                                val event=awaitPointerEvent()
-                                                val change=event.changes.firstOrNull() ?: break
-                                                val position=RemoteGeometry.normalizedPointer(
-                                                    change.position.x,change.position.y,
-                                                    size.width.toFloat(),size.height.toFloat(),
-                                                    displayWidth,displayHeight
-                                                )
-                                                if(position!=null) {
-                                                    pointerX=position.first; pointerY=position.second
-                                                }
-                                                if(change.pressed) {
-                                                    if(position!=null) sendControl("move",position.first,position.second)
-                                                } else {
-                                                    break
-                                                }
-                                            } while(true)
-                                        } finally {
-                                            // Release the held button even on gesture cancellation
-                                            // or switching tabs during a drag.
-                                            sendControl("up",pointerX,pointerY)
-                                        }
-                                    }
-                                },
+                            Modifier.fillMaxWidth()
+                                .height(if(remoteExpanded) (screenHeightDp-180).coerceAtLeast(390).dp else 360.dp)
+                                .background(Color(0xFF0F1625),RoundedCornerShape(12.dp)),
                             contentAlignment=Alignment.Center
                         ) {
+                            // Zoom applies only to video; overlay receives unscaled coordinates.
+                            Box(Modifier.fillMaxSize().graphicsLayer {
+                                scaleX=remoteZoom; scaleY=remoteZoom
+                                translationX=remotePanX; translationY=remotePanY
+                            },contentAlignment=Alignment.Center) {
                             if(h264Active){
                                 AndroidView(
                                     factory={ context ->
@@ -396,10 +364,94 @@ class MainActivity : ComponentActivity() {
                             }else{
                                 Text("连接后在这里显示电脑屏幕",color=Muted,fontSize=13.sp)
                             }
+                            }
+                            // On top of native TextureView so video cannot swallow taps.
+                            Box(Modifier.matchParentSize()
+                                .pointerInput(online,h264Active,displayWidth,displayHeight) {
+                                    if(!online) return@pointerInput
+                                    awaitEachGesture {
+                                        val down=awaitFirstDown(requireUnconsumed=false)
+                                        val startX=down.position.x
+                                        val startY=down.position.y
+                                        var dragging=false
+                                        var pinching=false
+                                        try {
+                                            while(true) {
+                                                val event=awaitPointerEvent()
+                                                val active=event.changes.filter{it.pressed}
+                                                if(active.size>=2) {
+                                                    if(dragging) {
+                                                        sendControl("up",pointerX,pointerY)
+                                                        dragging=false
+                                                    }
+                                                    pinching=true
+                                                    remoteZoom=(remoteZoom*event.calculateZoom()).coerceIn(1f,4f)
+                                                    val pan=event.calculatePan()
+                                                    remotePanX=RemoteGeometry.boundPan(
+                                                        remotePanX+pan.x,remoteZoom,size.width.toFloat())
+                                                    remotePanY=RemoteGeometry.boundPan(
+                                                        remotePanY+pan.y,remoteZoom,size.height.toFloat())
+                                                    event.changes.forEach{it.consume()}
+                                                    continue
+                                                }
+                                                if(active.isEmpty()) {
+                                                    if(!pinching && !dragging) {
+                                                        val hit=RemoteGeometry.transformedPointer(
+                                                            startX,startY,size.width.toFloat(),size.height.toFloat(),
+                                                            displayWidth,displayHeight,remoteZoom,remotePanX,remotePanY
+                                                        )
+                                                        if(hit!=null) {
+                                                            pointerX=hit.first;pointerY=hit.second
+                                                            pointerValid=true
+                                                            sendControl("down",pointerX,pointerY)
+                                                            sendControl("up",pointerX,pointerY)
+                                                        }
+                                                    }
+                                                    event.changes.forEach{it.consume()}
+                                                    break
+                                                }
+                                                if(!pinching) {
+                                                    val point=active.first().position
+                                                    val hit=RemoteGeometry.transformedPointer(
+                                                        point.x,point.y,size.width.toFloat(),size.height.toFloat(),
+                                                        displayWidth,displayHeight,remoteZoom,remotePanX,remotePanY
+                                                    )
+                                                    val distance=kotlin.math.hypot(point.x-startX,point.y-startY)
+                                                    if(!dragging && distance>9f) {
+                                                        val first=RemoteGeometry.transformedPointer(
+                                                            startX,startY,size.width.toFloat(),size.height.toFloat(),
+                                                            displayWidth,displayHeight,remoteZoom,remotePanX,remotePanY
+                                                        )
+                                                        if(first!=null) {
+                                                            pointerX=first.first;pointerY=first.second
+                                                            pointerValid=true
+                                                            sendControl("down",pointerX,pointerY)
+                                                            dragging=true
+                                                        }
+                                                    }
+                                                    if(dragging && hit!=null) {
+                                                        pointerX=hit.first;pointerY=hit.second
+                                                        sendControl("move",pointerX,pointerY)
+                                                    }
+                                                }
+                                                event.changes.forEach{it.consume()}
+                                            }
+                                        } finally {
+                                            if(dragging) sendControl("up",pointerX,pointerY)
+                                        }
+                                    }
+                                })
                         }
                         Text(if(h264Active)"视频模式：H.264 · Android MediaCodec"
                             else "视频模式：JPEG（兼容模式）",color=Muted,fontSize=12.sp)
-                        Text("触摸 = 左键 · 滑动 = 拖拽（电脑端需要授权）",color=Muted,fontSize=12.sp)
+                        Text("轻点=左键 · 单指拖动=鼠标拖拽 · 双指缩放/平移（最高 4×）",
+                            color=Muted,fontSize=12.sp)
+                        Text(when(hostAllowsInput){
+                            true -> "电脑端已允许远程鼠标和键盘操作"
+                            false -> "电脑端尚未允许输入：请在 Windows【安全与画质】打开授权"
+                            null -> "等待电脑返回输入权限状态"
+                        },color=if(hostAllowsInput==true) Color(0xFF72D9AB) else Color(0xFFFFB785),
+                            fontSize=12.sp)
                         Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(7.dp)) {
                             Text("显示器 ${selectedMonitor+1}/$monitorCount",fontSize=13.sp,color=Muted,modifier=Modifier.weight(1f))
                             Button(onClick={selectMonitor((selectedMonitor-1+monitorCount)%monitorCount)},enabled=online && monitorCount>1) {Text("上一屏")}
