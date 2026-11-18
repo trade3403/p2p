@@ -74,6 +74,68 @@ pub fn save(profile: &TrustedProfile) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredDeviceIdentity {
+    device_id: String,
+    signing_seed_hex: String,
+}
+
+fn identity_path() -> io::Result<PathBuf> {
+    let base = std::env::var_os("APPDATA")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unset"))?;
+    Ok(PathBuf::from(base).join("P2PRemote").join("device-identity.bin"))
+}
+
+/// Load or create the long-lived Ed25519 device identity. Existing unreadable
+/// identity files fail closed; they are never silently replaced.
+pub fn load_or_create_device_identity() -> io::Result<(String, [u8; 32])> {
+    let path = identity_path()?;
+    match fs::read(&path) {
+        Ok(encrypted) => {
+            if encrypted.len() > 4096 {
+                return Err(invalid("device identity file too large"));
+            }
+            let clear = decrypt(&encrypted)?;
+            let stored: StoredDeviceIdentity =
+                serde_json::from_slice(&clear).map_err(io::Error::other)?;
+            if stored.device_id.len() != 32
+                || !stored.device_id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                || stored.signing_seed_hex.len() != 64
+                || !stored.signing_seed_hex.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(invalid("stored device identity is invalid"));
+            }
+            let seed = hex::decode(stored.signing_seed_hex)
+                .map_err(|_| invalid("stored device identity seed is invalid"))?;
+            let seed = <[u8; 32]>::try_from(seed)
+                .map_err(|_| invalid("stored device identity seed has wrong length"))?;
+            Ok((stored.device_id, seed))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            use rand::RngCore;
+            let mut device_id = [0u8; 16];
+            let mut seed = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut device_id);
+            rand::rngs::OsRng.fill_bytes(&mut seed);
+            let stored = StoredDeviceIdentity {
+                device_id: hex::encode(device_id),
+                signing_seed_hex: hex::encode(seed),
+            };
+            let clear = serde_json::to_vec(&stored).map_err(io::Error::other)?;
+            let encrypted = encrypt(&clear)?;
+            if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+            let temp = path.with_extension("tmp");
+            fs::write(&temp, encrypted)?;
+            if let Err(rename_error) = fs::rename(&temp, &path) {
+                let _ = fs::remove_file(&temp);
+                return Err(rename_error);
+            }
+            Ok((stored.device_id, seed))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub fn revoke() -> io::Result<()> {
     match fs::remove_file(vault_path()?) {
         Ok(()) => Ok(()),
