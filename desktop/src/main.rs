@@ -244,12 +244,13 @@ impl Drop for App {
         tracing::info!("P2P Remote shutting down; stopping host and viewer sessions");
         self.running.store(false, Ordering::SeqCst);
         self.viewer_active.store(false, Ordering::SeqCst);
+        self.viewer_pairing_cancel.store(true, Ordering::SeqCst);
+        self.viewer_pairing_active.store(false, Ordering::SeqCst);
         self.allow_input.store(false, Ordering::SeqCst);
         self.allow_clipboard.store(false, Ordering::SeqCst);
     }
 }
 
-#[derive(Debug, Clone)]
 fn submit_pairing_decision(state: &mut App, approved: bool) {
     #[cfg(windows)]
     {
@@ -272,6 +273,7 @@ fn submit_pairing_decision(state: &mut App, approved: bool) {
     }
 }
 
+#[derive(Debug, Clone)]
 enum Msg { Navigate(Page), ViewerZoom(ViewerScale), ToggleViewerFullscreen,
     ViewerWindow(Option<window::Id>), WindowResized(f32, f32),
     CloseRequested(window::Id), ShowWindow(Option<window::Id>), HideWindow(Option<window::Id>), ExitWindow(Option<window::Id>),
