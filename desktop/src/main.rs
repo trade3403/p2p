@@ -203,8 +203,8 @@ impl Default for App {
         app
     }
 }
-// Closing the visible window must terminate the session; never leave a
-// hidden capture thread connected after the owner exits the application.
+// Final application shutdown must stop every session. Hiding the window is
+// handled separately and deliberately does not drop this application state.
 impl Drop for App {
     fn drop(&mut self) {
         tracing::info!("P2P Remote shutting down; stopping host and viewer sessions");
@@ -396,7 +396,10 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
         }
         Msg::Server(s) if !state.running.load(Ordering::SeqCst) => state.server = s,
         Msg::Token(s) if !state.running.load(Ordering::SeqCst) => state.relay_token = s,
-        Msg::Allow(value) => state.allow_input.store(value, Ordering::SeqCst),
+        Msg::Allow(value) => {
+            state.allow_input.store(value, Ordering::SeqCst);
+            state.tray_input_paused = false;
+        },
         Msg::Clipboard(value) => state.allow_clipboard.store(value, Ordering::SeqCst),
         Msg::ProbeNetwork => {
             state.diagnostics = "正在发送 STUN UDP 探测（最多约 2 秒）".into();
