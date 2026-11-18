@@ -59,10 +59,14 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.min
 
-private val Ink = Color(0xFF0D1422)
-private val Panel = Color(0xFF182437)
-private val Accent = Color(0xFF55C7E8)
-private val Muted = Color(0xFF9EACC0)
+// V0.15 visual system: deep navy surfaces, mint interaction accent and
+// high-contrast typography shared by the pairing and remote-control screens.
+private val Ink = Color(0xFF0A1220)
+private val Panel = Color(0xFF142238)
+private val Accent = Color(0xFF54D6C5)
+private val Muted = Color(0xFFA8B8CC)
+private val PanelRaised = Color(0xFF1A2B43)
+private val OutlineSoft = Color(0xFF2B405B)
 
 class MainActivity : ComponentActivity() {
     private val trustedStore by lazy { TrustedPairingStore(this) }
@@ -152,17 +156,25 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(selectedMonitor, online) {
                 remoteZoom = 1f; remotePanX = 0f; remotePanY = 0f
             }
-            MaterialTheme(colorScheme=darkColorScheme(primary=Accent, background=Ink,surface=Panel,onSurface=Color.White,onBackground=Color.White)) {
+            MaterialTheme(colorScheme=darkColorScheme(
+                primary=Accent, onPrimary=Color(0xFF06201E),
+                secondary=Color(0xFFFFC58B), onSecondary=Color(0xFF24180B),
+                background=Ink, onBackground=Color(0xFFF2F6FC),
+                surface=Panel, onSurface=Color(0xFFF2F6FC),
+                surfaceVariant=PanelRaised, onSurfaceVariant=Muted,
+                outline=OutlineSoft
+            )) {
                 Scaffold(
                     containerColor=Ink,
                     bottomBar={
-                        NavigationBar(containerColor=Panel) {
-                            listOf("连接设备","远程画面","更多设置").forEachIndexed { index, label ->
+                        NavigationBar(containerColor=Panel, tonalElevation=8.dp) {
+                            listOf("设备","远程桌面","设置").forEachIndexed { index, label ->
                                 NavigationBarItem(
                                     selected=mobilePage==index,
                                     onClick={mobilePage=index},
-                                    icon={Text(listOf("连","控","设")[index],fontSize=16.sp)},
-                                    label={Text(label,fontSize=12.sp)}
+                                    icon={Text(listOf("⌂","▣","⚙")[index],fontSize=19.sp,fontWeight=FontWeight.SemiBold)},
+                                    label={Text(label,fontSize=11.sp,fontWeight=if(mobilePage==index) FontWeight.SemiBold else FontWeight.Normal)},
+                                    alwaysShowLabel=true
                                 )
                             }
                         }
@@ -174,20 +186,27 @@ class MainActivity : ComponentActivity() {
                     verticalArrangement=Arrangement.spacedBy(15.dp)
                 ) {
                     Row(verticalAlignment=Alignment.CenterVertically) {
-                        Column(modifier=Modifier.weight(1f), verticalArrangement=Arrangement.spacedBy(3.dp)) {
-                            Text("P2P REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
-                            Text("远程桌面",fontSize=28.sp,fontWeight=FontWeight.Bold)
-                            Text("安全连接你的 Windows 设备",fontSize=13.sp,color=Muted)
+                        Column(modifier=Modifier.weight(1f), verticalArrangement=Arrangement.spacedBy(5.dp)) {
+                            Surface(
+                                shape=RoundedCornerShape(8.dp),
+                                color=Color(0xFF163B43)
+                            ) {
+                                Text("P2P REMOTE  /  V0.15",modifier=Modifier.padding(horizontal=10.dp,vertical=5.dp),
+                                    fontSize=10.sp,color=Accent,letterSpacing=1.4.sp,fontWeight=FontWeight.Bold)
+                            }
+                            Text("远程桌面",fontSize=29.sp,fontWeight=FontWeight.Bold,color=Color(0xFFF2F6FC))
+                            Text("安全连接并控制你的 Windows 设备",fontSize=13.sp,color=Muted)
                         }
                         Surface(
-                            shape=RoundedCornerShape(24.dp),
-                            color=if(online) Color(0xFF17483F) else Color(0xFF26354A)
+                            shape=RoundedCornerShape(12.dp),
+                            color=if(online) Color(0xFF153E38) else PanelRaised,
+                            border=androidx.compose.foundation.BorderStroke(1.dp,if(online) Color(0xFF28685B) else OutlineSoft)
                         ) {
                             Text(
                                 if(online) "● 已连接" else "○ 未连接",
-                                modifier=Modifier.padding(horizontal=13.dp, vertical=8.dp),
-                                fontSize=12.sp,
-                                color=if(online) Color(0xFF72D9AB) else Muted
+                                modifier=Modifier.padding(horizontal=12.dp, vertical=9.dp),
+                                fontSize=11.sp,fontWeight=FontWeight.SemiBold,
+                                color=if(online) Color(0xFF82E4C1) else Muted
                             )
                         }
                     }
@@ -664,13 +683,19 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable private fun PanelCard(content:@Composable ColumnScope.()->Unit) {
-        Column(
-            Modifier.fillMaxWidth()
-                .background(Panel,RoundedCornerShape(18.dp))
-                .padding(18.dp),
-            verticalArrangement=Arrangement.spacedBy(13.dp),
-            content=content
-        )
+        Surface(
+            modifier=Modifier.fillMaxWidth(),
+            shape=RoundedCornerShape(20.dp),
+            color=Panel,
+            tonalElevation=2.dp,
+            border=androidx.compose.foundation.BorderStroke(1.dp,OutlineSoft)
+        ) {
+            Column(
+                Modifier.fillMaxWidth().padding(20.dp),
+                verticalArrangement=Arrangement.spacedBy(14.dp),
+                content=content
+            )
+        }
     }
 
     private fun connect(server: String, relayToken: String, keyText: String, lanIp: String) {
