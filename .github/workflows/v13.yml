@@ -1,0 +1,293 @@
+name: V0.13 Fullscreen Keyboard Multi-monitor
+
+on:
+  push:
+    branches: ['feature/v0.13-*']
+    paths:
+      - 'desktop/**'
+      - 'android/**'
+      - 'relay/**'
+      - 'deploy/**'
+      - '.github/workflows/v13.yml'
+  pull_request:
+    branches: [main]  # Development feature PRs use the branch push run to avoid duplicate builds.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v13-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Rust Windows V0.13 EXE
+    # Owner PC-202310201945 self-hosted Windows runner.
+    # Must be ONLINE and have default self-hosted / Windows / X64 labels.
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      # Git for Windows intermittently resets HTTPS connections for this private repo.
+      # The official authenticated GitHub ZIP archive avoids Git TCP fetch entirely.
+      - name: Retrieve this commit from official GitHub archive API
+        id: source_archive
+        continue-on-error: true
+        shell: powershell
+        env:
+          GH_SOURCE_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-archive-' + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $zip = Join-Path $archiveRoot 'source.zip'
+          $uri = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/zipball/' + $env:GITHUB_SHA
+          $headers = @{ Authorization = ('Bearer ' + $env:GH_SOURCE_TOKEN); 'User-Agent' = 'p2p-v011-selfhost-ci'; Accept = 'application/vnd.github+json' }
+          Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $zip -UseBasicParsing -TimeoutSec 90
+          if ((Get-Item $zip).Length -lt 1024) { throw 'GitHub repository ZIP archive is empty' }
+          $unpack = Join-Path $archiveRoot 'extracted'
+          Expand-Archive -Path $zip -DestinationPath $unpack -Force
+          $root = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
+          if (-not $root) { throw 'Official archive contains no repository directory' }
+          Get-ChildItem -LiteralPath $root.FullName -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force
+          }
+          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop/Cargo.toml'))) { throw 'Missing desktop manifest after archive extraction' }
+          Write-Host ('Verified source archive checkout for commit ' + $env:GITHUB_SHA)
+      - uses: actions/checkout@v4
+        if: steps.source_archive.outcome == 'failure'
+      - name: Prefer Git Bash over WSL when installing Rust
+        shell: powershell
+        run: |
+          $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          if (-not (Test-Path $bash)) { throw "Git Bash not installed at $bash" }
+          $gitBin = Split-Path -Parent $bash
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, $gitBin + [Environment]::NewLine, $utf8)
+          & $bash -c 'echo Git Bash ready'
+          if ($LASTEXITCODE -ne 0) { throw "Git Bash execution failed" }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify self-hosted Windows environment
+        shell: powershell
+        run: |
+          Write-Host "Self-hosted runner: $env:RUNNER_NAME"
+          Write-Host "Runner OS: $env:RUNNER_OS / $env:RUNNER_ARCH"
+          Write-Host "Working directory: $env:GITHUB_WORKSPACE"
+          rustc --version
+          cargo --version
+          if (-not (Test-Path "desktop/Cargo.toml")) { throw "Missing desktop Cargo.toml" }
+          $disk = (Get-PSDrive -Name ((Get-Location).Drive.Name)).Free
+          Write-Host ("Free disk space: {0:N1} GB" -f ($disk / 1GB))
+          if ($disk -lt 5GB) { throw "Insufficient free disk: require at least 5 GB" }
+      # This self-hosted PC retains desktop/target across jobs; avoid a large remote cache upload.
+      - name: Run Rust tests (UDP punch, STUN, crypto, LAN)
+        run: cargo test --manifest-path desktop/Cargo.toml
+      - name: Build Windows Release EXE
+        run: cargo build --manifest-path desktop/Cargo.toml --release
+      - name: Package and hash portable EXE
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist/windows | Out-Null
+          Copy-Item desktop/target/release/p2p-remote.exe dist/windows/P2PRemote.exe
+          Copy-Item README.md dist/windows/README.md
+          Compress-Archive -Path dist/windows/* -DestinationPath P2PRemote-Windows-v0.13.0-test.zip -Force
+          (Get-FileHash P2PRemote-Windows-v0.13.0-test.zip -Algorithm SHA256).Hash | Out-File P2PRemote-Windows-v0.13.0-test.sha256 -Encoding ASCII
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Windows-v0.13.0-test
+          path: |
+            P2PRemote-Windows-v0.13.0-test.zip
+            P2PRemote-Windows-v0.13.0-test.sha256
+          retention-days: 14
+
+  android:
+    name: Android Compose V0.13 APK (owner Windows)
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+        working-directory: android
+    steps:
+      # Git for Windows intermittently resets HTTPS connections for this private repo.
+      # The official authenticated GitHub ZIP archive avoids Git TCP fetch entirely.
+      - name: Retrieve this commit from official GitHub archive API
+        id: source_archive
+        continue-on-error: true
+        shell: powershell
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_SOURCE_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-archive-' + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $zip = Join-Path $archiveRoot 'source.zip'
+          $uri = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/zipball/' + $env:GITHUB_SHA
+          $headers = @{ Authorization = ('Bearer ' + $env:GH_SOURCE_TOKEN); 'User-Agent' = 'p2p-v011-selfhost-ci'; Accept = 'application/vnd.github+json' }
+          Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $zip -UseBasicParsing -TimeoutSec 90
+          if ((Get-Item $zip).Length -lt 1024) { throw 'GitHub repository ZIP archive is empty' }
+          $unpack = Join-Path $archiveRoot 'extracted'
+          Expand-Archive -Path $zip -DestinationPath $unpack -Force
+          $root = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
+          if (-not $root) { throw 'Official archive contains no repository directory' }
+          Get-ChildItem -LiteralPath $root.FullName -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force
+          }
+          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop/Cargo.toml'))) { throw 'Missing desktop manifest after archive extraction' }
+          Write-Host ('Verified source archive checkout for commit ' + $env:GITHUB_SHA)
+      - uses: actions/checkout@v4
+        if: steps.source_archive.outcome == 'failure'
+      - name: Configure Git Bash PATH
+        shell: powershell
+        run: |
+          $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          if (-not (Test-Path $bash)) { throw "Git Bash not installed at $bash" }
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, (Split-Path -Parent $bash) + [Environment]::NewLine, $utf8)
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+          cache-disabled: true
+      - name: Install official Android commandline tools (Windows)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:USERPROFILE '.android\sdk'
+          $bin = Join-Path $root 'cmdline-tools\latest\bin'
+          $manager = Join-Path $bin 'sdkmanager.bat'
+          if (-not (Test-Path $manager)) {
+            $archive = Join-Path $env:RUNNER_TEMP 'android-commandline-tools-15859902.zip'
+            $url = 'https://dl.google.com/android/repository/commandlinetools-win-15859902_latest.zip'
+            Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing -TimeoutSec 240
+            $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            $expected = '90ae805d20434428bffcb699c290860f19bb5f66a67e6b330067e3de801fb04a'
+            if ($actual -ne $expected) { throw "Official Android SDK commandline-tools SHA256 mismatch" }
+            $stage = Join-Path $env:RUNNER_TEMP 'android-cli-unpacked'
+            New-Item -ItemType Directory -Force -Path $stage | Out-Null
+            Expand-Archive -LiteralPath $archive -DestinationPath $stage -Force
+            $unpacked = Join-Path $stage 'cmdline-tools'
+            if (-not (Test-Path (Join-Path $unpacked 'bin\sdkmanager.bat'))) {
+              throw 'Official Android CLI ZIP has unexpected directory layout'
+            }
+            $parent = Join-Path $root 'cmdline-tools'
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+            $latest = Join-Path $parent 'latest'
+            if (Test-Path $latest) { Remove-Item $latest -Recurse -Force }
+            Move-Item -LiteralPath $unpacked -Destination $latest
+          }
+          if (-not (Test-Path $manager)) { throw "Android SDK manager not found" }
+          $env:ANDROID_HOME = $root
+          $env:ANDROID_SDK_ROOT = $root
+          "ANDROID_HOME=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ANDROID_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          # Windows PowerShell does not reliably send its pipeline to .bat stdin.
+          # Use cmd.exe input redirection, then explicitly verify accepted licenses.
+          $answers = Join-Path $env:RUNNER_TEMP 'android-sdk-license-answers.txt'
+          [System.IO.File]::WriteAllText($answers, (('y' + [Environment]::NewLine) * 50), (New-Object System.Text.UTF8Encoding($false)))
+          $command = 'type "{0}" | "{1}" "--sdk_root={2}" --licenses' -f $answers, $manager, $root
+          # PowerShell 5.1 raises NativeCommandError for warnings written to
+          # STDERR by sdkmanager.bat even when it exits successfully.
+          $ErrorActionPreference = 'Continue'
+          $output = & $env:ComSpec /D /S /C $command 2>&1
+          $exit = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          $output | Select-Object -Last 18 | ForEach-Object { Write-Host $_ }
+          $licensePath = Join-Path $root 'licenses\android-sdk-license'
+          if ($exit -ne 0 -or -not (Test-Path $licensePath)) {
+            throw "Android SDK licenses were NOT accepted correctly (exit=$exit)"
+          }
+          Write-Host "Android CLI and standard SDK licenses ready at $manager"
+      - name: Install Android SDK 35
+        run: |
+          $manager = Join-Path $env:ANDROID_SDK_ROOT 'cmdline-tools\latest\bin\sdkmanager.bat'
+          & $manager "--sdk_root=$env:ANDROID_SDK_ROOT" "platforms;android-35" "build-tools;35.0.0" "build-tools;34.0.0"
+          if ($LASTEXITCODE -ne 0) { throw "Android SDK install failed: $LASTEXITCODE" }
+          foreach ($installed in @('platforms\android-35\android.jar','build-tools\34.0.0\aapt2.exe','build-tools\35.0.0\aapt2.exe')) {
+            if (-not (Test-Path (Join-Path $env:ANDROID_SDK_ROOT $installed))) {
+              throw "Missing Android SDK component after sdkmanager: $installed"
+            }
+          }
+          Write-Host "Android SDK root: $env:ANDROID_SDK_ROOT"
+          java -version
+          gradle --version
+      - name: Run Android tests (STUN, UDP fragments, LAN and reconnect)
+        run: |
+          gradle --no-daemon :app:testDebugUnitTest
+          if ($LASTEXITCODE -ne 0) { throw "Android JVM tests failed: $LASTEXITCODE" }
+      - name: Build Android debug APK
+        run: |
+          gradle --no-daemon :app:assembleDebug
+          if ($LASTEXITCODE -ne 0) { throw "Android APK build failed: $LASTEXITCODE" }
+      - name: Package and hash APK
+        shell: powershell
+        run: |
+          $apk = Join-Path $env:GITHUB_WORKSPACE 'android\app\build\outputs\apk\debug\app-debug.apk'
+          if (-not (Test-Path $apk)) { throw "Android APK missing at $apk" }
+          $target = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Android-v0.13.0-debug.apk'
+          Copy-Item $apk $target -Force
+          $sha = (Get-FileHash $target -Algorithm SHA256).Hash.ToLowerInvariant()
+          ($sha + '  P2PRemote-Android-v0.13.0-debug.apk') | Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Android-v0.13.0-debug.sha256') -Encoding ASCII
+          Write-Host ("APK size: {0:N2} MB, SHA256: {1}" -f ((Get-Item $target).Length/1MB),$sha)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Android-v0.13.0-debug
+          path: |
+            P2PRemote-Android-v0.13.0-debug.apk
+            P2PRemote-Android-v0.13.0-debug.sha256
+          retention-days: 14
+
+  relay:
+    name: Go Relay Unit Tests and Compose Validation (owner Ubuntu)
+    # Dedicated runner on Ubuntu VPS; NEVER deploy/restart production services here.
+    # Do not execute untrusted pull request code on the production-adjacent runner.
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, Linux, X64, linux-relay]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: Verify Ubuntu runner and Go prerequisites
+        run: |
+          set -euo pipefail
+          echo "Runner: ${RUNNER_NAME} / ${RUNNER_OS} / ${RUNNER_ARCH}"
+          test "${RUNNER_OS}" = "Linux"
+          go version
+          # No docker.sock permission is needed for Go unit tests.
+      - name: Verify checked-in Go module checksums
+        working-directory: relay
+        run: |
+          go mod download
+          go mod verify
+          git diff --exit-code -- go.mod go.sum
+      - name: Go race and security tests
+        working-directory: relay
+        run: go test -race -count=1 ./...
+      - name: Start isolated local Go Relay and run HTTP smoke checks
+        run: bash relay/ci-smoke.sh
+      - name: Validate isolated p2ptest staging Compose (no Docker daemon)
+        env:
+          TEST_RELAY_ACCESS_TOKEN: "0000000000000000000000000000000000000000000000000000000000000000"
+        run: |
+          docker compose -f deploy/compose.test.yml config --quiet
+          # Ensure no public host port is exposed by staging.
+          docker compose -f deploy/compose.test.yml config --format json | python3 -c 'import json,sys; d=json.load(sys.stdin); p=d["services"]["relay-test"]["ports"]; assert len(p)==1 and p[0]["host_ip"]=="127.0.0.1" and p[0]["published"]=="18080", p; print("staging relay bound to loopback only")'
+      - name: Validate optional STUN UDP Compose profile
+        env:
+          RELAY_DOMAIN: relay.example.com
+          RELAY_ACCESS_TOKEN: "0000000000000000000000000000000000000000000000000000000000000000"
+        run: docker compose -f deploy/compose.yml -f deploy/compose.stun.yml config --quiet
+      # Intentionally do not build Docker images on this production-adjacent
+      # runner: its user has no Docker daemon access. Image build is an
+      # outstanding CI gate for a separate isolated Linux build runner.
