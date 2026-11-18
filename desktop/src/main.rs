@@ -14,7 +14,7 @@ mod viewer_geometry;
 mod tls;
 
 use iced::{Font, Task, window, clipboard, widget::{button, checkbox, column, container, horizontal_space, vertical_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
-use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
+use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::{Duration, Instant}};
 
 fn main() -> iced::Result {
     // Must run before App::default or any Host/Viewer WSS thread starts.
@@ -80,6 +80,7 @@ struct App {
     viewer_clipboard: String,
     viewer_frame: Option<image::Handle>,
     viewer_online: bool,
+    viewer_wait_since: Option<Instant>,
     viewer_pointer: (f32, f32),
     viewer_frame_size: (u32,u32),
     viewer_pointer_valid: bool,
@@ -136,6 +137,7 @@ impl Default for App {
             viewer_clipboard: String::new(),
             viewer_frame: None,
             viewer_online: false,
+            viewer_wait_since: None,
             viewer_pointer: (0.5, 0.5),
             viewer_frame_size: (0,0),
             viewer_pointer_valid: false,
@@ -262,6 +264,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             state.viewer_active = Arc::new(AtomicBool::new(true));
             state.viewer_status = "正在连接远程 Windows...".into();
             state.viewer_online = false;
+            state.viewer_wait_since = Some(Instant::now());
             state.viewer_frame = None;
             state.viewer_monitor_info = None;
             state.viewer_frame_size = (0,0);
@@ -283,6 +286,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             }
             state.viewer_active.store(false, Ordering::SeqCst);
             state.viewer_online = false;
+            state.viewer_wait_since = None;
             state.viewer_pointer_valid = false;
             state.viewer_frame = None;
             state.viewer_status = "手动断开连接".into();
@@ -472,30 +476,48 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                     viewer::ViewerEvent::State(s) => state.viewer_status = s,
                     viewer::ViewerEvent::Connected => {
                         state.viewer_online = true;
-                        state.viewer_status = "WSS 已连接，等待远程画面".into();
+                        state.viewer_wait_since = Some(Instant::now());
+                        state.viewer_status = "WSS 已连接，正在等待有权限的 Windows 主机画面".into();
                     }
                     viewer::ViewerEvent::Disconnected => {
                         state.viewer_online = false;
+                        state.viewer_wait_since = None;
                         state.viewer_pointer_valid = false;
                         state.viewer_active.store(false, Ordering::SeqCst);
-                        state.viewer_status = "连接已断开".into();
-                        let (tx, rx) = mpsc::channel();
-                        state.viewer_tx = tx;
-                        state.viewer_control_rx = Some(rx);
+                        if !state.viewer_status.contains("失败") && !state.viewer_status.contains("错误") {
+                            state.viewer_status = "远程连接已断开，可直接再次连接".into();
+                        }
                     }
                     viewer::ViewerEvent::Jpeg(bytes,width,height) => {
+                        let first_frame = state.viewer_frame.is_none();
+                        state.viewer_wait_since = None;
                         state.viewer_frame_size = (width,height);
                         state.viewer_frame = Some(image::Handle::from_bytes(bytes));
+                        if first_frame {
+                            state.viewer_status = "正在显示远程桌面 · JPEG 已收到".into();
+                        }
                     },
                     viewer::ViewerEvent::Monitors(value) => {
                         state.viewer_monitor_info = viewer_geometry::Monitors::parse(&value);
+                        let input_info = serde_json::from_str::<serde_json::Value>(&value).ok()
+                            .and_then(|json| json.get("allow_input").and_then(|v| v.as_bool()));
                         state.viewer_monitors = match state.viewer_monitor_info {
-                            Some(info) => format!("远程显示器 {}/{}", info.selected+1, info.count),
+                            Some(info) => format!("远程显示器 {}/{} · 输入权限：{}", info.selected+1, info.count,
+                                match input_info {
+                                    Some(true) => "已授权",
+                                    Some(false) => "未授权（请在被控电脑安全与画质中开启）",
+                                    None => "等待主机报告",
+                                }),
                             None => "远程显示器元数据无效".into(),
                         };
                     },
                     viewer::ViewerEvent::Clipboard(value) => state.viewer_clipboard = value,
                 }
+            }
+            if state.viewer_online && state.viewer_frame.is_none()
+                && state.viewer_wait_since.is_some_and(|since| since.elapsed() > Duration::from_secs(10))
+            {
+                state.viewer_status = "WSS 已连接但未收到画面：请确认被控电脑已启动服务、配对密钥一致，并更新为 V0.13.2".into();
             }
             while let Ok(message) = state.rx.try_recv() {
                 if message.starts_with("[STUN]") {
