@@ -860,7 +860,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             if state.viewer_online && state.viewer_frame.is_none()
                 && state.viewer_wait_since.is_some_and(|since| since.elapsed() > Duration::from_secs(10))
             {
-                state.viewer_status = "WSS 已连接但未收到画面：请确认被控电脑已启动服务、配对密钥一致，并更新为 V0.13.2".into();
+                state.viewer_status = "WSS 已连接但未收到画面：请确认被控电脑已启动共享服务，且当前设备仍在授权列表中".into();
             }
             let mut connect_after_pair = false;
             while let Ok(message) = state.rx.try_recv() {
