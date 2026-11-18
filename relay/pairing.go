@@ -174,6 +174,15 @@ func (p *pairingService) publishWindow(w http.ResponseWriter,r *http.Request){
  d.PairingPublicKey=in.PairingPublicKey;d.PairingSignature=in.Signature;d.PairingExpiresAt=expiry;d.LastSeen=now.UTC();writeJSON(w,200,map[string]bool{"ok":true})
 }
 
+func (p *pairingService) revokeWindow(w http.ResponseWriter,r *http.Request){
+ if r.Method!=http.MethodPost{writeAPIError(w,405,"method not allowed");return};if !p.authorize(w,r){return}
+ var in struct{DeviceID string `json:"device_id"`};if !decodeJSON(w,r,&in){return}
+ p.mu.Lock();defer p.mu.Unlock();d:=p.devices[in.DeviceID];if d==nil{writeAPIError(w,404,"device not registered");return}
+ d.PairingPublicKey="";d.PairingSignature="";d.PairingExpiresAt=time.Time{}
+ for _,req:=range p.requests{if req.DeviceID==in.DeviceID&&req.Status=="pending"{req.Status="expired"}}
+ writeJSON(w,200,map[string]bool{"ok":true})
+}
+
 func (p *pairingService) deviceRoute(w http.ResponseWriter,r *http.Request){
  if !p.authorize(w,r){return};number:=strings.TrimPrefix(r.URL.Path,"/api/v1/devices/")
  if !deviceNumberPattern.MatchString(number){writeAPIError(w,404,"device not found");return};if r.Method!=http.MethodGet{writeAPIError(w,405,"method not allowed");return}
@@ -258,6 +267,7 @@ func (p *pairingService) handler()http.Handler{
  mux.HandleFunc("/api/v1/devices/register",p.register)
  mux.HandleFunc("/api/v1/devices/heartbeat",p.heartbeat)
  mux.HandleFunc("/api/v1/devices/pairing-window",p.publishWindow)
+ mux.HandleFunc("/api/v1/devices/pairing-window/revoke",p.revokeWindow)
  mux.HandleFunc("/api/v1/devices/",p.deviceRoute)
  mux.HandleFunc("/api/v1/pairing/requests",func(w http.ResponseWriter,r *http.Request){if r.Method==http.MethodPost{p.createRequest(w,r)}else{p.listRequests(w,r)}})
  mux.HandleFunc("/api/v1/pairing/requests/",func(w http.ResponseWriter,r *http.Request){if strings.HasSuffix(r.URL.Path,"/decision"){p.decideRequest(w,r)}else{p.requestStatus(w,r)}})
