@@ -28,6 +28,7 @@ pub fn spawn_frames(
     target_fps: Arc<AtomicU32>,
     drops: Arc<AtomicU64>,
     udp_active: Arc<AtomicBool>,
+    force_jpeg: Arc<AtomicBool>,
 ) -> mpsc::Receiver<Frame> {
     let (tx, rx) = mpsc::channel(2);
     thread::spawn(move || {
@@ -43,7 +44,9 @@ pub fn spawn_frames(
                 continue;
             }
             let started = Instant::now();
-            let active_h264 = h264.load(Ordering::Relaxed);
+            // Session-local JPEG override does not modify the owner's H.264 preference.
+            let active_h264 = h264.load(Ordering::Relaxed)
+                && !force_jpeg.load(Ordering::Relaxed);
             let selected = monitor.load(Ordering::Relaxed);
             if active_h264 != previous_h264
                 || selected != previous_monitor
@@ -100,6 +103,7 @@ pub fn spawn_frames(
     _target_fps: Arc<AtomicU32>,
     _drops: Arc<AtomicU64>,
     _udp_active: Arc<AtomicBool>,
+    _force_jpeg: Arc<AtomicBool>,
 ) -> mpsc::Receiver<Frame> {
     let (_tx, rx) = mpsc::channel(1);
     rx
