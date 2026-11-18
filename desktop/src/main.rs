@@ -624,7 +624,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     ].spacing(13));
     let safety = card(column![
         heading("03 / 权限与隐私", "当前会话权限可以随时关闭；持久化无人值守授权必须单独明确选择"),
-        checkbox("允许 Android 端操作鼠标及输入文字", state.allow_input.load(Ordering::SeqCst)).on_toggle(Msg::Allow).size(16),
+        checkbox("允许已配对设备操作鼠标、键盘与聊天文字（Windows / Android）", state.allow_input.load(Ordering::SeqCst)).on_toggle(Msg::Allow).size(16),
         checkbox("允许 Android 端按需读写 Windows 剪贴板文字", state.allow_clipboard.load(Ordering::SeqCst)).on_toggle(Msg::Clipboard).size(16),
         text("默认关闭剪贴板授权；不后台读取，不自动同步。每次传递由手机端手动触发。").size(13)
             .color(Color::from_rgb8(204,178,130)),
