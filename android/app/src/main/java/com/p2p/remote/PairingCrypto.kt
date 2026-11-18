@@ -35,6 +35,12 @@ internal object PairingCrypto {
         val publicKey: ByteArray,
     )
 
+    fun restoreIdentity(deviceId: String, privateSeed: ByteArray): Identity {
+        require(deviceId.matches(Regex("^[a-f0-9]{32}$")) && privateSeed.size == 32)
+        val privateKey = Ed25519PrivateKeyParameters(privateSeed, 0)
+        return Identity(deviceId, privateSeed.copyOf(), privateKey.generatePublicKey().encoded)
+    }
+
     fun generateIdentity(): Identity {
         val deviceId = ByteArray(16).also(random::nextBytes)
         val seed = ByteArray(32).also(random::nextBytes)
