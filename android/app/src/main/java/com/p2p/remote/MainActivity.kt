@@ -584,6 +584,7 @@ class MainActivity : ComponentActivity() {
         activeToken = relayToken
         secret = key
         requested = true
+        hostAllowsInput = null
         retryAttempt = 0
         getSharedPreferences("public_settings", MODE_PRIVATE).edit()
             .putString("relay_url", normalized)
@@ -757,8 +758,13 @@ class MainActivity : ComponentActivity() {
                             val metadata = JSONObject(original.second.toString(Charsets.UTF_8))
                             val count = metadata.optInt("count", 1).coerceIn(1, 16)
                             val index = metadata.optInt("selected", 0).coerceIn(0, count - 1)
+                            val inputAllowed = if(metadata.has("allow_input"))
+                                metadata.optBoolean("allow_input") else null
                             main.post {
-                                if(socket===webSocket && requested){ monitorCount=count;selectedMonitor=index }
+                                if(socket===webSocket && requested){
+                                        monitorCount=count;selectedMonitor=index
+                                        hostAllowsInput=inputAllowed
+                                    }
                             }
                         }
                     }
@@ -1006,6 +1012,7 @@ class MainActivity : ComponentActivity() {
         monitorCount = 1
         selectedMonitor = 0
         pointerValid = false
+        hostAllowsInput = null
         secret = null
         activeToken = ""
         activeEndpoint = ""
@@ -1036,7 +1043,13 @@ class MainActivity : ComponentActivity() {
         val packet=JSONObject().put("type",type).put("x",x.toDouble()).put("y",y.toDouble())
         send(packet)
     }
-    private fun sendControlText(text:String){if(text.length in 1..250)send(JSONObject().put("type","text").put("text",text))}
+    private fun sendControlText(text:String){
+        // Text injection is explicit; never forward private IME/clipboard contents.
+        if(text.isNotBlank() && text.codePointCount(0,text.length) in 1..250) {
+            send(JSONObject().put("type","text").put("text",text))
+            status="已发送文字；请先点击电脑端的微信/聊天输入框并确认允许远控"
+        }
+    }
     private fun sendRemoteKey(name:String){
         if(!RemoteKeys.isAllowed(name))return
         send(JSONObject().put("type","key").put("key",name))
