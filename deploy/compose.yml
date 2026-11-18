@@ -4,8 +4,11 @@ services:
     restart: unless-stopped
     environment:
       RELAY_ACCESS_TOKEN: ${RELAY_ACCESS_TOKEN:?Set secure relay token}
+      DEVICE_STORE_PATH: /data/devices.json
     expose:
       - "8080"
+    volumes:
+      - relay_data:/data
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -24,5 +27,6 @@ services:
     depends_on:
       - relay
 volumes:
+  relay_data:
   caddy_data:
   caddy_config:
