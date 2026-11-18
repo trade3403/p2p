@@ -198,6 +198,11 @@ fn update(state: &mut App, msg: Msg) {
             state.page = page;
         }
         Msg::ViewerZoom(scale) => {
+            if state.viewer_online && state.viewer_pointer_valid {
+                let _ = state.viewer_tx.send(serde_json::json!({
+                    "type":"up", "x":state.viewer_pointer.0, "y":state.viewer_pointer.1
+                }).to_string());
+            }
             state.viewer_scale = scale;
             state.viewer_pointer_valid = false;
         }
