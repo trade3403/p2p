@@ -1,6 +1,6 @@
 [package]
 name = "p2p-remote"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2021"
 license = "Proprietary"
 description = "Personal remote desktop Windows host - private source"
@@ -9,6 +9,9 @@ description = "Personal remote desktop Windows host - private source"
 iced = { version = "0.13.1", features = ["tokio", "image"] }
 tokio = { version = "1.43", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Explicit ring backend avoids rustls 0.23 auto-selection ambiguity when
+# transitive dependencies enable both aws-lc-rs and ring Cargo features.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 futures-util = "0.3"
 url = "2.5"
 http = "1"
