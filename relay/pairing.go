@@ -240,5 +240,11 @@ func (p *pairingService) handler()http.Handler{
  mux.HandleFunc("/api/v1/devices/",p.deviceRoute)
  mux.HandleFunc("/api/v1/pairing/requests",p.listRequests)
  mux.HandleFunc("/api/v1/pairing/requests/",func(w http.ResponseWriter,r *http.Request){if strings.HasSuffix(r.URL.Path,"/decision"){p.decideRequest(w,r)}else{p.requestStatus(w,r)}})
- return mux
+ return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+  if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" && !isLocal(r.RemoteAddr) {
+   writeAPIError(w, http.StatusUpgradeRequired, "TLS required")
+   return
+  }
+  mux.ServeHTTP(w, r)
+ })
 }
