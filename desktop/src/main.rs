@@ -373,6 +373,101 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             state.status = "已复制配对密钥；请仅通过可信渠道分享".into();
             return clipboard::write(hex::encode(state.secret));
         }
+        Msg::ViewerPairingNumber(value) if !state.viewer_pairing_active.load(Ordering::SeqCst) => {
+            state.viewer_device_number = value.chars().filter(char::is_ascii_digit).take(9).collect();
+        }
+        Msg::ViewerPairingCode(value) if !state.viewer_pairing_active.load(Ordering::SeqCst) => {
+            state.viewer_pairing_code = value.chars().filter(char::is_ascii_digit).take(6).collect();
+        }
+        Msg::ToggleLegacyViewerKey => state.show_legacy_viewer_key = !state.show_legacy_viewer_key,
+        Msg::ViewerPair => {
+            if state.viewer_pairing_active.load(Ordering::SeqCst) {
+                state.viewer_pairing_cancel.store(true, Ordering::SeqCst);
+                state.viewer_status = "正在取消数字配对…".into();
+                return Task::none();
+            }
+            if state.viewer_active.load(Ordering::SeqCst) {
+                state.viewer_status = "请先断开当前远程会话".into();
+                return Task::none();
+            }
+            if state.viewer_device_number.len() != 9 || state.viewer_pairing_code.len() != 6 {
+                state.viewer_status = "请输入9位设备号和6位动态验证码".into();
+                return Task::none();
+            }
+            let device_number = state.viewer_device_number.clone();
+            let code = state.viewer_pairing_code.clone();
+            let server = state.server.clone();
+            let token = state.relay_token.clone();
+            let events = state.tx.clone();
+            let active = state.viewer_pairing_active.clone();
+            let cancel = state.viewer_pairing_cancel.clone();
+            cancel.store(false, Ordering::SeqCst);
+            active.store(true, Ordering::SeqCst);
+            state.viewer_status = "正在验证目标设备身份…".into();
+            std::thread::spawn(move || {
+                let result = (|| -> anyhow::Result<[u8; 32]> {
+                    use rand::RngCore;
+                    let api = pairing_api::PairingApiClient::new(&server, &token)?;
+                    let device = api.lookup_device(&device_number)?;
+                    anyhow::ensure!(device.online, "目标电脑当前不在线");
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+                    anyhow::ensure!(device.pairing_expires_at > now, "目标电脑动态验证码已过期");
+                    let identity_public = pairing_api::decode_base64url(&device.identity_public_key, 32)?;
+                    let identity_public = <[u8; 32]>::try_from(identity_public)?;
+                    let pairing_public = pairing_api::decode_base64url(&device.pairing_public_key, 32)?;
+                    let pairing_public = <[u8; 32]>::try_from(pairing_public)?;
+                    anyhow::ensure!(
+                        pairing_crypto::verify_pairing_window(
+                            identity_public, &device_number, device.pairing_expires_at,
+                            &device.pairing_public_key, &device.pairing_signature
+                        ),
+                        "目标设备身份签名验证失败"
+                    );
+                    if cancel.load(Ordering::SeqCst) { anyhow::bail!("配对已取消"); }
+                    let viewer = pairing_crypto::ViewerEphemeral::generate();
+                    let mut nonce = [0u8; 16];
+                    rand::rngs::OsRng.fill_bytes(&mut nonce);
+                    let proof = viewer.proof(&device_number, pairing_public, nonce, &code)?;
+                    let request = api.request_pairing(&device_number, &viewer.public_key, &nonce, &proof)?;
+                    let _ = events.send(serde_json::json!({
+                        "event":"viewer_pairing_status","message":"验证码已提交，等待被控电脑用户确认…"
+                    }).to_string());
+                    while std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?.as_secs() < request.expires_at
+                    {
+                        if cancel.load(Ordering::SeqCst) { anyhow::bail!("配对已取消"); }
+                        match api.request_status(&request.request_id)?.status.as_str() {
+                            "approved" => {
+                                return viewer.session_secret(&device_number, pairing_public, nonce);
+                            }
+                            "denied" => anyhow::bail!("被控电脑拒绝了本次连接请求"),
+                            "expired" => anyhow::bail!("配对请求已过期，请重新发起"),
+                            "pending" => {}
+                            other => anyhow::bail!("未知配对状态：{other}"),
+                        }
+                        std::thread::sleep(Duration::from_millis(900));
+                    }
+                    anyhow::bail!("等待被控电脑确认超时")
+                })();
+                active.store(false, Ordering::SeqCst);
+                match result {
+                    Ok(mut secret) => {
+                        let secret_hex = hex::encode(secret);
+                        secret.fill(0);
+                        let _ = events.send(serde_json::json!({
+                            "event":"viewer_pairing_ready","session_secret_hex":secret_hex,
+                            "message":"配对成功，正在建立加密远程会话…"
+                        }).to_string());
+                    }
+                    Err(error) => {
+                        let _ = events.send(serde_json::json!({
+                            "event":"viewer_pairing_error","message":error.to_string()
+                        }).to_string());
+                    }
+                }
+            });
+        }
         Msg::ViewerKey(value) if !state.viewer_active.load(Ordering::SeqCst) => {
             state.viewer_key = value.trim().to_owned();
         }
