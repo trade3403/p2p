@@ -169,38 +169,51 @@ jobs:
           }
           Write-Host 'Verified: Release EXE uses Windows GUI subsystem; no console window is requested.'
 
-      - name: Install or locate NSIS without SourceForge dependency
+      - name: Install or locate verified portable NSIS 3.13
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          $version = '3.13'
+          $expectedSha256 = 'BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8'
           $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
-          $findNsis = {
-            $paths = @()
-            if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles 'NSIS\makensis.exe') }
-            if ($programFilesX86) { $paths += (Join-Path $programFilesX86 'NSIS\makensis.exe') }
-            if ($env:ChocolateyInstall) { $paths += (Join-Path $env:ChocolateyInstall 'bin\makensis.exe') }
-            $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $candidates = @()
+          if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles 'NSIS\makensis.exe') }
+          if ($programFilesX86) { $candidates += (Join-Path $programFilesX86 'NSIS\makensis.exe') }
+          $existing = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if ($existing) {
+            Write-Host "Using preinstalled NSIS: $existing"
+            $makensis = $existing
+          } else {
+            $toolsRoot = Join-Path $env:RUNNER_TEMP 'p2p-tools'
+            $nsisRoot = Join-Path $toolsRoot "nsis-$version"
+            $archive = Join-Path $toolsRoot "nsis-$version.zip"
+            New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
+            $uri = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$version/nsis-$version.zip"
+            Write-Host "Downloading official portable NSIS $version archive"
+            Invoke-WebRequest -Uri $uri -OutFile $archive -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 180
+            if (-not (Test-Path $archive) -or (Get-Item $archive).Length -lt 1000000) {
+              throw 'Downloaded NSIS archive is missing or unexpectedly small'
+            }
+            $actualSha256 = (Get-FileHash $archive -Algorithm SHA256).Hash.ToUpperInvariant()
+            if ($actualSha256 -ne $expectedSha256) {
+              throw "NSIS archive SHA-256 mismatch. Expected $expectedSha256, got $actualSha256"
+            }
+            if (Test-Path $nsisRoot) { Remove-Item $nsisRoot -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $nsisRoot | Out-Null
+            Expand-Archive -Path $archive -DestinationPath $nsisRoot -Force
+            $found = Get-ChildItem -LiteralPath $nsisRoot -Filter makensis.exe -File -Recurse | Select-Object -First 1
+            if (-not $found) { throw 'Verified NSIS archive did not contain makensis.exe' }
+            $makensis = $found.FullName
           }
-          $makensis = & $findNsis
-          if (-not $makensis -and (Get-Command choco -ErrorAction SilentlyContinue)) {
-            choco install nsis --version=3.10 -y --no-progress
-            if ($LASTEXITCODE -ne 0) { throw "Chocolatey NSIS installation failed: $LASTEXITCODE" }
-            $makensis = & $findNsis
-          }
-          if (-not $makensis) {
-            $cmd = Get-Command makensis.exe -ErrorAction SilentlyContinue
-            if ($cmd) { $makensis = $cmd.Source }
-          }
-          if (-not $makensis) {
-            throw 'NSIS 3.x is not installed and Chocolatey could not install it. Install NSIS on the self-hosted Windows runner.'
-          }
+
           $nsisDir = Split-Path -Parent $makensis
           $utf8 = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::AppendAllText($env:GITHUB_PATH, $nsisDir + [Environment]::NewLine, $utf8)
           $env:PATH = $nsisDir + ';' + $env:PATH
           & $makensis /VERSION
           if ($LASTEXITCODE -ne 0) { throw 'NSIS makensis verification failed' }
-          Write-Host "Using NSIS at $makensis"
+          Write-Host "Verified NSIS compiler: $makensis"
 
       - name: Build per-user Windows installer with NSIS
         run: |
@@ -216,7 +229,7 @@ jobs:
       - name: Hash Windows installer
         run: |
           $ErrorActionPreference = 'Stop'
-          $installer = Resolve-Path 'P2PRemote-Setup-v0.14.0.exe'
+          $installer = Resolve-Path 'P2PRemote-Setup-v0.15.0.exe'
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           ($hash + '  P2PRemote-Setup-v0.14.0.exe') |
             Out-File 'P2PRemote-Setup-v0.15.0.sha256' -Encoding ASCII
@@ -240,7 +253,7 @@ jobs:
           $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.15.0.zip'
           Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          ($hash + '  P2PRemote-Portable-v0.14.2.zip') |
+          ($hash + '  P2PRemote-Portable-v0.15.0.zip') |
             Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.15.0.sha256') -Encoding ASCII
           Write-Host "Portable package SHA256: $hash"
 
@@ -250,7 +263,7 @@ jobs:
           name: P2PRemote-Windows-v0.15.0
           path: |
             P2PRemote-Portable-v0.14.2.zip
-            P2PRemote-Portable-v0.14.2.sha256
+            P2PRemote-Portable-v0.15.0.sha256
             P2PRemote-Setup-v0.14.0.exe
-            P2PRemote-Setup-v0.14.0.sha256
+            P2PRemote-Setup-v0.15.0.sha256
           retention-days: 14
