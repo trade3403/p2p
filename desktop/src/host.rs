@@ -110,7 +110,7 @@ async fn run(config: &HostConfig) -> Result<()> {
     request.headers_mut().insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", config.relay_token))?);
     let (socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request))
         .await.context("relay connection timed out")??;
-    let _ = config.messages.send("已连接中转服务器 · 等待已授权手机连接".into());
+    let _ = config.messages.send("已连接中转服务器 · 等待已授权 Windows / Android 控制端".into());
     serve_session(config, socket, false).await
 }
 
