@@ -138,6 +138,15 @@ impl PairingApiClient {
         Ok(())
     }
 
+    pub fn revoke_window(&self, identity: &DeviceIdentity) -> Result<()> {
+        let device_id = identity.device_id_hex();
+        #[derive(Serialize)]
+        struct Body<'a> { device_id: &'a str }
+        self.request(reqwest::Method::POST, "/api/v1/devices/pairing-window/revoke")
+            .json(&Body { device_id: &device_id }).send()?.error_for_status()?;
+        Ok(())
+    }
+
     pub fn publish_window(
         &self, identity: &DeviceIdentity, device_number: &str, window: &PairingWindow,
     ) -> Result<()> {
