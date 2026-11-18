@@ -74,7 +74,7 @@ internal class PairingApiClient(server: String, private val relayToken: String) 
                         viewer, deviceNumber, pairingPublic, nonce
                     )
                 }
-                "denied" -> throw IOException("电脑端拒绝了本次连接请求")
+                "denied" -> throw IOException("验证码错误、已过期，或电脑端拒绝了本次连接")
                 "expired" -> throw IOException("配对请求已过期，请重新输入验证码")
                 "pending" -> onProgress("等待电脑端用户确认…")
                 else -> throw IOException("中转服务器返回未知配对状态")
