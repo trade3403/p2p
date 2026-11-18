@@ -1,6 +1,6 @@
 [package]
 name = "p2p-remote"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 license = "Proprietary"
 description = "Personal remote desktop Windows host - private source"
