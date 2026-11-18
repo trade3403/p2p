@@ -109,6 +109,39 @@ func TestPairingRequestRequiresHostApprovalAndConsumesCodeWindow(t *testing.T){
  if second.Code!=http.StatusNotFound{t.Fatalf("pairing code window was reusable: status=%d",second.Code)}
 }
 
+func TestOnlyOnePairingRequestCanAwaitHostApproval(t *testing.T) {
+ service,priv,id,number:=newRegisteredPairingService(t)
+ pairingPub:=make([]byte,32);if _,err:=rand.Read(pairingPub);err!=nil{t.Fatal(err)}
+ encoded:=base64.RawURLEncoding.EncodeToString(pairingPub)
+ expiry:=time.Now().Add(90*time.Second).Unix()
+ signature:=ed25519.Sign(priv,pairingWindowMessage(number,strconv.FormatInt(expiry,10),encoded))
+ window:=apiRequest(t,service.handler(),http.MethodPost,"/api/v1/devices/pairing-window",map[string]any{
+  "device_id":id,"pairing_public_key":encoded,"signature":base64.RawURLEncoding.EncodeToString(signature),"expires_at":expiry,
+ },true)
+ if window.Code!=http.StatusOK{t.Fatalf("publish window failed: %s",window.Body.String())}
+
+ makeRequest:=func() *httptest.ResponseRecorder {
+  viewerPub:=make([]byte,32);nonce:=make([]byte,16);proof:=make([]byte,32)
+  if _,err:=rand.Read(viewerPub);err!=nil{t.Fatal(err)}
+  if _,err:=rand.Read(nonce);err!=nil{t.Fatal(err)}
+  if _,err:=rand.Read(proof);err!=nil{t.Fatal(err)}
+  return apiRequest(t,service.handler(),http.MethodPost,"/api/v1/pairing/requests",map[string]string{
+   "device_number":number,
+   "viewer_public_key":base64.RawURLEncoding.EncodeToString(viewerPub),
+   "nonce":base64.RawURLEncoding.EncodeToString(nonce),
+   "proof":base64.RawURLEncoding.EncodeToString(proof),
+  },true)
+ }
+ first:=makeRequest()
+ if first.Code!=http.StatusCreated{t.Fatalf("first pairing request status=%d body=%s",first.Code,first.Body.String())}
+ second:=makeRequest()
+ if second.Code!=http.StatusTooManyRequests{t.Fatalf("second concurrent request status=%d, want 429: %s",second.Code,second.Body.String())}
+ pending:=apiRequest(t,service.handler(),http.MethodGet,"/api/v1/pairing/requests?device_id="+id,nil,true)
+ if pending.Code!=http.StatusOK||strings.Count(pending.Body.String(),"\"status\":\"pending\"")!=1 {
+  t.Fatalf("expected exactly one pending host approval, got %d: %s",pending.Code,pending.Body.String())
+ }
+}
+
 func TestPairingRequestsAreRateLimited(t *testing.T){
  service,priv,id,number:=newRegisteredPairingService(t)
  pairingPub:=make([]byte,32);_,_=rand.Read(pairingPub);encoded:=base64.RawURLEncoding.EncodeToString(pairingPub)
