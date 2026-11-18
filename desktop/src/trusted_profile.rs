@@ -12,10 +12,21 @@ pub struct TrustedProfile {
     pub unattended_input: bool,
 }
 
-fn vault_path() -> io::Result<PathBuf> {
+pub fn app_data_dir() -> io::Result<PathBuf> {
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            if directory.join("portable.flag").is_file() {
+                return Ok(directory.join("data"));
+            }
+        }
+    }
     let base = std::env::var_os("APPDATA")
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unset"))?;
-    Ok(PathBuf::from(base).join("P2PRemote").join("trusted.bin"))
+    Ok(PathBuf::from(base).join("P2PRemote"))
+}
+
+fn vault_path() -> io::Result<PathBuf> {
+    Ok(app_data_dir()?.join("trusted.bin"))
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -81,9 +92,7 @@ struct StoredDeviceIdentity {
 }
 
 fn identity_path() -> io::Result<PathBuf> {
-    let base = std::env::var_os("APPDATA")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unset"))?;
-    Ok(PathBuf::from(base).join("P2PRemote").join("device-identity.bin"))
+    Ok(app_data_dir()?.join("device-identity.bin"))
 }
 
 /// Load or create the long-lived Ed25519 device identity. Existing unreadable
