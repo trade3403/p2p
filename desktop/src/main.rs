@@ -441,7 +441,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                             "approved" => {
                                 return viewer.session_secret(&device_number, pairing_public, nonce);
                             }
-                            "denied" => anyhow::bail!("被控电脑拒绝了本次连接请求"),
+                            "denied" => anyhow::bail!("验证码错误、已过期，或被控电脑拒绝了本次连接"),
                             "expired" => anyhow::bail!("配对请求已过期，请重新发起"),
                             "pending" => {}
                             other => anyhow::bail!("未知配对状态：{other}"),
