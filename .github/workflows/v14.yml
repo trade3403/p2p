@@ -25,8 +25,35 @@ jobs:
       run:
         shell: powershell
     steps:
-      - name: Checkout exact commit
-        uses: actions/checkout@v4
+      - name: Retrieve exact commit from the official GitHub archive API
+        id: source_archive
+        continue-on-error: true
+        shell: powershell
+        env:
+          GH_SOURCE_TOKEN: \${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-v14-archive-' + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $zip = Join-Path $archiveRoot 'source.zip'
+          $uri = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/zipball/' + $env:GITHUB_SHA
+          $headers = @{ Authorization = ('Bearer ' + $env:GH_SOURCE_TOKEN); 'User-Agent' = 'p2p-v014-selfhost-ci'; Accept = 'application/vnd.github+json' }
+          Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $zip -UseBasicParsing -TimeoutSec 120
+          if ((Get-Item $zip).Length -lt 1024) { throw 'GitHub repository ZIP archive is empty' }
+          $unpack = Join-Path $archiveRoot 'extracted'
+          Expand-Archive -Path $zip -DestinationPath $unpack -Force
+          $root = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
+          if (-not $root) { throw 'Official archive contains no repository directory' }
+          Get-ChildItem -LiteralPath $root.FullName -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force
+          }
+          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop/Cargo.toml'))) {
+            throw 'Missing desktop manifest after archive extraction'
+          }
+          Write-Host ('Verified source archive checkout for commit ' + $env:GITHUB_SHA)
+
+      - uses: actions/checkout@v4
+        if: steps.source_archive.outcome == 'failure'
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
