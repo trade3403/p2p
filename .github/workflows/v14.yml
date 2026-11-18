@@ -173,28 +173,26 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $candidates = @(
-            (Join-Path $env:ProgramFiles 'NSIS\makensis.exe'),
-            (Join-Path $env:ProgramFiles(x86) 'NSIS\makensis.exe'),
-            (Join-Path $env:ChocolateyInstall 'bin\makensis.exe')
-          ) | Where-Object { $_ -and (Test-Path $_) }
-          $makensis = $candidates | Select-Object -First 1
+          $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+          $findNsis = {
+            $paths = @()
+            if ($env:ProgramFiles) { $paths += (Join-Path $env:ProgramFiles 'NSIS\makensis.exe') }
+            if ($programFilesX86) { $paths += (Join-Path $programFilesX86 'NSIS\makensis.exe') }
+            if ($env:ChocolateyInstall) { $paths += (Join-Path $env:ChocolateyInstall 'bin\makensis.exe') }
+            $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          $makensis = & $findNsis
           if (-not $makensis -and (Get-Command choco -ErrorAction SilentlyContinue)) {
             choco install nsis --version=3.10 -y --no-progress
             if ($LASTEXITCODE -ne 0) { throw "Chocolatey NSIS installation failed: $LASTEXITCODE" }
-            $candidates = @(
-              (Join-Path $env:ProgramFiles 'NSIS\makensis.exe'),
-              (Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'),
-              (Join-Path $env:ChocolateyInstall 'bin\makensis.exe')
-            ) | Where-Object { $_ -and (Test-Path $_) }
-            $makensis = $candidates | Select-Object -First 1
+            $makensis = & $findNsis
           }
           if (-not $makensis) {
             $cmd = Get-Command makensis.exe -ErrorAction SilentlyContinue
             if ($cmd) { $makensis = $cmd.Source }
           }
           if (-not $makensis) {
-            throw 'NSIS 3.x is not installed and no supported package manager could install it. Install NSIS on the self-hosted Windows runner.'
+            throw 'NSIS 3.x is not installed and Chocolatey could not install it. Install NSIS on the self-hosted Windows runner.'
           }
           $nsisDir = Split-Path -Parent $makensis
           $utf8 = New-Object System.Text.UTF8Encoding($false)
