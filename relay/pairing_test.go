@@ -95,7 +95,10 @@ func TestPairingRequestRequiresHostApprovalAndConsumesCodeWindow(t *testing.T){
  if list.Code!=200||!strings.Contains(list.Body.String(),created.RequestID){t.Fatalf("host did not receive pending request: %d %s",list.Code,list.Body.String())}
  wrong:=apiRequest(t,service.handler(),http.MethodPost,"/api/v1/pairing/requests/"+created.RequestID+"/decision",map[string]any{"device_id":strings.Repeat("b",32),"approved":true},true)
  if wrong.Code!=http.StatusForbidden{t.Fatalf("other device decision status=%d",wrong.Code)}
- approved:=apiRequest(t,service.handler(),http.MethodPost,"/api/v1/pairing/requests/"+created.RequestID+"/decision",map[string]any{"device_id":id,"approved":true},true)
+ decisionSig:=ed25519.Sign(priv,pairingDecisionMessage(created.RequestID,number,base64.RawURLEncoding.EncodeToString(viewerPub),base64.RawURLEncoding.EncodeToString(nonce),true))
+ approved:=apiRequest(t,service.handler(),http.MethodPost,"/api/v1/pairing/requests/"+created.RequestID+"/decision",map[string]any{
+  "device_id":id,"approved":true,"signature":base64.RawURLEncoding.EncodeToString(decisionSig),
+ },true)
  if approved.Code!=200{t.Fatalf("host approval failed: %s",approved.Body.String())}
  status:=apiRequest(t,service.handler(),http.MethodGet,"/api/v1/pairing/requests/"+created.RequestID,nil,true)
  if status.Code!=200||!strings.Contains(status.Body.String(),`"status":"approved"`){t.Fatalf("viewer status incorrect: %d %s",status.Code,status.Body.String())}
