@@ -2,7 +2,7 @@
 Unicode true
 !include "MUI2.nsh"
 !define APP_NAME "P2P Remote"
-!define APP_VERSION "0.14.0"
+!define APP_VERSION "0.14.3"
 !define APP_PUBLISHER "P2P Remote"
 !define APP_EXE "P2PRemote.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\P2PRemote"
@@ -13,7 +13,7 @@ RequestExecutionLevel user
 SetShellVarContext current
 ShowInstDetails show
 ShowUnInstDetails show
-VIProductVersion "0.14.0.0"
+VIProductVersion "0.14.3.0"
 VIAddVersionKey /LANG=2052 "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=2052 "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey /LANG=2052 "CompanyName" "${APP_PUBLISHER}"
