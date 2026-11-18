@@ -165,31 +165,17 @@ jobs:
           }
           Write-Host 'Verified: Release EXE uses Windows GUI subsystem; no console window is requested.'
 
+      - name: Set up NSIS 3.13
+        uses: nsis-dev/setup-nsis@v1
+        with:
+          version: '3.13'
+
       - name: Build per-user Windows installer with NSIS
         run: |
           $ErrorActionPreference = 'Stop'
-          $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
-          if (-not $makensis) {
-            $candidates = @(
-              "$env:ProgramFiles\NSIS\makensis.exe",
-              "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-            )
-            $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          }
-          if (-not $makensis) {
-            $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
-            if (-not $choco) { throw "NSIS is not installed and Chocolatey is unavailable" }
-            choco install nsis --no-progress -y
-            $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
-            if (-not $makensis) {
-              $candidates = @("$env:ProgramFiles\NSIS\makensis.exe", "${env:ProgramFiles(x86)}\NSIS\makensis.exe")
-              $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-            }
-          }
-          if (-not $makensis) { throw "Could not locate makensis.exe after NSIS installation" }
           Push-Location installer
           try {
-            & $makensis /V3 P2PRemote.nsi
+            makensis /V3 P2PRemote.nsi
             if ($LASTEXITCODE -ne 0) { throw "NSIS installer compilation failed with exit code $LASTEXITCODE" }
           } finally { Pop-Location }
           if (-not (Test-Path "P2PRemote-Setup-v0.14.0.exe")) { throw "NSIS output file was not generated" }
