@@ -659,8 +659,8 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
         },
         Msg::Start if !state.running.load(Ordering::SeqCst) => {
             tracing::info!("starting local host numeric pairing service");
-            if state.relay_token.trim().is_empty() {
-                state.status = "请填写私测中转访问口令".into();
+            if state.relay_token.trim().is_empty() && !state.lan_direct.load(Ordering::SeqCst) {
+                state.status = "请填写私测中转访问口令，或启用局域网直连".into();
                 return Task::none();
             }
             if let Err(err) = local_settings::save_relay_url(state.server.trim()) {
@@ -668,7 +668,9 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                 return Task::none();
             }
             #[cfg(windows)]
-            let identity = {
+            let identity = if state.relay_token.trim().is_empty() {
+                None
+            } else {
                 let (device_id_hex, signing_seed) = match trusted_profile::load_or_create_device_identity() {
                     Ok(value) => value,
                     Err(error) => {
@@ -689,8 +691,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                         return Task::none();
                     }
                 };
-                let identity = pairing_crypto::DeviceIdentity::from_parts(device_id, signing_seed);
-    
+                Some(pairing_crypto::DeviceIdentity::from_parts(device_id, signing_seed))
             };
             let config = host::HostConfig {
                 server: state.server.clone(), relay_token: state.relay_token.clone(),
@@ -716,14 +717,20 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             state.pending_pairing_request = None;
             state.status = "正在向中转服务器注册本机设备…".into();
             #[cfg(windows)]
-            {
-                let (decision_tx, decision_rx) = mpsc::channel();
-                state.pairing_decision_tx = Some(decision_tx);
-                host_pairing::start(config, identity, decision_rx);
+            match identity {
+                Some(identity) => {
+                    let (decision_tx, decision_rx) = mpsc::channel();
+                    state.pairing_decision_tx = Some(decision_tx);
+                    host_pairing::start(config, identity, decision_rx);
+                }
+                None => {
+                    state.status = "仅启用局域网直连；数字验证码配对需要中转服务".into();
+                    host::start(config);
+                }
             }
             #[cfg(not(windows))]
             {
-                state.status = "当前平台使用旧版 Host 连接模式".into();
+                state.status = "当前平台使用兼容 Host 连接模式".into();
                 host::start(config);
             }
         }
