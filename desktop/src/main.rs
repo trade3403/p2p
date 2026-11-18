@@ -1,3 +1,8 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod app_logging;
+#[cfg(windows)]
+mod tray;
 mod host;
 mod protocol;
 mod reconnect;
@@ -17,14 +22,21 @@ use iced::{Font, Task, window, clipboard, widget::{button, checkbox, column, con
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::{Duration, Instant}};
 
 fn main() -> iced::Result {
+    app_logging::init();
+    std::panic::set_hook(Box::new(|panic| {
+        tracing::error!(panic = %panic, "fatal application panic");
+    }));
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "P2P Remote starting");
     // Must run before App::default or any Host/Viewer WSS thread starts.
     tls::initialize();
     iced::application("P2P Remote · 个人远程桌面", update, view)
         .theme(|_| Theme::TokyoNight)
+        .exit_on_close_request(false)
         .default_font(Font::with_name("Microsoft YaHei UI"))
         .subscription(|_| Subscription::batch([
             iced::time::every(Duration::from_millis(250)).map(|_| Msg::Tick),
             window::resize_events().map(|(_, size)| Msg::WindowResized(size.width, size.height)),
+            window::close_requests().map(Msg::CloseRequested),
         ]))
         .window_size((1180.0, 780.0))
         .run()
@@ -90,12 +102,19 @@ struct App {
     viewer_rx: Receiver<viewer::ViewerEvent>,
     tx: Sender<String>,
     rx: Receiver<String>,
+    #[cfg(windows)]
+    tray: Option<tray::Tray>,
+    #[cfg(windows)]
+    tray_initialized: bool,
+    tray_input_paused: bool,
+    hide_on_startup: bool,
 }
 impl Default for App {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
         let (viewer_tx, _unused_receiver) = mpsc::channel();
         let (_viewer_event_tx, viewer_rx) = mpsc::channel();
+        let autostart = std::env::args().any(|arg| arg == "--autostart");
         // Failed DPAPI decryption never silently recreates a trusted session.
         let trusted = trusted_profile::load().ok().flatten();
         let secret = trusted.as_ref()
@@ -147,11 +166,16 @@ impl Default for App {
             viewer_rx,
             tx,
             rx,
+            #[cfg(windows)]
+            tray: None,
+            #[cfg(windows)]
+            tray_initialized: false,
+            tray_input_paused: false,
+            hide_on_startup: autostart && trusted.as_ref().map(|p| p.launch_on_login).unwrap_or(false),
         };
         // Auto-start is opt-in and only runs after normal user logon.
         // It is never a Windows service and never attempts secure-desktop capture.
-        if std::env::args().any(|arg| arg == "--autostart")
-            && app.trust_saved && app.launch_on_login
+        if autostart && app.trust_saved && app.launch_on_login
         {
             app.allow_input.store(app.unattended_input, Ordering::SeqCst);
             app.running.store(true, Ordering::SeqCst);
@@ -183,6 +207,7 @@ impl Default for App {
 // hidden capture thread connected after the owner exits the application.
 impl Drop for App {
     fn drop(&mut self) {
+        tracing::info!("P2P Remote shutting down; stopping host and viewer sessions");
         self.running.store(false, Ordering::SeqCst);
         self.viewer_active.store(false, Ordering::SeqCst);
         self.allow_input.store(false, Ordering::SeqCst);
@@ -193,12 +218,45 @@ impl Drop for App {
 #[derive(Debug, Clone)]
 enum Msg { Navigate(Page), ViewerZoom(ViewerScale), ToggleViewerFullscreen,
     ViewerWindow(Option<window::Id>), WindowResized(f32, f32),
+    CloseRequested(window::Id), ShowWindow(Option<window::Id>), HideWindow(Option<window::Id>), ExitWindow(Option<window::Id>),
     ToggleSessionKey, CopyDeviceNumber, CopyPairingKey, Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
     H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet, ViewerClipboardSet, ViewerKeyPress(&'static str) }
 
 fn update(state: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
+        Msg::CloseRequested(id) => {
+            #[cfg(windows)]
+            {
+                if state.tray.is_some() {
+                    state.status = "窗口已隐藏到系统托盘；已授权的共享会话继续运行".into();
+                    tracing::info!("main window hidden to system tray");
+                    return window::change_mode(id, window::Mode::Hidden);
+                }
+                state.status = "系统托盘未能初始化，为避免失去入口，窗口保持打开".into();
+                tracing::error!("close request ignored because system tray is unavailable");
+                return Task::none();
+            }
+            #[cfg(not(windows))]
+            {
+                return window::close(id);
+            }
+        }
+        Msg::ShowWindow(Some(id)) => {
+            state.hide_on_startup = false;
+            return Task::batch([
+                window::change_mode(id, window::Mode::Windowed),
+                window::gain_focus(id),
+            ]);
+        }
+        Msg::ShowWindow(None) => return Task::none(),
+        Msg::HideWindow(Some(id)) => {
+            state.status = "已登录启动 · P2P Remote 在系统托盘运行".into();
+            return window::change_mode(id, window::Mode::Hidden);
+        }
+        Msg::HideWindow(None) => return Task::none(),
+        Msg::ExitWindow(Some(id)) => return window::close(id),
+        Msg::ExitWindow(None) => return Task::none(),
         Msg::ToggleViewerFullscreen if state.page == Page::Remote => {
             return window::get_latest().map(Msg::ViewerWindow);
         }
@@ -428,6 +486,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             }
         },
         Msg::Start if !state.running.load(Ordering::SeqCst) => {
+            tracing::info!("starting local host session");
             if state.relay_token.trim().is_empty() &&
                 !state.lan_direct.load(Ordering::SeqCst) {
                 state.status = "请填写 VPS 口令或选择局域网直连".into(); return Task::none();
@@ -456,7 +515,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                 messages: state.tx.clone(),
             });
         }
-        Msg::Stop => { state.running.store(false, Ordering::SeqCst); state.status = "正在断开...".into(); }
+        Msg::Stop => { tracing::info!("stopping local host session"); state.running.store(false, Ordering::SeqCst); state.status = "正在断开...".into(); }
         Msg::NewKey if !state.running.load(Ordering::SeqCst) => {
             state.secret = protocol::new_secret();
             state.trust_saved = false;
@@ -471,6 +530,69 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             };
         },
         Msg::Tick => {
+            #[cfg(windows)]
+            {
+                if !state.tray_initialized {
+                    state.tray_initialized = true;
+                    match tray::Tray::new() {
+                        Ok(tray) => {
+                            state.tray = Some(tray);
+                            tracing::info!("Windows system tray initialized");
+                        }
+                        Err(error) => {
+                            state.status = format!("系统托盘初始化失败，窗口将保持可见：{error}");
+                            tracing::error!(error = %error, "system tray initialization failed");
+                        }
+                    }
+                }
+
+                if state.hide_on_startup && state.tray.is_some() {
+                    state.hide_on_startup = false;
+                    return window::get_latest().map(Msg::HideWindow);
+                }
+
+                let tray_actions = state.tray.as_ref()
+                    .map(tray::Tray::drain_actions)
+                    .unwrap_or_default();
+                for action in tray_actions {
+                    match action {
+                        tray::Action::Open => {
+                            return window::get_latest().map(Msg::ShowWindow);
+                        }
+                        tray::Action::ToggleHost => {
+                            let is_running = state.running.load(Ordering::SeqCst);
+                            return update(state, if is_running { Msg::Stop } else { Msg::Start });
+                        }
+                        tray::Action::ToggleInput => {
+                            if state.allow_input.load(Ordering::SeqCst) {
+                                state.tray_input_paused = true;
+                                state.allow_input.store(false, Ordering::SeqCst);
+                                state.status = "已从系统托盘暂停远程输入".into();
+                            } else if state.tray_input_paused {
+                                state.tray_input_paused = false;
+                                state.allow_input.store(true, Ordering::SeqCst);
+                                state.status = "已恢复此前由本机用户授权的远程输入".into();
+                            } else {
+                                state.status = "远程输入尚未授权；请在主窗口中明确授权".into();
+                            }
+                        }
+                        tray::Action::Exit => {
+                            if state.viewer_online {
+                                let _ = state.viewer_tx.send(serde_json::json!({
+                                    "type":"up", "x":state.viewer_pointer.0, "y":state.viewer_pointer.1
+                                }).to_string());
+                            }
+                            state.running.store(false, Ordering::SeqCst);
+                            state.viewer_active.store(false, Ordering::SeqCst);
+                            state.allow_input.store(false, Ordering::SeqCst);
+                            state.allow_clipboard.store(false, Ordering::SeqCst);
+                            tracing::info!("full exit requested from tray menu");
+                            return window::get_latest().map(Msg::ExitWindow);
+                        }
+                    }
+                }
+            }
+
             while let Ok(event) = state.viewer_rx.try_recv() {
                 match event {
                     viewer::ViewerEvent::State(s) => state.viewer_status = s,
