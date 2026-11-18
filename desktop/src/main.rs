@@ -317,8 +317,37 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
         }
         Msg::ToggleSessionKey => state.show_session_key = !state.show_session_key,
         Msg::CopyDeviceNumber => {
-            state.status = "已复制 9 位设备号（仅用于识别，不是连接凭据）".into();
-            return clipboard::write(protocol::device_number(&state.secret));
+            if state.device_number.is_empty() {
+                state.status = "请先启动本机共享，等待服务器分配设备号".into();
+                return Task::none();
+            }
+            state.status = "已复制服务器分配的 9 位设备号".into();
+            return clipboard::write(state.device_number.clone());
+        }
+        Msg::CopyPairingCode => {
+            if state.pairing_code.is_empty() {
+                state.status = "动态验证码尚未生成".into();
+                return Task::none();
+            }
+            state.status = "已复制动态验证码".into();
+            return clipboard::write(state.pairing_code.clone());
+        }
+        Msg::ApprovePairing | Msg::DenyPairing => {
+            #[cfg(windows)]
+            {
+                if let Some(request) = state.pending_pairing_request.take() {
+                    if let Some(sender) = state.pairing_decision_tx.as_ref() {
+                        let approved = matches!(msg, Msg::ApprovePairing);
+                        let _ = sender.send(host_pairing::PairingDecision::Respond {
+                            request_id: request.request_id,
+                            approved,
+                        });
+                        state.status = if approved { "已提交允许连接决定".into() } else { "已提交拒绝连接决定".into() };
+                    } else {
+                        state.status = "数字配对服务已停止，请重新启动共享".into();
+                    }
+                }
+            }
         }
         Msg::CopyPairingKey => {
             state.status = "已复制配对密钥；请仅通过可信渠道分享".into();
@@ -513,18 +542,37 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             }
         },
         Msg::Start if !state.running.load(Ordering::SeqCst) => {
-            tracing::info!("starting local host session");
-            if state.relay_token.trim().is_empty() &&
-                !state.lan_direct.load(Ordering::SeqCst) {
-                state.status = "请填写 VPS 口令或选择局域网直连".into(); return Task::none();
+            tracing::info!("starting local host numeric pairing service");
+            if state.relay_token.trim().is_empty() {
+                state.status = "请填写私测中转访问口令".into();
+                return Task::none();
             }
             if let Err(err) = local_settings::save_relay_url(state.server.trim()) {
                 state.status = format!("服务器地址无效或无法保存：{err}");
                 return Task::none();
             }
-            state.running.store(true, Ordering::SeqCst);
-            state.status = "正在连接 VPS...".into();
-            host::start(host::HostConfig {
+            let (device_id_hex, signing_seed) = match trusted_profile::load_or_create_device_identity() {
+                Ok(value) => value,
+                Err(error) => {
+                    state.status = format!("本机设备身份无法安全保存，已停止启动：{error}");
+                    return Task::none();
+                }
+            };
+            let device_id = match hex::decode(device_id_hex) {
+                Ok(value) => match <[u8; 16]>::try_from(value) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        state.status = "本机设备身份长度错误，无法启动数字配对".into();
+                        return Task::none();
+                    }
+                },
+                Err(_) => {
+                    state.status = "本机设备身份格式错误，无法启动数字配对".into();
+                    return Task::none();
+                }
+            };
+            let identity = pairing_crypto::DeviceIdentity::from_parts(device_id, signing_seed);
+            let config = host::HostConfig {
                 server: state.server.clone(), relay_token: state.relay_token.clone(),
                 secret: state.secret, running: state.running.clone(),
                 allow_input: state.allow_input.clone(),
@@ -540,9 +588,27 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                 sent_frames: state.sent_frames.clone(),
                 dropped_frames: state.dropped_frames.clone(),
                 messages: state.tx.clone(),
-            });
+            };
+            state.running.store(true, Ordering::SeqCst);
+            state.device_number.clear();
+            state.pairing_code.clear();
+            state.pairing_expires_at = 0;
+            state.pending_pairing_request = None;
+            state.status = "正在向中转服务器注册本机设备…".into();
+            let (decision_tx, decision_rx) = mpsc::channel();
+            state.pairing_decision_tx = Some(decision_tx);
+            host_pairing::start(config, identity, decision_rx);
         }
-        Msg::Stop => { tracing::info!("stopping local host session"); state.running.store(false, Ordering::SeqCst); state.status = "正在断开...".into(); }
+        Msg::Stop => {
+            tracing::info!("stopping local host and numeric pairing");
+            state.running.store(false, Ordering::SeqCst);
+            state.pairing_code.clear();
+            state.pairing_expires_at = 0;
+            state.pending_pairing_request = None;
+            #[cfg(windows)]
+            { state.pairing_decision_tx = None; }
+            state.status = "正在撤销动态验证码并断开远程服务…".into();
+        }
         Msg::NewKey if !state.running.load(Ordering::SeqCst) => {
             state.secret = protocol::new_secret();
             state.trust_saved = false;
@@ -671,6 +737,47 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             while let Ok(message) = state.rx.try_recv() {
                 if message.starts_with("[STUN]") {
                     state.diagnostics = message.trim_start_matches("[STUN] ").to_string();
+                    continue;
+                }
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&message) {
+                    match event.get("event").and_then(|v| v.as_str()).unwrap_or("") {
+                        "pairing_device" => {
+                            state.device_number = event.get("device_number").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                            state.status = event.get("message").and_then(|v| v.as_str()).unwrap_or("本机设备已注册").to_owned();
+                        }
+                        "pairing_code" => {
+                            state.device_number = event.get("device_number").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                            state.pairing_code = event.get("code").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                            state.pairing_expires_at = event.get("expires_at").and_then(|v| v.as_i64()).unwrap_or(0);
+                            state.status = event.get("message").and_then(|v| v.as_str()).unwrap_or("动态验证码已更新").to_owned();
+                        }
+                        "pairing_request" => {
+                            state.pending_pairing_request = Some(PairingRequestPrompt {
+                                request_id: event.get("request_id").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                                viewer_fingerprint: event.get("viewer_fingerprint").and_then(|v| v.as_str()).unwrap_or("未知设备").to_owned(),
+                            });
+                            state.status = event.get("message").and_then(|v| v.as_str()).unwrap_or("收到配对请求").to_owned();
+                        }
+                        "pairing_request_expired" | "pairing_request_denied" => {
+                            state.pending_pairing_request = None;
+                            state.status = event.get("message").and_then(|v| v.as_str()).unwrap_or("配对请求已结束").to_owned();
+                        }
+                        "pairing_approved" => {
+                            state.pending_pairing_request = None;
+                            state.pairing_code.clear();
+                            state.pairing_expires_at = 0;
+                            state.status = event.get("message").and_then(|v| v.as_str()).unwrap_or("配对已批准").to_owned();
+                        }
+                        "pairing_stopped" => {
+                            state.pairing_code.clear();
+                            state.pairing_expires_at = 0;
+                            state.status = event.get("message").and_then(|v| v.as_str()).unwrap_or("数字配对已停止").to_owned();
+                        }
+                        "pairing_status" => {
+                            state.status = event.get("message").and_then(|v| v.as_str()).unwrap_or("数字配对状态更新").to_owned();
+                        }
+                        _ => state.status = message,
+                    }
                 } else {
                     state.status = message;
                 }
