@@ -17,6 +17,7 @@ import android.view.TextureView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -111,6 +112,7 @@ class MainActivity : ComponentActivity() {
     private var selectedMonitor by mutableIntStateOf(0)
     private var pointerX by mutableFloatStateOf(0.5f)
     private var pointerY by mutableFloatStateOf(0.5f)
+    private var pointerValid by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -285,25 +287,31 @@ class MainActivity : ComponentActivity() {
                                         )
                                         if(first==null) return@awaitEachGesture
                                         pointerX=first.first; pointerY=first.second
+                                        pointerValid=true
                                         sendControl("down",first.first,first.second)
-                                        do {
-                                            val event=awaitPointerEvent()
-                                            val change=event.changes.firstOrNull() ?: break
-                                            val position=RemoteGeometry.normalizedPointer(
-                                                change.position.x,change.position.y,
-                                                size.width.toFloat(),size.height.toFloat(),
-                                                displayWidth,displayHeight
-                                            )
-                                            if(position!=null) {
-                                                pointerX=position.first; pointerY=position.second
-                                            }
-                                            if(change.pressed) {
-                                                if(position!=null) sendControl("move",position.first,position.second)
-                                            } else {
-                                                sendControl("up",pointerX,pointerY)
-                                                break
-                                            }
-                                        } while(true)
+                                        try {
+                                            do {
+                                                val event=awaitPointerEvent()
+                                                val change=event.changes.firstOrNull() ?: break
+                                                val position=RemoteGeometry.normalizedPointer(
+                                                    change.position.x,change.position.y,
+                                                    size.width.toFloat(),size.height.toFloat(),
+                                                    displayWidth,displayHeight
+                                                )
+                                                if(position!=null) {
+                                                    pointerX=position.first; pointerY=position.second
+                                                }
+                                                if(change.pressed) {
+                                                    if(position!=null) sendControl("move",position.first,position.second)
+                                                } else {
+                                                    break
+                                                }
+                                            } while(true)
+                                        } finally {
+                                            // Release the held button even on gesture cancellation
+                                            // or switching tabs during a drag.
+                                            sendControl("up",pointerX,pointerY)
+                                        }
                                     }
                                 },
                             contentAlignment=Alignment.Center
@@ -356,7 +364,7 @@ class MainActivity : ComponentActivity() {
                             Button(onClick={selectMonitor((selectedMonitor+1)%monitorCount)},enabled=online && monitorCount>1) {Text("下一屏")}
                         }
                         Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
-                            Button(onClick={sendControl("right_click",pointerX,pointerY)},enabled=online,modifier=Modifier.weight(1f)){Text("右键")}
+                            Button(onClick={sendControl("right_click",pointerX,pointerY)},enabled=online && pointerValid,modifier=Modifier.weight(1f)){Text("右键")}
                             Button(onClick={sendScroll(-3)},enabled=online,modifier=Modifier.weight(1f)){Text("上滚")}
                             Button(onClick={sendScroll(3)},enabled=online,modifier=Modifier.weight(1f)){Text("下滚")}
                         }
@@ -853,6 +861,7 @@ class MainActivity : ComponentActivity() {
         clipboardResult = ""
         monitorCount = 1
         selectedMonitor = 0
+        pointerValid = false
         secret = null
         activeToken = ""
         activeEndpoint = ""
@@ -884,6 +893,10 @@ class MainActivity : ComponentActivity() {
         send(packet)
     }
     private fun sendControlText(text:String){if(text.length in 1..250)send(JSONObject().put("type","text").put("text",text))}
+    private fun sendRemoteKey(name:String){
+        if(!RemoteKeys.isAllowed(name))return
+        send(JSONObject().put("type","key").put("key",name))
+    }
     private fun send(data:JSONObject){
         val s=secret ?:return
         val ws=socket?:return
