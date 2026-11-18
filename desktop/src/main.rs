@@ -131,6 +131,7 @@ struct App {
     tray_initialized: bool,
     tray_input_paused: bool,
     hide_on_startup: bool,
+    exit_requested: bool,
 }
 impl Default for App {
     fn default() -> Self {
@@ -206,6 +207,7 @@ impl Default for App {
             tray_initialized: false,
             tray_input_paused: false,
             hide_on_startup: autostart && trusted.as_ref().map(|p| p.launch_on_login).unwrap_or(false),
+            exit_requested: false,
         };
         // Auto-start is opt-in and only runs after normal user logon.
         // It is never a Windows service and never attempts secure-desktop capture.
@@ -287,6 +289,9 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
         Msg::CloseRequested(id) => {
             #[cfg(windows)]
             {
+                if state.exit_requested {
+                    return window::close(id);
+                }
                 if state.tray.is_some() {
                     state.status = "窗口已隐藏到系统托盘；已授权的共享会话继续运行".into();
                     tracing::info!("main window hidden to system tray");
@@ -314,7 +319,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             return window::change_mode(id, window::Mode::Hidden);
         }
         Msg::HideWindow(None) => return Task::none(),
-        Msg::ExitWindow(Some(id)) => return window::close(id),
+        Msg::ExitWindow(Some(id)) => { state.exit_requested = true; return window::close(id); },
         Msg::ExitWindow(None) => return Task::none(),
         Msg::ToggleViewerFullscreen if state.page == Page::Remote => {
             return window::get_latest().map(Msg::ViewerWindow);
