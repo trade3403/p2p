@@ -74,6 +74,14 @@ async fn run(config: &ViewerConfig) -> Result<()> {
     let (mut socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request))
         .await.context("WSS connection timeout")??;
     let _ = config.events.send(ViewerEvent::Connected);
+    // Windows Viewer is JPEG-only. Send an AES-GCM-authenticated codec request
+    // as soon as the viewer joins. Host defaults are left unchanged.
+    let codec_request = protocol::encrypt(
+        &config.secret, protocol::CONTROL,
+        br#"{"type":"video_codec","codec":"jpeg"}"#,
+    )?;
+    socket.send(Message::Binary(codec_request)).await?;
+    let _ = config.events.send(ViewerEvent::State("已请求远端切换 JPEG 兼容画面…".into()));
     while config.active.load(Ordering::SeqCst) {
         tokio::select! {
             incoming = socket.next() => {
