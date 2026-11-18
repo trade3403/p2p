@@ -5,8 +5,8 @@ $ErrorActionPreference = 'Stop'
 $version = '8.10.2'
 $expectedSha256 = '31c55713e40233a8303827ceb42ca48a47267a0ad4bab9177123121e71524c26'
 $root = Join-Path $env:USERPROFILE '.gradle\ci-distributions'
-$home = Join-Path $root "gradle-$version"
-$exe = Join-Path $home 'bin\gradle.bat'
+$gradleHome = Join-Path $root "gradle-$version"
+$exe = Join-Path $gradleHome 'bin\gradle.bat'
 $zip = Join-Path $root "gradle-$version-bin.zip"
 $stage = Join-Path $root "unpack-$version"
 New-Item -ItemType Directory -Force -Path $root | Out-Null
@@ -42,14 +42,14 @@ if (-not (Test-Path -LiteralPath $exe)) {
     }
     if (-not $haveValidZip) { throw "Cannot download verified Gradle $version via any configured endpoint" }
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-    if (Test-Path -LiteralPath $home) { Remove-Item -LiteralPath $home -Recurse -Force }
+    if (Test-Path -LiteralPath $gradleHome) { Remove-Item -LiteralPath $gradleHome -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
     $unpacked = Join-Path $stage "gradle-$version"
     if (-not (Test-Path -LiteralPath (Join-Path $unpacked 'bin\gradle.bat'))) {
         throw "Verified Gradle archive has unexpected layout"
     }
-    Move-Item -LiteralPath $unpacked -Destination $home
+    Move-Item -LiteralPath $unpacked -Destination $gradleHome
     Remove-Item -LiteralPath $stage -Recurse -Force
 }
 if (-not (Test-Path -LiteralPath $exe)) { throw "Gradle $version executable missing" }
