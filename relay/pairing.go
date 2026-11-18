@@ -249,7 +249,7 @@ func (p *pairingService) handler()http.Handler{
  mux.HandleFunc("/api/v1/devices/heartbeat",p.heartbeat)
  mux.HandleFunc("/api/v1/devices/pairing-window",p.publishWindow)
  mux.HandleFunc("/api/v1/devices/",p.deviceRoute)
- mux.HandleFunc("/api/v1/pairing/requests",p.listRequests)
+ mux.HandleFunc("/api/v1/pairing/requests",func(w http.ResponseWriter,r *http.Request){if r.Method==http.MethodPost{p.createRequest(w,r)}else{p.listRequests(w,r)}})
  mux.HandleFunc("/api/v1/pairing/requests/",func(w http.ResponseWriter,r *http.Request){if strings.HasSuffix(r.URL.Path,"/decision"){p.decideRequest(w,r)}else{p.requestStatus(w,r)}})
  return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
   if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" && !isLocal(r.RemoteAddr) {
