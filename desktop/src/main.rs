@@ -35,8 +35,8 @@ fn main() -> iced::Result {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "P2P Remote starting");
     // Must run before App::default or any Host/Viewer WSS thread starts.
     tls::initialize();
-    iced::application("P2P Remote · 远程桌面", update, view)
-        .theme(|_| Theme::TokyoNight)
+    iced::application("P2P Remote · 远程桌面 V0.15", update, view)
+        .theme(|_| Theme::Dark)
         .exit_on_close_request(false)
         .default_font(Font::with_name("Microsoft YaHei UI"))
         .subscription(|_| Subscription::batch([
@@ -44,7 +44,7 @@ fn main() -> iced::Result {
             window::resize_events().map(|(_, size)| Msg::WindowResized(size.width, size.height)),
             window::close_requests().map(Msg::CloseRequested),
         ]))
-        .window_size((1180.0, 780.0))
+        .window_size((1280.0, 820.0))
         .run()
 }
 
@@ -947,14 +947,14 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
 }
 
 fn card<'a>(child: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
-    container(child).padding(24).width(Length::Fill)
+    container(child).padding(26).width(Length::Fill)
       .style(|_| container::Style::default()
-           .background(Color::from_rgb8(29, 32, 39))
-           .border(Border { color: Color::from_rgb8(55, 59, 67), width: 1.0, radius: 14.0.into() }))
+           .background(Color::from_rgb8(22, 33, 50))
+           .border(Border { color: Color::from_rgb8(43, 61, 83), width: 1.0, radius: 18.0.into() }))
       .into()
 }
 fn heading<'a>(title: &'a str, subtitle: &'a str) -> Element<'a, Msg> {
-    column![text(title).size(22), text(subtitle).size(13).color(Color::from_rgb8(153, 164, 185))].spacing(6).into()
+    column![text(title).size(23).color(Color::from_rgb8(238, 244, 252)), text(subtitle).size(13).color(Color::from_rgb8(151, 169, 190))].spacing(7).into()
 }
 fn view(state: &App) -> Element<'_, Msg> {
     let active = state.running.load(Ordering::SeqCst);
@@ -976,9 +976,9 @@ fn view(state: &App) -> Element<'_, Msg> {
         ("○  本机共享未启动", Color::from_rgb8(53, 63, 80))
     };
     let top = row![
-        column![text("P2P REMOTE  /  V0.14").size(13).color(Color::from_rgb8(255,177,115)),
-                text(page_title).size(28),
-                text(page_subtitle).size(13).color(Color::from_rgb8(156,168,189))].spacing(9),
+        column![text("P2P REMOTE  /  V0.15").size(12).color(Color::from_rgb8(76, 211, 196)),
+                text(page_title).size(30).color(Color::from_rgb8(241, 246, 252)),
+                text(page_subtitle).size(13).color(Color::from_rgb8(153, 171, 192))].spacing(9),
         horizontal_space(),
         container(text(status_label).size(14))
             .padding([12,20])
@@ -1380,9 +1380,9 @@ fn view(state: &App) -> Element<'_, Msg> {
         Page::Network => column![connection, diagnostics, udp].spacing(18).into(),
     };
     let menu = column![
-        text("P2P").size(29).color(Color::from_rgb8(255, 177, 115)),
-        text("REMOTE DESKTOP").size(11).color(Color::from_rgb8(166, 174, 187)),
-        container(text("工作空间").size(12).color(Color::from_rgb8(130, 140, 151))).padding([22, 0]),
+        text("P2P").size(32).color(Color::from_rgb8(76, 211, 196)),
+        text("REMOTE DESKTOP").size(10).color(Color::from_rgb8(151, 169, 190)),
+        container(text("工作空间").size(11).color(Color::from_rgb8(111, 135, 160))).padding([26, 0, 10, 0]),
         button(if state.page == Page::Home { "●  我的设备" } else { "    我的设备" })
             .on_press(Msg::Navigate(Page::Home)).width(Length::Fill).padding(14),
         button(if state.page == Page::Remote { "●  远程控制" } else { "    远程控制" })
@@ -1397,10 +1397,10 @@ fn view(state: &App) -> Element<'_, Msg> {
             .color(if active { Color::from_rgb8(98, 208, 166) } else { Color::from_rgb8(166, 174, 187) }),
         text(format!("中转：{}", state.server)).size(11).color(Color::from_rgb8(130, 140, 151)),
     ].spacing(10);
-    let side = container(menu).width(Length::Fixed(224.0)).height(Length::Fill).padding(22)
+    let side = container(menu).width(Length::Fixed(248.0)).height(Length::Fill).padding(24)
         .style(|_| container::Style::default()
-            .background(Color::from_rgb8(21, 23, 29))
-            .border(Border {color: Color::from_rgb8(46, 49, 57), width: 1.0, radius: 0.0.into()}));
+            .background(Color::from_rgb8(13, 22, 36))
+            .border(Border {color: Color::from_rgb8(34, 49, 68), width: 1.0, radius: 0.0.into()}));
     if state.viewer_fullscreen {
         // The fullscreen workspace has its own status/exit bar; do not duplicate
         // the normal top banner and steal space from remote video.
@@ -1410,7 +1410,7 @@ fn view(state: &App) -> Element<'_, Msg> {
             .center_x(Length::Fill).into();
     }
     let body = scrollable(
-        container(column![top, page_content].spacing(22)).padding(24).width(Length::Fill)
+        container(column![top, page_content].spacing(26)).padding(30).width(Length::Fill)
     ).width(Length::Fill).height(Length::Fill);
     container(row![side, body].height(Length::Fill))
         .width(Length::Fill).height(Length::Fill).into()
