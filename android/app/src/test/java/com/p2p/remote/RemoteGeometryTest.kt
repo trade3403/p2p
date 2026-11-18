@@ -29,7 +29,7 @@ class RemoteGeometryTest {
             0f,90f,320f,180f,1024,768,1f,0f,0f
         ))
         assertNull(RemoteGeometry.transformedPointer(
-            0f,90f,320f,180f,1024,768,2f,-160f,0f
+            319f,90f,320f,180f,1024,768,2f,-160f,0f
         ))
     }
 
