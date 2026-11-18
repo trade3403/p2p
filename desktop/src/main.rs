@@ -240,6 +240,28 @@ impl Drop for App {
 }
 
 #[derive(Debug, Clone)]
+fn submit_pairing_decision(state: &mut App, approved: bool) {
+    #[cfg(windows)]
+    {
+        if let Some(request) = state.pending_pairing_request.take() {
+            if let Some(sender) = state.pairing_decision_tx.as_ref() {
+                let _ = sender.send(host_pairing::PairingDecision::Respond {
+                    request_id: request.request_id,
+                    approved,
+                });
+                state.status = if approved { "已提交允许连接决定".into() } else { "已提交拒绝连接决定".into() };
+            } else {
+                state.status = "数字配对服务已停止，请重新启动共享".into();
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = approved;
+        state.status = "数字配对仅在 Windows Host 上提供".into();
+    }
+}
+
 enum Msg { Navigate(Page), ViewerZoom(ViewerScale), ToggleViewerFullscreen,
     ViewerWindow(Option<window::Id>), WindowResized(f32, f32),
     CloseRequested(window::Id), ShowWindow(Option<window::Id>), HideWindow(Option<window::Id>), ExitWindow(Option<window::Id>),
@@ -332,23 +354,8 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             state.status = "已复制动态验证码".into();
             return clipboard::write(state.pairing_code.clone());
         }
-        Msg::ApprovePairing | Msg::DenyPairing => {
-            #[cfg(windows)]
-            {
-                if let Some(request) = state.pending_pairing_request.take() {
-                    if let Some(sender) = state.pairing_decision_tx.as_ref() {
-                        let approved = matches!(msg, Msg::ApprovePairing);
-                        let _ = sender.send(host_pairing::PairingDecision::Respond {
-                            request_id: request.request_id,
-                            approved,
-                        });
-                        state.status = if approved { "已提交允许连接决定".into() } else { "已提交拒绝连接决定".into() };
-                    } else {
-                        state.status = "数字配对服务已停止，请重新启动共享".into();
-                    }
-                }
-            }
-        }
+        Msg::ApprovePairing => submit_pairing_decision(state, true),
+        Msg::DenyPairing => submit_pairing_decision(state, false),
         Msg::CopyPairingKey => {
             state.status = "已复制配对密钥；请仅通过可信渠道分享".into();
             return clipboard::write(hex::encode(state.secret));
