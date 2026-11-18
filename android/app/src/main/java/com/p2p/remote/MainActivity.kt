@@ -21,6 +21,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +34,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -113,6 +117,7 @@ class MainActivity : ComponentActivity() {
     private var pointerX by mutableFloatStateOf(0.5f)
     private var pointerY by mutableFloatStateOf(0.5f)
     private var pointerValid by mutableStateOf(false)
+    private var hostAllowsInput by mutableStateOf<Boolean?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -132,6 +137,14 @@ class MainActivity : ComponentActivity() {
             var savedPairAvailable by remember { mutableStateOf(trustedStore.hasSaved()) }
             var mobilePage by remember { mutableIntStateOf(0) }
             var showAdvancedNetwork by remember { mutableStateOf(false) }
+            var remoteExpanded by remember { mutableStateOf(false) }
+            var remoteZoom by remember { mutableFloatStateOf(1f) }
+            var remotePanX by remember { mutableFloatStateOf(0f) }
+            var remotePanY by remember { mutableFloatStateOf(0f) }
+            val screenHeightDp = LocalConfiguration.current.screenHeightDp
+            LaunchedEffect(selectedMonitor, online) {
+                remoteZoom = 1f; remotePanX = 0f; remotePanY = 0f
+            }
             MaterialTheme(colorScheme=darkColorScheme(primary=Accent, background=Ink,surface=Panel,onSurface=Color.White,onBackground=Color.White)) {
                 Scaffold(
                     containerColor=Ink,
@@ -237,7 +250,25 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         OutlinedTextField(value=relayToken,onValueChange={relayToken=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("中转服务器访问口令")})
-                        OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("Windows 显示的 64 位会话密钥")})
+                        OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it.trim().take(64)},
+                            modifier=Modifier.fillMaxWidth(),singleLine=true,
+                            visualTransformation=PasswordVisualTransformation(),
+                            label={Text("Windows 配对密钥（可直接粘贴）")})
+                        Row(verticalAlignment=Alignment.CenterVertically) {
+                            Text("9 位数字设备号用于识别；安全连接仍需要密钥",
+                                modifier=Modifier.weight(1f),color=Muted,fontSize=11.sp)
+                            TextButton(onClick={
+                                val mgr=getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                val pasted=mgr.primaryClip?.getItemAt(0)?.coerceToText(this@MainActivity)?.toString()?.trim() ?: ""
+                                if(pasted.length==64 && pasted.all{it in "0123456789abcdefABCDEF"}) {
+                                    sessionKey=pasted
+                                    status="已从手机剪贴板填入加密配对密钥"
+                                } else {
+                                    status="剪贴板没有完整的 64 位配对密钥，请先从电脑复制"
+                                }
+                            }) { Text("粘贴密钥") }
+                        }
+
                         Button(onClick={ if (requested) disconnect() else connect(server, relayToken, sessionKey, lanIp) },modifier=Modifier.fillMaxWidth()) {
                             Text(if(requested)"停止连接 / 取消重试" else "连接电脑")
                         }
@@ -273,6 +304,17 @@ class MainActivity : ComponentActivity() {
                         val bitmap = frame
                         val displayWidth = if(h264Active) h264Width else (bitmap?.width ?: 1280)
                         val displayHeight = if(h264Active) h264Height else (bitmap?.height ?: 720)
+                        Row(verticalAlignment=Alignment.CenterVertically,
+                            horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                            Text("缩放 ${"%.1f".format(remoteZoom)}×",color=Accent,fontSize=13.sp,
+                                modifier=Modifier.weight(1f))
+                            TextButton(onClick={remoteExpanded=!remoteExpanded}) {
+                                Text(if(remoteExpanded) "缩小画面区域" else "展开大画面")
+                            }
+                            TextButton(onClick={
+                                remoteZoom=1f;remotePanX=0f;remotePanY=0f
+                            }) { Text("还原") }
+                        }
                         Box(
                             Modifier.fillMaxWidth().height(240.dp)
                                 .background(Color(0xFF0F1625),RoundedCornerShape(12.dp))
