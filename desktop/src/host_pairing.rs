@@ -136,7 +136,12 @@ fn run(
                 Err(_) => continue,
             };
             if expected.ct_eq(&supplied_proof).unwrap_u8() != 1 {
-                // Wrong codes are silently ignored. The Relay never learns the OTP.
+                // The Host signs a generic denial; the Relay still cannot learn the OTP.
+                let _ = api.decide(&identity, &request, false);
+                let _ = config.messages.send(serde_json::json!({
+                    "event":"pairing_status",
+                    "message":"收到无效验证码请求，已自动拒绝"
+                }).to_string());
                 continue;
             }
 
