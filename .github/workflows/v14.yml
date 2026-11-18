@@ -5,6 +5,9 @@ on:
     branches: ['feature/v0.14-*']
     paths:
       - 'desktop/**'
+      - 'android/**'
+      - 'relay/**'
+      - 'installer/**'
       - 'docs/V0.14*'
       - '.github/workflows/v14.yml'
   workflow_dispatch:
@@ -105,6 +108,36 @@ jobs:
           }
           Write-Host 'Verified: Release EXE uses Windows GUI subsystem; no console window is requested.'
 
+      - name: Build per-user Windows installer with NSIS
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) {
+            $candidates = @(
+              "$env:ProgramFiles\NSIS\makensis.exe",
+              "\${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+            )
+            $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $makensis) {
+            $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
+            if (-not $choco) { throw "NSIS is not installed and Chocolatey is unavailable" }
+            choco install nsis --no-progress -y
+            $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
+            if (-not $makensis) {
+              $candidates = @("$env:ProgramFiles\NSIS\makensis.exe", "\${env:ProgramFiles(x86)}\NSIS\makensis.exe")
+              $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            }
+          }
+          if (-not $makensis) { throw "Could not locate makensis.exe after NSIS installation" }
+          Push-Location installer
+          try {
+            & $makensis /V3 P2PRemote.nsi
+            if ($LASTEXITCODE -ne 0) { throw "NSIS installer compilation failed with exit code $LASTEXITCODE" }
+          } finally { Pop-Location }
+          if (-not (Test-Path "P2PRemote-Setup-v0.14.0.exe")) { throw "NSIS output file was not generated" }
+          Write-Host "Built per-user NSIS installer; user profile and logs remain outside install directory."
+
       - name: Package phase-one portable test build and SHA-256
         run: |
           $ErrorActionPreference = 'Stop'
@@ -112,23 +145,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item 'desktop/target/release/p2p-remote.exe' (Join-Path $dist 'P2PRemote.exe') -Force
           @'
-          P2P Remote V0.14.1 - Phase 1 engineering build
-          This is a portable test package, not the final NSIS installer.
+          P2P Remote V0.14.2 - Windows engineering build
+          Includes a per-user NSIS installer and a portable ZIP for engineering validation.
           Configuration and logs are stored under the current Windows user's LOCALAPPDATA.
           Close hides the main window to the notification area when tray initialization succeeds.
           Use the tray menu's "完全退出" command to stop all sessions and exit.
           '@ | Set-Content -Path (Join-Path $dist 'README.txt') -Encoding UTF8
-          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.14.1-phase1.zip'
+          Copy-Item 'P2PRemote-Setup-v0.14.0.exe' (Join-Path $dist 'P2PRemote-Setup-v0.14.0.exe') -Force
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.14.2.zip'
           Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          ($hash + '  P2PRemote-Portable-v0.14.1-phase1.zip') |
-            Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.14.1-phase1.sha256') -Encoding ASCII
+          ($hash + '  P2PRemote-Portable-v0.14.2.zip') |
+            Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.14.2.sha256') -Encoding ASCII
           Write-Host "Portable package SHA256: $hash"
 
       - name: Upload phase-one artifact
         uses: actions/upload-artifact@v4
         with:
-          name: P2PRemote-Portable-v0.14.1-phase1
+          name: P2PRemote-Windows-v0.14.2
           path: |
             P2PRemote-Portable-v0.14.1-phase1.zip
             P2PRemote-Portable-v0.14.1-phase1.sha256
