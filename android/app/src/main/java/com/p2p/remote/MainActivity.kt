@@ -153,7 +153,7 @@ class MainActivity : ComponentActivity() {
                         .verticalScroll(rememberScrollState()).padding(horizontal=16.dp,vertical=12.dp),
                     verticalArrangement=Arrangement.spacedBy(15.dp)
                 ) {
-                    Text("P2P REMOTE  /  V0.12.1",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
+                    Text("P2P REMOTE  /  V0.13",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("远程协助",fontSize=30.sp,fontWeight=FontWeight.Bold)
                     Row(verticalAlignment=Alignment.CenterVertically) {
                         Text("Android 控制端  ·  测试环境",fontSize=13.sp,color=Muted,modifier=Modifier.weight(1f))
@@ -363,14 +363,64 @@ class MainActivity : ComponentActivity() {
                             Button(onClick={selectMonitor((selectedMonitor-1+monitorCount)%monitorCount)},enabled=online && monitorCount>1) {Text("上一屏")}
                             Button(onClick={selectMonitor((selectedMonitor+1)%monitorCount)},enabled=online && monitorCount>1) {Text("下一屏")}
                         }
+                        if(monitorCount > 1) {
+                            Row(
+                                modifier=Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement=Arrangement.spacedBy(6.dp)
+                            ) {
+                                (0 until monitorCount.coerceAtMost(16)).forEach { index ->
+                                    FilterChip(
+                                        selected=selectedMonitor==index,
+                                        onClick={selectMonitor(index)},
+                                        enabled=online,
+                                        label={Text("屏 ${index+1}")}
+                                    )
+                                }
+                            }
+                        }
                         Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
-                            Button(onClick={sendControl("right_click",pointerX,pointerY)},enabled=online && pointerValid,modifier=Modifier.weight(1f)){Text("右键")}
+                            Button(onClick={sendControl("right_click",pointerX,pointerY)},
+                                enabled=online && pointerValid,modifier=Modifier.weight(1f)){Text("右键")}
                             Button(onClick={sendScroll(-3)},enabled=online,modifier=Modifier.weight(1f)){Text("上滚")}
                             Button(onClick={sendScroll(3)},enabled=online,modifier=Modifier.weight(1f)){Text("下滚")}
                         }
+                        Text("键盘导航",fontWeight=FontWeight.SemiBold,fontSize=15.sp)
+                        Row(horizontalArrangement=Arrangement.spacedBy(5.dp)){
+                            listOf("↑" to "up","↓" to "down","←" to "left","→" to "right").forEach { (label,key) ->
+                                Button(onClick={sendRemoteKey(key)},enabled=online,modifier=Modifier.weight(1f)){
+                                    Text(label,fontSize=15.sp)
+                                }
+                            }
+                        }
+                        Row(horizontalArrangement=Arrangement.spacedBy(5.dp)){
+                            listOf("Home" to "home","End" to "end","PgUp" to "page_up","PgDn" to "page_down").forEach { (label,key) ->
+                                Button(onClick={sendRemoteKey(key)},enabled=online,modifier=Modifier.weight(1f)){
+                                    Text(label,fontSize=11.sp)
+                                }
+                            }
+                        }
+                        Row(horizontalArrangement=Arrangement.spacedBy(5.dp)){
+                            listOf("Enter" to "enter","Tab" to "tab","Esc" to "escape","Del" to "delete").forEach { (label,key) ->
+                                Button(onClick={sendRemoteKey(key)},enabled=online,modifier=Modifier.weight(1f)){
+                                    Text(label,fontSize=12.sp)
+                                }
+                            }
+                        }
+                        Text("编辑快捷键（被控电脑需要允许远程输入）",fontWeight=FontWeight.SemiBold,fontSize=14.sp)
+                        Row(horizontalArrangement=Arrangement.spacedBy(5.dp)){
+                            listOf("全选" to "ctrl_a","复制" to "ctrl_c",
+                                "粘贴" to "ctrl_v","撤销" to "ctrl_z").forEach { (label,key) ->
+                                Button(onClick={sendRemoteKey(key)},enabled=online,modifier=Modifier.weight(1f)){
+                                    Text(label,fontSize=12.sp)
+                                }
+                            }
+                        }
                         Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(value=textToSend,onValueChange={textToSend=it},modifier=Modifier.weight(1f),singleLine=true,label={Text("发送文字到电脑")})
-                            Button(onClick={sendControlText(textToSend);textToSend=""},enabled=online && textToSend.isNotBlank()){Text("发送")}
+                            OutlinedTextField(value=textToSend,onValueChange={textToSend=it},
+                                modifier=Modifier.weight(1f),singleLine=true,label={Text("发送文字到电脑")})
+                            Button(onClick={sendControlText(textToSend);textToSend=""},enabled=online && textToSend.isNotBlank()){
+                                Text("发送")
+                            }
                         }
                     }
                     }
