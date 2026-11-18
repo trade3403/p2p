@@ -54,10 +54,10 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.min
 
-private val Ink = Color(0xFF111827)
-private val Panel = Color(0xFF202D44)
-private val Accent = Color(0xFF6B9BFF)
-private val Muted = Color(0xFFB5C1D5)
+private val Ink = Color(0xFF111317)
+private val Panel = Color(0xFF202329)
+private val Accent = Color(0xFFF4A077)
+private val Muted = Color(0xFFAFB7C4)
 
 class MainActivity : ComponentActivity() {
     private val trustedStore by lazy { TrustedPairingStore(this) }
@@ -129,14 +129,30 @@ class MainActivity : ComponentActivity() {
             var textToSend by remember { mutableStateOf("") }
             var clipboardToSend by remember { mutableStateOf("") }
             var savedPairAvailable by remember { mutableStateOf(trustedStore.hasSaved()) }
+            var mobilePage by remember { mutableIntStateOf(0) }
             MaterialTheme(colorScheme=darkColorScheme(primary=Accent, background=Ink,surface=Panel,onSurface=Color.White,onBackground=Color.White)) {
                 Column(Modifier.fillMaxSize().background(Ink).verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(15.dp)) {
                     Spacer(Modifier.height(8.dp))
-                    Text("P2P  /  REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
-                    Text("我的远程桌面",fontSize=29.sp,fontWeight=FontWeight.Bold)
-                    Text("Android 控制端  ·  V0.9 测试版",fontSize=13.sp,color=Muted)
+                    Text("P2P REMOTE  /  V0.12",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
+                    Text("远程协助",fontSize=30.sp,fontWeight=FontWeight.Bold)
+                    Row(verticalAlignment=Alignment.CenterVertically) {
+                        Text("Android 控制端  ·  测试环境",fontSize=13.sp,color=Muted,modifier=Modifier.weight(1f))
+                        Text(if(online) "● 已连接" else "○ 未连接",
+                            fontSize=13.sp,color=if(online) Color(0xFF65D6B0) else Muted)
+                    }
+                    Row(horizontalArrangement=Arrangement.spacedBy(8.dp),modifier=Modifier.fillMaxWidth()) {
+                        listOf("连接设备","远程画面","更多设置").forEachIndexed { index, label ->
+                            FilterChip(
+                                selected=mobilePage==index,
+                                onClick={ mobilePage=index },
+                                label={Text(label,fontSize=13.sp)},
+                                modifier=Modifier.weight(1f)
+                            )
+                        }
+                    }
+                    if (mobilePage==0) {
                     PanelCard {
-                        Text("01   已授权的家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
+                        Text("已授权的电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text(if(savedPairAvailable)"已在 Android Keystore 加密保存一台电脑"
                             else "尚未保存可信配对",fontSize=13.sp,color=Muted)
                         Button(
@@ -186,7 +202,7 @@ class MainActivity : ComponentActivity() {
                         Text("保存仅发生在你主动点击之后；不会自动连接或后台启动。",fontSize=12.sp,color=Muted)
                     }
                     PanelCard {
-                        Text("02   手动连接家庭电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
+                        Text("连接另一台电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text("跨公网使用 VPS 中转，无需家庭固定 IP",fontSize=12.sp,color=Muted)
                         OutlinedTextField(value=server,onValueChange={server=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("中转服务器 WSS 地址")})
                         OutlinedTextField(
@@ -225,9 +241,11 @@ class MainActivity : ComponentActivity() {
                             color=Muted,fontSize=12.sp)
                         Text("只有主动点击加密保存才会存储可信配对；网络中断期间允许当前会话自动重连",color=Muted,fontSize=12.sp)
                     }
+                    }
+                    if (mobilePage==1) {
                     PanelCard {
                         Row(verticalAlignment=Alignment.CenterVertically) {
-                            Text("03   远程画面",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
+                            Text("远程画面",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                             Spacer(Modifier.weight(1f))
                             Text(if(receivingFrames)"● 正在接收画面" else if(online)"○ 等待家庭电脑" else "○ 未连接",fontSize=12.sp,color=if(receivingFrames)Color(0xFF72D9AB) else Muted)
                         }
@@ -322,8 +340,10 @@ class MainActivity : ComponentActivity() {
                             Button(onClick={sendControlText(textToSend);textToSend=""},enabled=online && textToSend.isNotBlank()){Text("发送")}
                         }
                     }
+                    }
+                    if (mobilePage==2) {
                     PanelCard {
-                        Text("04   按需传递剪贴板文字",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
+                        Text("剪贴板同步",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
                         Text("电脑端须单独授权。不会自动监听或同步任何剪贴板内容。",fontSize=12.sp,color=Muted)
                         OutlinedTextField(value=clipboardToSend,onValueChange={clipboardToSend=it.take(2048)},
                             modifier=Modifier.fillMaxWidth(),label={Text("输入要放进电脑剪贴板的文字")},maxLines=3)
@@ -343,8 +363,9 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     PanelCard {
-                        Text("05   安全提示",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
+                        Text("安全与隐私",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
                         Text("桌面画面采用 AES-256-GCM 端到端加密；中转服务器无法解密图像。首次测试请仅在你自己的电脑上使用。",fontSize=13.sp,color=Muted,lineHeight=20.sp)
+                    }
                     }
                     Spacer(Modifier.height(15.dp))
                 }
@@ -353,7 +374,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable private fun PanelCard(content:@Composable ColumnScope.()->Unit) {
-        Column(Modifier.fillMaxWidth().background(Panel,RoundedCornerShape(18.dp)).padding(17.dp),verticalArrangement=Arrangement.spacedBy(12.dp),content=content)
+        Column(Modifier.fillMaxWidth().background(Panel,RoundedCornerShape(16.dp)).padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp),content=content)
     }
 
     private fun connect(server: String, relayToken: String, keyText: String, lanIp: String) {
