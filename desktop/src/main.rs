@@ -374,10 +374,10 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             return clipboard::write(hex::encode(state.secret));
         }
         Msg::ViewerPairingNumber(value) if !state.viewer_pairing_active.load(Ordering::SeqCst) => {
-            state.viewer_device_number = value.chars().filter(char::is_ascii_digit).take(9).collect();
+            state.viewer_device_number = value.chars().filter(|c| c.is_ascii_digit()).take(9).collect();
         }
         Msg::ViewerPairingCode(value) if !state.viewer_pairing_active.load(Ordering::SeqCst) => {
-            state.viewer_pairing_code = value.chars().filter(char::is_ascii_digit).take(6).collect();
+            state.viewer_pairing_code = value.chars().filter(|c| c.is_ascii_digit()).take(6).collect();
         }
         Msg::ToggleLegacyViewerKey => state.show_legacy_viewer_key = !state.show_legacy_viewer_key,
         Msg::ViewerPair => {
@@ -1069,7 +1069,7 @@ fn view(state: &App) -> Element<'_, Msg> {
             ].spacing(10)
         ].spacing(12))
     } else {
-        column![].into()
+        text("").into()
     };
 
     let quick_connect = card(column![
