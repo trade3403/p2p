@@ -12,7 +12,7 @@ mod udp_video;
 mod viewer;
 mod viewer_geometry;
 
-use iced::{Font, widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
+use iced::{Font, widget::{button, checkbox, column, container, horizontal_space, vertical_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
 
 fn main() -> iced::Result {
@@ -20,11 +20,15 @@ fn main() -> iced::Result {
         .theme(|_| Theme::TokyoNight)
         .default_font(Font::with_name("Microsoft YaHei UI"))
         .subscription(|_| Subscription::batch([iced::time::every(Duration::from_millis(250)).map(|_| Msg::Tick)]))
-        .window_size((1080.0, 740.0))
+        .window_size((1180.0, 780.0))
         .run()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page { Home, Remote, Settings, Network }
+
 struct App {
+    page: Page,
     server: String,
     relay_token: String,
     secret: [u8;32],
@@ -76,6 +80,7 @@ impl Default for App {
             .and_then(|v| <[u8; 32]>::try_from(v).ok())
             .unwrap_or_else(protocol::new_secret);
         let mut app = Self {
+            page: Page::Home,
             server: trusted.as_ref().map(|p| p.relay_url.clone())
                 .unwrap_or_else(local_settings::load_relay_url),
             relay_token: trusted.as_ref().map(|p| p.relay_token.clone()).unwrap_or_default(),
@@ -159,12 +164,13 @@ impl Drop for App {
 }
 
 #[derive(Debug, Clone)]
-enum Msg { Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
+enum Msg { Navigate(Page), Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
     H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet, ViewerClipboardSet, ViewerKeyPress(&'static str) }
 
 fn update(state: &mut App, msg: Msg) {
     match msg {
+        Msg::Navigate(page) => state.page = page,
         Msg::ViewerKey(value) if !state.viewer_active.load(Ordering::SeqCst) => {
             state.viewer_key = value.trim().to_owned();
         }
@@ -425,19 +431,19 @@ fn update(state: &mut App, msg: Msg) {
 fn card<'a>(child: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
     container(child).padding(24).width(Length::Fill)
       .style(|_| container::Style::default()
-           .background(Color::from_rgb8(27, 34, 52))
-           .border(Border { color: Color::from_rgb8(52, 64, 90), width: 1.0, radius: 16.0.into() }))
+           .background(Color::from_rgb8(29, 32, 39))
+           .border(Border { color: Color::from_rgb8(55, 59, 67), width: 1.0, radius: 14.0.into() }))
       .into()
 }
 fn heading<'a>(title: &'a str, subtitle: &'a str) -> Element<'a, Msg> {
-    column![text(title).size(24), text(subtitle).size(13).color(Color::from_rgb8(153, 164, 185))].spacing(6).into()
+    column![text(title).size(22), text(subtitle).size(13).color(Color::from_rgb8(153, 164, 185))].spacing(6).into()
 }
 fn view(state: &App) -> Element<'_, Msg> {
     let active = state.running.load(Ordering::SeqCst);
     let top = row![
-        column![text("P2P  /  REMOTE").size(14).color(Color::from_rgb8(127,171,255)),
-                text("个人远程桌面").size(33),
-                text("Rust 原生客户端  ·  Windows Host  ·  V0.11 测试版").size(14).color(Color::from_rgb8(156,168,189))].spacing(9),
+        column![text("P2P REMOTE  /  V0.12").size(13).color(Color::from_rgb8(255,177,115)),
+                text("远程协助工作台").size(28),
+                text("我的设备  ·  远程控制  ·  安全设置").size(13).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
         container(text(if active {"●  服务已启动"} else {"○  尚未连接"}).size(14))
             .padding([12,20])
@@ -579,14 +585,14 @@ fn view(state: &App) -> Element<'_, Msg> {
 
 
     let remote_image: Element<'_, Msg> = if let Some(handle) = &state.viewer_frame {
-        mouse_area(image(handle.clone()).width(Length::Fixed(800.0)).height(Length::Fixed(450.0)))
+        mouse_area(image(handle.clone()).width(Length::Fixed(660.0)).height(Length::Fixed(371.0)))
             .on_move(Msg::ViewerMove)
             .on_press(Msg::ViewerDown)
             .on_release(Msg::ViewerUp)
             .into()
     } else {
         container(text("等待远程 Windows 桌面 JPEG 图像"))
-            .width(Length::Fixed(800.0)).height(Length::Fixed(450.0))
+            .width(Length::Fixed(660.0)).height(Length::Fixed(371.0))
             .center_x(Length::Fill).center_y(Length::Fill).into()
     };
     let viewer_panel = card(column![
@@ -627,7 +633,39 @@ fn view(state: &App) -> Element<'_, Msg> {
         text("本功能仅用于你拥有或获得授权的 Windows 主机。").size(12)
     ].spacing(12));
 
-    container(scrollable(container(column![top, viewer_panel, connection, direct, safety, trust, video, status, diagnostics, udp].spacing(22)).width(Length::Fill).max_width(920).padding(22)))
-        .width(Length::Fill).height(Length::Fill)
-        .center_x(Length::Fill).into()
+    // Sunlogin-inspired information architecture, with original P2P branding:
+    // one primary task per screen instead of ten stacked configuration panels.
+    let page_content: Element<'_, Msg> = match state.page {
+        Page::Home => column![connection, status, trust].spacing(18).into(),
+        Page::Remote => column![viewer_panel].spacing(18).into(),
+        Page::Settings => column![safety, video, direct].spacing(18).into(),
+        Page::Network => column![diagnostics, udp].spacing(18).into(),
+    };
+    let menu = column![
+        text("P2P").size(29).color(Color::from_rgb8(255, 177, 115)),
+        text("REMOTE DESKTOP").size(11).color(Color::from_rgb8(166, 174, 187)),
+        container(text("工作空间").size(12).color(Color::from_rgb8(130, 140, 151))).padding([22, 0]),
+        button(if state.page == Page::Home { "●  我的设备" } else { "    我的设备" })
+            .on_press(Msg::Navigate(Page::Home)).width(Length::Fill).padding(14),
+        button(if state.page == Page::Remote { "●  远程控制" } else { "    远程控制" })
+            .on_press(Msg::Navigate(Page::Remote)).width(Length::Fill).padding(14),
+        button(if state.page == Page::Settings { "●  安全与画质" } else { "    安全与画质" })
+            .on_press(Msg::Navigate(Page::Settings)).width(Length::Fill).padding(14),
+        button(if state.page == Page::Network { "●  网络诊断" } else { "    网络诊断" })
+            .on_press(Msg::Navigate(Page::Network)).width(Length::Fill).padding(14),
+        vertical_space(),
+        text(if active { "● 本机共享服务已启动" } else { "○ 本机共享服务未启动" })
+            .size(13)
+            .color(if active { Color::from_rgb8(98, 208, 166) } else { Color::from_rgb8(166, 174, 187) }),
+        text("TEST  /  p2ptest.aikissgo.com").size(11).color(Color::from_rgb8(130, 140, 151)),
+    ].spacing(10);
+    let side = container(menu).width(Length::Fixed(224.0)).height(Length::Fill).padding(22)
+        .style(|_| container::Style::default()
+            .background(Color::from_rgb8(21, 23, 29))
+            .border(Border {color: Color::from_rgb8(46, 49, 57), width: 1.0, radius: 0.0.into()}));
+    let body = scrollable(
+        container(column![top, page_content].spacing(22)).padding(24).width(Length::Fill)
+    ).width(Length::Fill).height(Length::Fill);
+    container(row![side, body].height(Length::Fill))
+        .width(Length::Fill).height(Length::Fill).into()
 }
