@@ -8,6 +8,7 @@ on:
       - 'android/**'
       - 'relay/**'
       - 'deploy/**'
+      - 'scripts/**'
       - '.github/workflows/v13.yml'
   pull_request:
     branches: [main]  # Development feature PRs use the branch push run to avoid duplicate builds.
@@ -152,10 +153,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.10.2'
-          cache-disabled: true
+      - name: Provision SHA256-verified Gradle from persistent Windows cache
+        shell: powershell
+        run: ./scripts/ci-setup-gradle-windows.ps1
       - name: Install official Android commandline tools (Windows)
         shell: powershell
         run: |
