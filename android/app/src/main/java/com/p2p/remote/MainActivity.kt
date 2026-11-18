@@ -59,10 +59,10 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.min
 
-private val Ink = Color(0xFF111317)
-private val Panel = Color(0xFF202329)
-private val Accent = Color(0xFFF4A077)
-private val Muted = Color(0xFFAFB7C4)
+private val Ink = Color(0xFF0D1422)
+private val Panel = Color(0xFF182437)
+private val Accent = Color(0xFF55C7E8)
+private val Muted = Color(0xFF9EACC0)
 
 class MainActivity : ComponentActivity() {
     private val trustedStore by lazy { TrustedPairingStore(this) }
@@ -167,12 +167,23 @@ class MainActivity : ComponentActivity() {
                         .verticalScroll(rememberScrollState()).padding(horizontal=16.dp,vertical=12.dp),
                     verticalArrangement=Arrangement.spacedBy(15.dp)
                 ) {
-                    Text("P2P REMOTE  /  V0.14",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
-                    Text("远程协助",fontSize=30.sp,fontWeight=FontWeight.Bold)
                     Row(verticalAlignment=Alignment.CenterVertically) {
-                        Text("Android 控制端  ·  V0.14",fontSize=13.sp,color=Muted,modifier=Modifier.weight(1f))
-                        Text(if(online) "● 已连接" else "○ 未连接",
-                            fontSize=13.sp,color=if(online) Color(0xFF65D6B0) else Muted)
+                        Column(modifier=Modifier.weight(1f), verticalArrangement=Arrangement.spacedBy(3.dp)) {
+                            Text("P2P REMOTE",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
+                            Text("远程桌面",fontSize=28.sp,fontWeight=FontWeight.Bold)
+                            Text("安全连接你的 Windows 设备",fontSize=13.sp,color=Muted)
+                        }
+                        Surface(
+                            shape=RoundedCornerShape(24.dp),
+                            color=if(online) Color(0xFF17483F) else Color(0xFF26354A)
+                        ) {
+                            Text(
+                                if(online) "● 已连接" else "○ 未连接",
+                                modifier=Modifier.padding(horizontal=13.dp, vertical=8.dp),
+                                fontSize=12.sp,
+                                color=if(online) Color(0xFF72D9AB) else Muted
+                            )
+                        }
                     }
                     // Persistent bottom navigation keeps the remote screen one tap away.
                     if (mobilePage==0) {
@@ -227,8 +238,8 @@ class MainActivity : ComponentActivity() {
                         Text("保存仅发生在你主动点击之后；不会自动连接或后台启动。",fontSize=12.sp,color=Muted)
                     }
                     PanelCard {
-                        Text("连接另一台电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
-                        Text("跨公网使用 VPS 中转，无需家庭固定 IP",fontSize=12.sp,color=Muted)
+                        Text("添加或连接电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
+                        Text("跨公网通过加密中转连接；首次配对需要被控电脑端确认。",fontSize=12.sp,color=Muted)
                         OutlinedTextField(value=server,onValueChange={server=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("中转服务器 WSS 地址")})
                         TextButton(onClick={showAdvancedNetwork=!showAdvancedNetwork}) {
                             Text(if(showAdvancedNetwork) "收起高级网络设置" else "高级网络设置（LAN / STUN）")
@@ -254,9 +265,9 @@ class MainActivity : ComponentActivity() {
                         OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it.trim().take(64)},
                             modifier=Modifier.fillMaxWidth(),singleLine=true,
                             visualTransformation=PasswordVisualTransformation(),
-                            label={Text("Windows 配对密钥（可直接粘贴）")})
+                            label={Text("当前兼容模式：Windows 64 位配对密钥")})
                         Row(verticalAlignment=Alignment.CenterVertically) {
-                            Text("9 位数字设备号用于识别；安全连接仍需要密钥",
+                            Text("当前版本的 9 位编号由密钥本地计算，仅用于识别；数字验证码配对正在接入服务端。",
                                 modifier=Modifier.weight(1f),color=Muted,fontSize=11.sp)
                             TextButton(onClick={
                                 val mgr=getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -580,7 +591,13 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable private fun PanelCard(content:@Composable ColumnScope.()->Unit) {
-        Column(Modifier.fillMaxWidth().background(Panel,RoundedCornerShape(16.dp)).padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp),content=content)
+        Column(
+            Modifier.fillMaxWidth()
+                .background(Panel,RoundedCornerShape(18.dp))
+                .padding(18.dp),
+            verticalArrangement=Arrangement.spacedBy(13.dp),
+            content=content
+        )
     }
 
     private fun connect(server: String, relayToken: String, keyText: String, lanIp: String) {
