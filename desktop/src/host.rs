@@ -125,12 +125,14 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (mut outgoing, mut incoming) = socket.split();
+    let force_jpeg = Arc::new(AtomicBool::new(false));
     let mut frames = crate::video::spawn_frames(
         config.monitor_index.clone(),
         config.h264_enabled.clone(),
         config.target_fps.clone(),
         config.dropped_frames.clone(),
         config.udp_active.clone(),
+        force_jpeg.clone(),
     );
     let mut metadata_tick = tokio::time::interval(Duration::from_secs(5));
     let (udp_signal_tx, mut udp_signal_rx) =
@@ -219,6 +221,14 @@ where
                             {
                                 if let Ok(command) = serde_json::from_slice::<Control>(&bytes) {
                                     match command.kind.as_str() {
+                                        "video_codec" => {
+                                            if command.codec.as_deref() == Some("jpeg") {
+                                                force_jpeg.store(true, Ordering::SeqCst);
+                                                let _ = config.messages.send(
+                                                    "已接收 Windows Viewer 兼容请求：本次连接切换 JPEG 画面".into()
+                                                );
+                                            }
+                                        }
                                         "monitor" => {
                                             if let Some(index) = command.index {
                                                 if screenshots::Screen::all()
@@ -282,6 +292,7 @@ struct Control {
     index: Option<usize>,
     delta: Option<i32>,
     key: Option<String>,
+    codec: Option<String>,
 }
 
 #[cfg(windows)]
