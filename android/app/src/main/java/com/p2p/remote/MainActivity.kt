@@ -166,7 +166,7 @@ class MainActivity : ComponentActivity() {
                         .verticalScroll(rememberScrollState()).padding(horizontal=16.dp,vertical=12.dp),
                     verticalArrangement=Arrangement.spacedBy(15.dp)
                 ) {
-                    Text("P2P REMOTE  /  V0.13",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
+                    Text("P2P REMOTE  /  V0.13.2",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("远程协助",fontSize=30.sp,fontWeight=FontWeight.Bold)
                     Row(verticalAlignment=Alignment.CenterVertically) {
                         Text("Android 控制端  ·  测试环境",fontSize=13.sp,color=Muted,modifier=Modifier.weight(1f))
