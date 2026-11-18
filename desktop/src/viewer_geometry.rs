@@ -26,7 +26,8 @@ pub fn viewer_dimensions(
     let (window_w, window_h) = window_size;
     if !window_w.is_finite() || !window_h.is_finite() { return windowed; }
     let available_w = (window_w - 40.0).max(320.0);
-    let available_h = (window_h - 152.0).max(200.0);
+    // Reserve space for the fullscreen exit bar and control toolbars.
+    let available_h = (window_h - 222.0).max(200.0);
     let width = available_w.min(available_h * 16.0 / 9.0);
     (width, width * 9.0 / 16.0)
 }
