@@ -414,9 +414,11 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                         .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
                     anyhow::ensure!(device.pairing_expires_at > now, "目标电脑动态验证码已过期");
                     let identity_public = pairing_api::decode_base64url(&device.identity_public_key, 32)?;
-                    let identity_public = <[u8; 32]>::try_from(identity_public)?;
+                    let identity_public = <[u8; 32]>::try_from(identity_public)
+                        .map_err(|_| anyhow::anyhow!("invalid identity public key length"))?;
                     let pairing_public = pairing_api::decode_base64url(&device.pairing_public_key, 32)?;
-                    let pairing_public = <[u8; 32]>::try_from(pairing_public)?;
+                    let pairing_public = <[u8; 32]>::try_from(pairing_public)
+                        .map_err(|_| anyhow::anyhow!("invalid pairing public key length"))?;
                     anyhow::ensure!(
                         pairing_crypto::verify_pairing_window(
                             identity_public, &device_number, device.pairing_expires_at,
@@ -434,7 +436,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                         "event":"viewer_pairing_status","message":"验证码已提交，等待被控电脑用户确认…"
                     }).to_string());
                     while std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)?.as_secs() < request.expires_at
+                        .duration_since(std::time::UNIX_EPOCH)?.as_secs() < request.expires_at.max(0) as u64
                     {
                         if cancel.load(Ordering::SeqCst) { anyhow::bail!("配对已取消"); }
                         match api.request_status(&request.request_id)?.status.as_str() {
@@ -1291,7 +1293,7 @@ fn view(state: &App) -> Element<'_, Msg> {
                 .on_press(Msg::ToggleLegacyViewerKey).padding(8),
             if state.show_legacy_viewer_key {
                 column![
-                    text_input("输入旧版远程 PC 的 64 位会话密钥", &state.viewer_key)
+                    text_input::<Msg, Theme, iced::Renderer>("输入旧版远程 PC 的 64 位会话密钥", &state.viewer_key)
                         .on_input(Msg::ViewerKey).secure(true).padding(12).size(14),
                     button("使用旧版密钥连接")
                         .on_press_maybe((!state.viewer_active.load(Ordering::SeqCst)).then_some(Msg::ViewerConnect))
