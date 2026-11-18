@@ -62,6 +62,8 @@ pub fn start(config: ViewerConfig) {
 }
 
 async fn run(config: &ViewerConfig) -> Result<()> {
+    // Also initialize on workers so direct library/test entry points are safe.
+    crate::tls::initialize();
     if config.token.trim().len() < 32 {
         return Err(anyhow!("Relay Token 必须至少 32 位"));
     }
