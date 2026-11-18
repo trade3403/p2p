@@ -1,6 +1,6 @@
 [package]
 name = "p2p-remote"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2021"
 license = "Proprietary"
 description = "Personal remote desktop Windows host - private source"
@@ -9,6 +9,8 @@ description = "Personal remote desktop Windows host - private source"
 iced = { version = "0.13.1", features = ["tokio", "image"] }
 tokio = { version = "1.43", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Both ring and aws-lc may be selected transitively: explicitly select a process-level TLS provider.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 futures-util = "0.3"
 url = "2.5"
 http = "1"
