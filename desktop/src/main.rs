@@ -64,6 +64,12 @@ impl ViewerScale {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PairingRequestPrompt {
+    request_id: String,
+    viewer_fingerprint: String,
+}
+
 struct App {
     page: Page,
     viewer_scale: ViewerScale,
@@ -72,6 +78,12 @@ struct App {
     show_session_key: bool,
     server: String,
     relay_token: String,
+    device_number: String,
+    pairing_code: String,
+    pairing_expires_at: i64,
+    pending_pairing_request: Option<PairingRequestPrompt>,
+    #[cfg(windows)]
+    pairing_decision_tx: Option<Sender<host_pairing::PairingDecision>>,
     secret: [u8;32],
     running: Arc<AtomicBool>,
     allow_input: Arc<AtomicBool>,
@@ -136,6 +148,12 @@ impl Default for App {
             server: trusted.as_ref().map(|p| p.relay_url.clone())
                 .unwrap_or_else(local_settings::load_relay_url),
             relay_token: trusted.as_ref().map(|p| p.relay_token.clone()).unwrap_or_default(),
+            device_number: String::new(),
+            pairing_code: String::new(),
+            pairing_expires_at: 0,
+            pending_pairing_request: None,
+            #[cfg(windows)]
+            pairing_decision_tx: None,
             secret,
             running: Arc::new(AtomicBool::new(false)),
             allow_input: Arc::new(AtomicBool::new(false)),
@@ -225,7 +243,7 @@ impl Drop for App {
 enum Msg { Navigate(Page), ViewerZoom(ViewerScale), ToggleViewerFullscreen,
     ViewerWindow(Option<window::Id>), WindowResized(f32, f32),
     CloseRequested(window::Id), ShowWindow(Option<window::Id>), HideWindow(Option<window::Id>), ExitWindow(Option<window::Id>),
-    ToggleSessionKey, CopyDeviceNumber, CopyPairingKey, Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
+    ToggleSessionKey, CopyDeviceNumber, CopyPairingKey, CopyPairingCode, ApprovePairing, DenyPairing, Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
     H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet, ViewerClipboardSet, ViewerKeyPress(&'static str) }
 
