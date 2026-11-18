@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   windows:
-    name: Rust Windows V0.13 EXE
+    name: Rust Windows V0.13.1 EXE (rustls provider fix)
     # Owner PC-202310201945 self-hosted Windows runner.
     # Must be ONLINE and have default self-hosted / Windows / X64 labels.
     runs-on: [self-hosted, Windows, X64]
@@ -94,14 +94,14 @@ jobs:
           New-Item -ItemType Directory -Force dist/windows | Out-Null
           Copy-Item desktop/target/release/p2p-remote.exe dist/windows/P2PRemote.exe
           Copy-Item README.md dist/windows/README.md
-          Compress-Archive -Path dist/windows/* -DestinationPath P2PRemote-Windows-v0.13.0-test.zip -Force
-          (Get-FileHash P2PRemote-Windows-v0.13.0-test.zip -Algorithm SHA256).Hash | Out-File P2PRemote-Windows-v0.13.0-test.sha256 -Encoding ASCII
+          Compress-Archive -Path dist/windows/* -DestinationPath P2PRemote-Windows-v0.13.1-test.zip -Force
+          (Get-FileHash P2PRemote-Windows-v0.13.1-test.zip -Algorithm SHA256).Hash | Out-File P2PRemote-Windows-v0.13.1-test.sha256 -Encoding ASCII
       - uses: actions/upload-artifact@v4
         with:
-          name: P2PRemote-Windows-v0.13.0-test
+          name: P2PRemote-Windows-v0.13.1-test
           path: |
-            P2PRemote-Windows-v0.13.0-test.zip
-            P2PRemote-Windows-v0.13.0-test.sha256
+            P2PRemote-Windows-v0.13.1-test.zip
+            P2PRemote-Windows-v0.13.1-test.sha256
           retention-days: 14
 
   android:
