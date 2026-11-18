@@ -43,6 +43,7 @@ impl ViewerScale {
 struct App {
     page: Page,
     viewer_scale: ViewerScale,
+    show_session_key: bool,
     server: String,
     relay_token: String,
     secret: [u8;32],
@@ -96,6 +97,7 @@ impl Default for App {
         let mut app = Self {
             page: Page::Home,
             viewer_scale: ViewerScale::Standard,
+            show_session_key: false,
             server: trusted.as_ref().map(|p| p.relay_url.clone())
                 .unwrap_or_else(local_settings::load_relay_url),
             relay_token: trusted.as_ref().map(|p| p.relay_token.clone()).unwrap_or_default(),
@@ -179,7 +181,7 @@ impl Drop for App {
 }
 
 #[derive(Debug, Clone)]
-enum Msg { Navigate(Page), ViewerZoom(ViewerScale), Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
+enum Msg { Navigate(Page), ViewerZoom(ViewerScale), ToggleSessionKey, Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
     H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet, ViewerClipboardSet, ViewerKeyPress(&'static str) }
 
@@ -199,6 +201,7 @@ fn update(state: &mut App, msg: Msg) {
             state.viewer_scale = scale;
             state.viewer_pointer_valid = false;
         }
+        Msg::ToggleSessionKey => state.show_session_key = !state.show_session_key,
         Msg::ViewerKey(value) if !state.viewer_active.load(Ordering::SeqCst) => {
             state.viewer_key = value.trim().to_owned();
         }
@@ -477,14 +480,32 @@ fn heading<'a>(title: &'a str, subtitle: &'a str) -> Element<'a, Msg> {
 }
 fn view(state: &App) -> Element<'_, Msg> {
     let active = state.running.load(Ordering::SeqCst);
+    let (page_title, page_subtitle) = match state.page {
+        Page::Home => ("我的设备", "查看本机状态、连接参数和已授权设备"),
+        Page::Remote => ("远程控制", "连接另一台 Windows，管理屏幕与输入"),
+        Page::Settings => ("安全与画质", "控制权限、编码方式与局域网连接"),
+        Page::Network => ("网络诊断", "检查 STUN、UDP 与连接质量"),
+    };
+    let (status_label, status_color) = if state.page == Page::Remote {
+        if state.viewer_online {
+            ("●  远程控制已连接", Color::from_rgb8(22, 75, 67))
+        } else {
+            ("○  尚未连接远程电脑", Color::from_rgb8(53, 63, 80))
+        }
+    } else if active {
+        ("●  本机共享已启动", Color::from_rgb8(22, 75, 67))
+    } else {
+        ("○  本机共享未启动", Color::from_rgb8(53, 63, 80))
+    };
     let top = row![
         column![text("P2P REMOTE  /  V0.12.1").size(13).color(Color::from_rgb8(255,177,115)),
-                text("远程协助工作台").size(28),
-                text("我的设备  ·  远程控制  ·  安全设置").size(13).color(Color::from_rgb8(156,168,189))].spacing(9),
+                text(page_title).size(28),
+                text(page_subtitle).size(13).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
-        container(text(if active {"●  服务已启动"} else {"○  尚未连接"}).size(14))
+        container(text(status_label).size(14))
             .padding([12,20])
-            .style(move |_| container::Style::default().background(if active {Color::from_rgb8(22,75,67)} else {Color::from_rgb8(53,63,80)}).border(Border {color: Color::TRANSPARENT, width: 0.0, radius: 22.into()}))
+            .style(move |_| container::Style::default().background(status_color)
+                .border(Border {color: Color::TRANSPARENT, width: 0.0, radius: 22.into()}))
     ].align_y(iced::Alignment::Center);
 
     let connection = card(column![
@@ -493,9 +514,22 @@ fn view(state: &App) -> Element<'_, Msg> {
         text_input("wss://p2ptest.aikissgo.com", &state.server).on_input(Msg::Server).padding(13).size(15),
         text("中转访问口令（与 VPS 的 RELAY_ACCESS_TOKEN 一致）").size(13),
         text_input("输入服务器访问口令", &state.relay_token).on_input(Msg::Token).secure(true).padding(13).size(15),
-        text("端到端加密会话密钥（仅分享给你的 Android 手机）").size(13),
-        container(text(hex::encode(state.secret)).size(14)).padding(13).width(Length::Fill)
-            .style(|_| container::Style::default().background(Color::from_rgb8(17,25,42)).border(Border {color:Color::from_rgb8(60,74,102),width:1.0,radius:9.into()})),
+        text(format!("本机设备指纹：{}", &protocol::room_id(&state.secret)[..12]))
+            .size(15).color(Color::from_rgb8(255, 177, 115)),
+        text("配对密钥仅向已授权的 Windows / Android 控制端分享").size(13),
+        row![
+            container(text(if state.show_session_key {
+                hex::encode(state.secret)
+            } else {
+                "•••• •••• •••• •••• · 点击显示后可用于配对".to_owned()
+            }).size(13))
+                .padding(13).width(Length::Fill)
+                .style(|_| container::Style::default()
+                    .background(Color::from_rgb8(19, 21, 27))
+                    .border(Border {color:Color::from_rgb8(60,74,102),width:1.0,radius:9.into()})),
+            button(if state.show_session_key { "隐藏密钥" } else { "显示密钥" })
+                .on_press(Msg::ToggleSessionKey).padding(12)
+        ].spacing(8).align_y(iced::Alignment::Center),
         row![button("生成新密钥并撤销旧配对").on_press_maybe((!active).then_some(Msg::NewKey)).padding(13),
              horizontal_space(),
              if active {button("停止远程服务").on_press(Msg::Stop).padding(13)}
@@ -713,7 +747,7 @@ fn view(state: &App) -> Element<'_, Msg> {
         text(if active { "● 本机共享服务已启动" } else { "○ 本机共享服务未启动" })
             .size(13)
             .color(if active { Color::from_rgb8(98, 208, 166) } else { Color::from_rgb8(166, 174, 187) }),
-        text("测试环境 · p2ptest.aikissgo.com").size(11).color(Color::from_rgb8(130, 140, 151)),
+        text(format!("中转：{}", state.server)).size(11).color(Color::from_rgb8(130, 140, 151)),
     ].spacing(10);
     let side = container(menu).width(Length::Fixed(224.0)).height(Length::Fill).padding(22)
         .style(|_| container::Style::default()
