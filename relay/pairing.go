@@ -211,13 +211,24 @@ func (p *pairingService) listRequests(w http.ResponseWriter,r *http.Request){
  sort.Slice(result,func(i,j int)bool{return result[i].CreatedAt.Before(result[j].CreatedAt)});if len(result)>20{result=result[:20]}
  writeJSON(w,200,map[string]any{"requests":result})
 }
+func pairingDecisionMessage(requestID, deviceNumber, viewerPublicKey, nonce string, approved bool) []byte {
+ decision := "denied"
+ if approved { decision = "approved" }
+ return []byte("p2p-pairing-decision-v1|" + requestID + "|" + deviceNumber + "|" + viewerPublicKey + "|" + nonce + "|" + decision)
+}
+
 func (p *pairingService) decideRequest(w http.ResponseWriter,r *http.Request){
  if r.Method!=http.MethodPost{writeAPIError(w,405,"method not allowed");return};if !p.authorize(w,r){return}
  id:=strings.TrimSuffix(strings.TrimPrefix(r.URL.Path,"/api/v1/pairing/requests/"),"/decision");if !pairRequestPattern.MatchString(id){writeAPIError(w,404,"pairing request not found");return}
- var in struct{DeviceID string `json:"device_id"`;Approved bool `json:"approved"`};if !decodeJSON(w,r,&in){return}
+ var in struct{DeviceID string `json:"device_id"`;Approved bool `json:"approved"`;Signature string `json:"signature"`};if !decodeJSON(w,r,&in){return}
  p.mu.Lock();defer p.mu.Unlock();req:=p.requests[id]
  if req==nil||!req.ExpiresAt.After(time.Now())||req.Status!="pending"{writeAPIError(w,404,"pairing request expired or already handled");return}
  if req.DeviceID!=in.DeviceID{writeAPIError(w,403,"pairing request belongs to another device");return}
+ device:=p.devices[in.DeviceID];if device==nil{writeAPIError(w,404,"device not registered");return}
+ signature,ok:=decodeKey(in.Signature,ed25519.SignatureSize)
+ identity,_:=decodeKey(device.IdentityPublicKey,ed25519.PublicKeySize)
+ message:=pairingDecisionMessage(req.ID,req.DeviceNumber,req.ViewerPublicKey,req.Nonce,in.Approved)
+ if !ok||!ed25519.Verify(ed25519.PublicKey(identity),message,signature){writeAPIError(w,401,"invalid host approval signature");return}
  if in.Approved{req.Status="approved";if d:=p.devices[in.DeviceID];d!=nil{d.PairingPublicKey="";d.PairingSignature="";d.PairingExpiresAt=time.Time{}}
   for otherID,other:=range p.requests{if otherID!=id&&other.DeviceID==in.DeviceID&&other.Status=="pending"{other.Status="expired"}}
  }else{req.Status="denied"}
