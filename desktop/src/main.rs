@@ -666,27 +666,31 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                 state.status = format!("服务器地址无效或无法保存：{err}");
                 return Task::none();
             }
-            let (device_id_hex, signing_seed) = match trusted_profile::load_or_create_device_identity() {
-                Ok(value) => value,
-                Err(error) => {
-                    state.status = format!("本机设备身份无法安全保存，已停止启动：{error}");
-                    return Task::none();
-                }
-            };
-            let device_id = match hex::decode(device_id_hex) {
-                Ok(value) => match <[u8; 16]>::try_from(value) {
+            #[cfg(windows)]
+            let identity = {
+                let (device_id_hex, signing_seed) = match trusted_profile::load_or_create_device_identity() {
                     Ok(value) => value,
-                    Err(_) => {
-                        state.status = "本机设备身份长度错误，无法启动数字配对".into();
+                    Err(error) => {
+                        state.status = format!("本机设备身份无法安全保存，已停止启动：{error}");
                         return Task::none();
                     }
-                },
-                Err(_) => {
-                    state.status = "本机设备身份格式错误，无法启动数字配对".into();
-                    return Task::none();
-                }
+                };
+                let device_id = match hex::decode(device_id_hex) {
+                    Ok(value) => match <[u8; 16]>::try_from(value) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            state.status = "本机设备身份长度错误，无法启动数字配对".into();
+                            return Task::none();
+                        }
+                    },
+                    Err(_) => {
+                        state.status = "本机设备身份格式错误，无法启动数字配对".into();
+                        return Task::none();
+                    }
+                };
+                let identity = pairing_crypto::DeviceIdentity::from_parts(device_id, signing_seed);
+    
             };
-            let identity = pairing_crypto::DeviceIdentity::from_parts(device_id, signing_seed);
             let config = host::HostConfig {
                 server: state.server.clone(), relay_token: state.relay_token.clone(),
                 secret: state.secret, running: state.running.clone(),
@@ -710,9 +714,17 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             state.pairing_expires_at = 0;
             state.pending_pairing_request = None;
             state.status = "正在向中转服务器注册本机设备…".into();
-            let (decision_tx, decision_rx) = mpsc::channel();
-            state.pairing_decision_tx = Some(decision_tx);
-            host_pairing::start(config, identity, decision_rx);
+            #[cfg(windows)]
+            {
+                let (decision_tx, decision_rx) = mpsc::channel();
+                state.pairing_decision_tx = Some(decision_tx);
+                host_pairing::start(config, identity, decision_rx);
+            }
+            #[cfg(not(windows))]
+            {
+                state.status = "当前平台使用旧版 Host 连接模式".into();
+                host::start(config);
+            }
         }
         Msg::Stop => {
             tracing::info!("stopping local host and numeric pairing");
