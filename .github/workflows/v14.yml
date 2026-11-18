@@ -171,6 +171,11 @@ jobs:
 
       - name: Set up NSIS 3.13
         uses: nsis-dev/setup-nsis@v1
+        # The self-hosted Windows runner's Schannel cannot reach the certificate
+        # revocation service for SourceForge. Keep TLS certificate validation,
+        # but skip only the unavailable online revocation check for this download.
+        env:
+          CURL_SSL_NO_REVOKE: '1'
         with:
           version: '3.13'
 
