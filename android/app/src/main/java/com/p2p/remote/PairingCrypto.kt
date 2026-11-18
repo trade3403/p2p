@@ -157,7 +157,7 @@ internal object PairingCrypto {
     private fun makeProof(
         shared: ByteArray, deviceNumber: String, code: String, viewerPublic: ByteArray, nonce: ByteArray
     ): ByteArray {
-        require(code.length == 6 && code.all(Char::isDigit))
+        require(code.length == 6 && code.all { it in '0'..'9' })
         require(shared.any { it.toInt() != 0 }) { "invalid all-zero X25519 shared secret" }
         val info = "$PROOF_DOMAIN$deviceNumber|$code".toByteArray(Charsets.UTF_8)
         val hkdf = HKDFBytesGenerator(SHA256Digest())
@@ -187,5 +187,5 @@ internal object PairingCrypto {
 
     private fun decodeB64(value: String): ByteArray = Base64.getUrlDecoder().decode(value)
 
-    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+    private fun ByteArray.toHex(): String = joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 }
