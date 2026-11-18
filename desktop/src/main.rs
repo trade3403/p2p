@@ -12,14 +12,17 @@ mod udp_video;
 mod viewer;
 mod viewer_geometry;
 
-use iced::{Font, widget::{button, checkbox, column, container, horizontal_space, vertical_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
+use iced::{Font, Task, window, widget::{button, checkbox, column, container, horizontal_space, vertical_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
 
 fn main() -> iced::Result {
     iced::application("P2P Remote · 个人远程桌面", update, view)
         .theme(|_| Theme::TokyoNight)
         .default_font(Font::with_name("Microsoft YaHei UI"))
-        .subscription(|_| Subscription::batch([iced::time::every(Duration::from_millis(250)).map(|_| Msg::Tick)]))
+        .subscription(|_| Subscription::batch([
+            iced::time::every(Duration::from_millis(250)).map(|_| Msg::Tick),
+            window::resize_events().map(|(_, size)| Msg::WindowResized(size.width, size.height)),
+        ]))
         .window_size((1180.0, 780.0))
         .run()
 }
@@ -43,6 +46,8 @@ impl ViewerScale {
 struct App {
     page: Page,
     viewer_scale: ViewerScale,
+    viewer_fullscreen: bool,
+    window_size: (f32, f32),
     show_session_key: bool,
     server: String,
     relay_token: String,
@@ -97,6 +102,8 @@ impl Default for App {
         let mut app = Self {
             page: Page::Home,
             viewer_scale: ViewerScale::Standard,
+            viewer_fullscreen: false,
+            window_size: (1180.0, 780.0),
             show_session_key: false,
             server: trusted.as_ref().map(|p| p.relay_url.clone())
                 .unwrap_or_else(local_settings::load_relay_url),
@@ -181,12 +188,29 @@ impl Drop for App {
 }
 
 #[derive(Debug, Clone)]
-enum Msg { Navigate(Page), ViewerZoom(ViewerScale), ToggleSessionKey, Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
+enum Msg { Navigate(Page), ViewerZoom(ViewerScale), ToggleViewerFullscreen,
+    ViewerWindow(Option<window::Id>), WindowResized(f32, f32),
+    ToggleSessionKey, Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
     H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet, ViewerClipboardSet, ViewerKeyPress(&'static str) }
 
-fn update(state: &mut App, msg: Msg) {
+fn update(state: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
+        Msg::ToggleViewerFullscreen if state.page == Page::Remote => {
+            return window::get_latest().map(Msg::ViewerWindow);
+        }
+        Msg::ViewerWindow(Some(id)) if state.page == Page::Remote => {
+            let next = !state.viewer_fullscreen;
+            state.viewer_fullscreen = next;
+            state.viewer_pointer_valid = false;
+            let mode = if next { window::Mode::Fullscreen } else { window::Mode::Windowed };
+            return window::change_mode(id, mode);
+        }
+        Msg::WindowResized(width, height) if width.is_finite() && height.is_finite()
+            && width >= 320.0 && height >= 240.0 =>
+        {
+            state.window_size = (width, height);
+        }
         Msg::Navigate(page) => {
             // Never leave a remote button held while its viewer canvas disappears.
             if state.page == Page::Remote && page != Page::Remote && state.viewer_online {
@@ -214,15 +238,15 @@ fn update(state: &mut App, msg: Msg) {
         Msg::ViewerConnect if !state.viewer_active.load(Ordering::SeqCst) => {
             let Ok(raw) = hex::decode(state.viewer_key.trim()) else {
                 state.viewer_status = "远程 Windows 密钥必须为 64 位十六进制".into();
-                return;
+                return Task::none();
             };
             let Ok(secret) = <[u8;32]>::try_from(raw) else {
                 state.viewer_status = "远程 Windows 密钥必须是 32 字节".into();
-                return;
+                return Task::none();
             };
             let Some(controls) = state.viewer_control_rx.take() else {
                 state.viewer_status = "上一会话正在关闭，请重新启动客户端".into();
-                return;
+                return Task::none();
             };
             let (events, rx) = mpsc::channel();
             state.viewer_rx = rx;
@@ -390,11 +414,11 @@ fn update(state: &mut App, msg: Msg) {
         Msg::Start if !state.running.load(Ordering::SeqCst) => {
             if state.relay_token.trim().is_empty() &&
                 !state.lan_direct.load(Ordering::SeqCst) {
-                state.status = "请填写 VPS 口令或选择局域网直连".into(); return;
+                state.status = "请填写 VPS 口令或选择局域网直连".into(); return Task::none();
             }
             if let Err(err) = local_settings::save_relay_url(state.server.trim()) {
                 state.status = format!("服务器地址无效或无法保存：{err}");
-                return;
+                return Task::none();
             }
             state.running.store(true, Ordering::SeqCst);
             state.status = "正在连接 VPS...".into();
@@ -471,6 +495,7 @@ fn update(state: &mut App, msg: Msg) {
         }
         _ => {}
     }
+    Task::none()
 }
 
 fn card<'a>(child: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
