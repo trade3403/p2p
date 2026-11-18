@@ -296,13 +296,38 @@ fn handle_control(command: &Control, index: usize) {
     }
     if command.kind == "key" {
         use enigo::Key;
-        let key = match command.key.as_deref() {
-            Some("enter") => Key::Return,
-            Some("backspace") => Key::Backspace,
-            Some("tab") => Key::Tab,
-            Some("escape") => Key::Escape,
-            Some("delete") => Key::Delete,
-            _ => return, // strict allowlist; never forward arbitrary OS shortcuts
+        let Some(name) = command.key.as_deref() else { return; };
+        if !crate::remote_ops::valid_remote_key(name) { return; }
+        // Whitelisted combinations are emitted with a guaranteed Control
+        // release, even if injecting the letter fails.
+        if let Some(letter) = match name {
+            "ctrl_a" => Some('a'), "ctrl_c" => Some('c'),
+            "ctrl_v" => Some('v'), "ctrl_x" => Some('x'),
+            "ctrl_z" => Some('z'), "ctrl_y" => Some('y'),
+            _ => None,
+        } {
+            if enigo.key(Key::Control, Direction::Press).is_ok() {
+                let _ = enigo.key(Key::Unicode(letter), Direction::Click);
+                let _ = enigo.key(Key::Control, Direction::Release);
+            }
+            return;
+        }
+        let key = match name {
+            "enter" => Key::Return,
+            "backspace" => Key::Backspace,
+            "tab" => Key::Tab,
+            "escape" => Key::Escape,
+            "delete" => Key::Delete,
+            "up" => Key::UpArrow,
+            "down" => Key::DownArrow,
+            "left" => Key::LeftArrow,
+            "right" => Key::RightArrow,
+            "home" => Key::Home,
+            "end" => Key::End,
+            "page_up" => Key::PageUp,
+            "page_down" => Key::PageDown,
+            "space" => Key::Space,
+            _ => return,
         };
         let _ = enigo.key(key, Direction::Click);
         return;
