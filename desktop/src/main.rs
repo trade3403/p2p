@@ -27,8 +27,22 @@ fn main() -> iced::Result {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page { Home, Remote, Settings, Network }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerScale { Compact, Standard, Large }
+
+impl ViewerScale {
+    fn dimensions(self) -> (f32, f32) {
+        match self {
+            Self::Compact => (560.0, 315.0),
+            Self::Standard => (700.0, 394.0),
+            Self::Large => (840.0, 473.0),
+        }
+    }
+}
+
 struct App {
     page: Page,
+    viewer_scale: ViewerScale,
     server: String,
     relay_token: String,
     secret: [u8;32],
@@ -81,6 +95,7 @@ impl Default for App {
             .unwrap_or_else(protocol::new_secret);
         let mut app = Self {
             page: Page::Home,
+            viewer_scale: ViewerScale::Standard,
             server: trusted.as_ref().map(|p| p.relay_url.clone())
                 .unwrap_or_else(local_settings::load_relay_url),
             relay_token: trusted.as_ref().map(|p| p.relay_token.clone()).unwrap_or_default(),
@@ -164,13 +179,26 @@ impl Drop for App {
 }
 
 #[derive(Debug, Clone)]
-enum Msg { Navigate(Page), Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
+enum Msg { Navigate(Page), ViewerZoom(ViewerScale), Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
     H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet, ViewerClipboardSet, ViewerKeyPress(&'static str) }
 
 fn update(state: &mut App, msg: Msg) {
     match msg {
-        Msg::Navigate(page) => state.page = page,
+        Msg::Navigate(page) => {
+            // Never leave a remote button held while its viewer canvas disappears.
+            if state.page == Page::Remote && page != Page::Remote && state.viewer_online {
+                let _ = state.viewer_tx.send(serde_json::json!({
+                    "type":"up", "x":state.viewer_pointer.0, "y":state.viewer_pointer.1
+                }).to_string());
+                state.viewer_pointer_valid = false;
+            }
+            state.page = page;
+        }
+        Msg::ViewerZoom(scale) => {
+            state.viewer_scale = scale;
+            state.viewer_pointer_valid = false;
+        }
         Msg::ViewerKey(value) if !state.viewer_active.load(Ordering::SeqCst) => {
             state.viewer_key = value.trim().to_owned();
         }
@@ -207,14 +235,22 @@ fn update(state: &mut App, msg: Msg) {
             });
         }
         Msg::ViewerDisconnect => {
+            if state.viewer_online {
+                let _ = state.viewer_tx.send(serde_json::json!({
+                    "type":"up", "x":state.viewer_pointer.0, "y":state.viewer_pointer.1
+                }).to_string());
+            }
             state.viewer_active.store(false, Ordering::SeqCst);
             state.viewer_online = false;
+            state.viewer_pointer_valid = false;
+            state.viewer_frame = None;
             state.viewer_status = "手动断开连接".into();
         }
         Msg::ViewerMove(position) if state.viewer_online => {
             if let Some((x,y)) = viewer_geometry::normalized_pointer(
-                position.x,position.y,800.0,450.0,
-                state.viewer_frame_size.0,state.viewer_frame_size.1
+                position.x, position.y, state.viewer_scale.dimensions().0,
+                state.viewer_scale.dimensions().1,
+                state.viewer_frame_size.0, state.viewer_frame_size.1
             ) {
                 state.viewer_pointer = (x,y);
                 state.viewer_pointer_valid = true;
@@ -396,6 +432,7 @@ fn update(state: &mut App, msg: Msg) {
                     }
                     viewer::ViewerEvent::Disconnected => {
                         state.viewer_online = false;
+                        state.viewer_pointer_valid = false;
                         state.viewer_active.store(false, Ordering::SeqCst);
                         state.viewer_status = "连接已断开".into();
                         let (tx, rx) = mpsc::channel();
@@ -441,7 +478,7 @@ fn heading<'a>(title: &'a str, subtitle: &'a str) -> Element<'a, Msg> {
 fn view(state: &App) -> Element<'_, Msg> {
     let active = state.running.load(Ordering::SeqCst);
     let top = row![
-        column![text("P2P REMOTE  /  V0.12").size(13).color(Color::from_rgb8(255,177,115)),
+        column![text("P2P REMOTE  /  V0.12.1").size(13).color(Color::from_rgb8(255,177,115)),
                 text("远程协助工作台").size(28),
                 text("我的设备  ·  远程控制  ·  安全设置").size(13).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
@@ -584,32 +621,51 @@ fn view(state: &App) -> Element<'_, Msg> {
     ].spacing(13));
 
 
+    let (viewer_width, viewer_height) = state.viewer_scale.dimensions();
     let remote_image: Element<'_, Msg> = if let Some(handle) = &state.viewer_frame {
-        mouse_area(image(handle.clone()).width(Length::Fixed(660.0)).height(Length::Fixed(371.0)))
+        mouse_area(image(handle.clone())
+                .width(Length::Fixed(viewer_width))
+                .height(Length::Fixed(viewer_height)))
             .on_move(Msg::ViewerMove)
             .on_press(Msg::ViewerDown)
             .on_release(Msg::ViewerUp)
             .into()
     } else {
-        container(text("等待远程 Windows 桌面 JPEG 图像"))
-            .width(Length::Fixed(660.0)).height(Length::Fixed(371.0))
-            .center_x(Length::Fill).center_y(Length::Fill).into()
+        container(text("等待已授权的远程 Windows 桌面画面").size(15)
+            .color(Color::from_rgb8(165, 177, 190)))
+            .width(Length::Fixed(viewer_width)).height(Length::Fixed(viewer_height))
+            .center_x(Length::Fill).center_y(Length::Fill)
+            .style(|_| container::Style::default()
+                .background(Color::from_rgb8(19, 21, 27))
+                .border(Border { color: Color::from_rgb8(55, 59, 67),
+                    width: 1.0, radius: 12.0.into() }))
+            .into()
     };
     let viewer_panel = card(column![
-        heading("09 / Windows 控制 Windows", "Viewer 控制端 · 使用另一台 Windows 主机的会话密钥"),
+        heading("远程控制", "通过加密 WSS 连接另一台已授权的 Windows 电脑"),
         text("双方需使用相同 Relay Token，远程 PC Host 必须启动并授权控制").size(13),
         text_input("输入远程 PC 的 64 位会话密钥", &state.viewer_key).on_input(Msg::ViewerKey).secure(true).padding(12).size(15),
         row![
             button("连接远程 Windows").on_press_maybe((!state.viewer_active.load(Ordering::SeqCst)).then_some(Msg::ViewerConnect)),
             button("断开 Viewer").on_press(Msg::ViewerDisconnect)
         ].spacing(10),
-        text(&state.viewer_status).size(14),
-        text("Viewer 暂时只显示 JPEG；被控端请关闭 H.264 软件编码。仅支持 WSS 控制链路。").size(13),
+        text(&state.viewer_status).size(14)
+            .color(if state.viewer_online { Color::from_rgb8(98, 208, 166) }
+                else { Color::from_rgb8(181, 190, 204) }),
+        row![
+            text("画面大小").size(13),
+            button("紧凑").on_press(Msg::ViewerZoom(ViewerScale::Compact)).padding(9),
+            button("标准").on_press(Msg::ViewerZoom(ViewerScale::Standard)).padding(9),
+            button("放大").on_press(Msg::ViewerZoom(ViewerScale::Large)).padding(9),
+            text(format!("{} × {}", viewer_width as u32, viewer_height as u32))
+                .size(12).color(Color::from_rgb8(153, 164, 185))
+        ].spacing(9).align_y(iced::Alignment::Center),
+        text("Windows Viewer 当前仅支持 JPEG；被控端请关闭 H.264。宽屏/非宽屏均按黑边准确映射鼠标。").size(13),
         remote_image,
         row![
-            button("右键").on_press(Msg::ViewerRight),
-            button("上滚").on_press(Msg::ViewerScroll(-3)),
-            button("下滚").on_press(Msg::ViewerScroll(3)),
+            button("右键").on_press_maybe((state.viewer_online && state.viewer_pointer_valid).then_some(Msg::ViewerRight)),
+            button("上滚").on_press_maybe(state.viewer_online.then_some(Msg::ViewerScroll(-3))),
+            button("下滚").on_press_maybe(state.viewer_online.then_some(Msg::ViewerScroll(3))),
             button("上一显示器").on_press_maybe(state.viewer_monitor_info.map(|m| Msg::ViewerMonitor(m.previous()))),
             button("下一显示器").on_press_maybe(state.viewer_monitor_info.map(|m| Msg::ViewerMonitor(m.next())))
         ].spacing(9),
@@ -657,7 +713,7 @@ fn view(state: &App) -> Element<'_, Msg> {
         text(if active { "● 本机共享服务已启动" } else { "○ 本机共享服务未启动" })
             .size(13)
             .color(if active { Color::from_rgb8(98, 208, 166) } else { Color::from_rgb8(166, 174, 187) }),
-        text("TEST  /  p2ptest.aikissgo.com").size(11).color(Color::from_rgb8(130, 140, 151)),
+        text("测试环境 · p2ptest.aikissgo.com").size(11).color(Color::from_rgb8(130, 140, 151)),
     ].spacing(10);
     let side = container(menu).width(Length::Fixed(224.0)).height(Length::Fill).padding(22)
         .style(|_| container::Style::default()
