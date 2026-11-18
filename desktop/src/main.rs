@@ -1252,19 +1252,33 @@ fn view(state: &App) -> Element<'_, Msg> {
         ].spacing(12)).padding(16).width(Length::Fill).into()
     } else {
         card(column![
-            heading("远程控制", "通过加密 WSS 连接另一台已授权的 Windows 电脑"),
-            text("双方需使用相同 Relay Token，远程 PC Host 必须启动并授权控制").size(13),
-            text_input("输入远程 PC 的 64 位会话密钥", &state.viewer_key)
-                .on_input(Msg::ViewerKey).secure(true).padding(12).size(15),
+            heading("远程控制", "输入设备号和动态验证码，向被控电脑发起连接"),
+            text("配对码仅用于本次授权；被控电脑必须明确点击允许连接。").size(13),
+            text_input("9位设备号", &state.viewer_device_number)
+                .on_input(Msg::ViewerPairingNumber).padding(12).size(16),
+            text_input("6位动态验证码", &state.viewer_pairing_code)
+                .on_input(Msg::ViewerPairingCode).secure(true).padding(12).size(16),
             row![
-                button("连接远程 Windows")
-                    .on_press_maybe((!state.viewer_active.load(Ordering::SeqCst)).then_some(Msg::ViewerConnect)),
+                button(if state.viewer_pairing_active.load(Ordering::SeqCst) { "取消配对" } else { "请求连接" })
+                    .on_press(Msg::ViewerPair),
                 button("断开 Viewer").on_press(Msg::ViewerDisconnect),
                 button("进入全屏").on_press(Msg::ToggleViewerFullscreen)
             ].spacing(10),
             text(&state.viewer_status).size(14)
                 .color(if state.viewer_online { Color::from_rgb8(98, 208, 166) }
                     else { Color::from_rgb8(181, 190, 204) }),
+            button(if state.show_legacy_viewer_key { "收起旧版64位密钥连接" } else { "旧版兼容连接（64位密钥）" })
+                .on_press(Msg::ToggleLegacyViewerKey).padding(8),
+            if state.show_legacy_viewer_key {
+                column![
+                    text_input("输入旧版远程 PC 的 64 位会话密钥", &state.viewer_key)
+                        .on_input(Msg::ViewerKey).secure(true).padding(12).size(14),
+                    button("使用旧版密钥连接")
+                        .on_press_maybe((!state.viewer_active.load(Ordering::SeqCst)).then_some(Msg::ViewerConnect))
+                ].spacing(8).into()
+            } else {
+                column![].into()
+            },
             row![
                 text("画面大小").size(13),
                 button("紧凑").on_press(Msg::ViewerZoom(ViewerScale::Compact)).padding(9),
