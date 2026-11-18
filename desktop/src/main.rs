@@ -87,14 +87,13 @@ struct App {
     viewer_active: Arc<AtomicBool>,
     viewer_tx: Sender<String>,
     viewer_rx: Receiver<viewer::ViewerEvent>,
-    viewer_control_rx: Option<Receiver<String>>,
     tx: Sender<String>,
     rx: Receiver<String>,
 }
 impl Default for App {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        let (viewer_tx, viewer_control_rx) = mpsc::channel();
+        let (viewer_tx, _unused_receiver) = mpsc::channel();
         let (_viewer_event_tx, viewer_rx) = mpsc::channel();
         // Failed DPAPI decryption never silently recreates a trusted session.
         let trusted = trusted_profile::load().ok().flatten();
@@ -144,7 +143,6 @@ impl Default for App {
             viewer_active: Arc::new(AtomicBool::new(false)),
             viewer_tx,
             viewer_rx,
-            viewer_control_rx: Some(viewer_control_rx),
             tx,
             rx,
         };
@@ -255,13 +253,13 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                 state.viewer_status = "远程 Windows 密钥必须是 32 字节".into();
                 return Task::none();
             };
-            let Some(controls) = state.viewer_control_rx.take() else {
-                state.viewer_status = "上一会话正在关闭，请重新启动客户端".into();
-                return Task::none();
-            };
+            // Fresh control queue and independent cancellation token on EVERY
+            // connect. Old sessions cannot accidentally consume new commands.
+            let (control_tx, controls) = mpsc::channel();
+            state.viewer_tx = control_tx;
             let (events, rx) = mpsc::channel();
             state.viewer_rx = rx;
-            state.viewer_active.store(true, Ordering::SeqCst);
+            state.viewer_active = Arc::new(AtomicBool::new(true));
             state.viewer_status = "正在连接远程 Windows...".into();
             state.viewer_online = false;
             state.viewer_frame = None;
@@ -794,7 +792,7 @@ fn view(state: &App) -> Element<'_, Msg> {
                 text(format!("{} × {}", viewer_width as u32, viewer_height as u32))
                     .size(12).color(Color::from_rgb8(153, 164, 185))
             ].spacing(9).align_y(iced::Alignment::Center),
-            text("Viewer 仍使用 WSS/JPEG，远程 Host 请关闭 H.264 编码。").size(13),
+            text("Viewer 将自动请求 JPEG 兼容画面；无需手动更改被控端 H.264 设置。").size(13),
             remote_image,
             row![
                 monitor_bar,
