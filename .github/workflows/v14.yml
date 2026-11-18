@@ -169,15 +169,40 @@ jobs:
           }
           Write-Host 'Verified: Release EXE uses Windows GUI subsystem; no console window is requested.'
 
-      - name: Set up NSIS 3.13
-        uses: nsis-dev/setup-nsis@v1
-        # The self-hosted Windows runner's Schannel cannot reach the certificate
-        # revocation service for SourceForge. Keep TLS certificate validation,
-        # but skip only the unavailable online revocation check for this download.
-        env:
-          CURL_SSL_NO_REVOKE: '1'
-        with:
-          version: '3.13'
+      - name: Install or locate NSIS without SourceForge dependency
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'NSIS\makensis.exe'),
+            (Join-Path $env:ProgramFiles(x86) 'NSIS\makensis.exe'),
+            (Join-Path $env:ChocolateyInstall 'bin\makensis.exe')
+          ) | Where-Object { $_ -and (Test-Path $_) }
+          $makensis = $candidates | Select-Object -First 1
+          if (-not $makensis -and (Get-Command choco -ErrorAction SilentlyContinue)) {
+            choco install nsis --version=3.10 -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Chocolatey NSIS installation failed: $LASTEXITCODE" }
+            $candidates = @(
+              (Join-Path $env:ProgramFiles 'NSIS\makensis.exe'),
+              (Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'),
+              (Join-Path $env:ChocolateyInstall 'bin\makensis.exe')
+            ) | Where-Object { $_ -and (Test-Path $_) }
+            $makensis = $candidates | Select-Object -First 1
+          }
+          if (-not $makensis) {
+            $cmd = Get-Command makensis.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $makensis = $cmd.Source }
+          }
+          if (-not $makensis) {
+            throw 'NSIS 3.x is not installed and no supported package manager could install it. Install NSIS on the self-hosted Windows runner.'
+          }
+          $nsisDir = Split-Path -Parent $makensis
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, $nsisDir + [Environment]::NewLine, $utf8)
+          $env:PATH = $nsisDir + ';' + $env:PATH
+          & $makensis /VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS makensis verification failed' }
+          Write-Host "Using NSIS at $makensis"
 
       - name: Build per-user Windows installer with NSIS
         run: |
