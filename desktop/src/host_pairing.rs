@@ -1,5 +1,5 @@
 //! Windows Host-side one-time numeric pairing coordinator.
-use crate::{host, pairing_api::{decode_base64url, PairingApiClient, PairingRequest}, pairing_crypto::{DeviceIdentity, PairingWindow}};
+use crate::{host, pairing_api::{decode_base64url, PairingApiClient}, pairing_crypto::{DeviceIdentity, PairingWindow}};
 use anyhow::Result;
 use subtle::ConstantTimeEq;
 use std::{sync::{mpsc::{Receiver, RecvTimeoutError}, atomic::Ordering}, thread, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
