@@ -182,10 +182,16 @@ func main() {
         }()
     }
 	h := newHub(token)
+	registryPath := os.Getenv("DEVICE_STORE_PATH")
+	pairing, err := newPairingService(registryPath, token)
+	if err != nil {
+		log.Fatalf("device registry initialization failed: %v", err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200); w.Write([]byte("ok\n")) })
 	mux.HandleFunc("/relay", h.serve)
+	mux.Handle("/api/v1/", pairing.handler())
 	srv := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 7 * time.Second}
-	log.Printf("relay listening on %s (terminate TLS at Caddy)", *listen)
+	log.Printf("relay listening on %s (terminate TLS at Caddy); device pairing API enabled", *listen)
 	log.Fatal(srv.ListenAndServe())
 }
