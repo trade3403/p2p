@@ -29,7 +29,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -899,11 +898,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private fun coordinate(point:Offset,viewW:Float,viewH:Float,imageW:Int,imageH:Int):Pair<Float,Float>{
-    val factor=min(viewW/imageW.toFloat(),viewH/imageH.toFloat())
-    val drawnW=imageW*factor;val drawnH=imageH*factor
-    return Pair(((point.x-(viewW-drawnW)/2)/drawnW).coerceIn(0f,1f),((point.y-(viewH-drawnH)/2)/drawnH).coerceIn(0f,1f))
-}
 private fun decodeKey(hex:String):ByteArray{
     require(hex.length==64 && hex.all {it in '0'..'9'||it in 'a'..'f'||it in 'A'..'F'})
     return ByteArray(32){hex.substring(it*2,it*2+2).toInt(16).toByte()}
