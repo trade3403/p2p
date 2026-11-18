@@ -1,3 +1,4 @@
+!pragma codepage 65001
 Unicode true
 !include "MUI2.nsh"
 !define APP_NAME "P2P Remote"
