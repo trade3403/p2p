@@ -155,7 +155,8 @@ jobs:
           java-version: '17'
       - name: Provision SHA256-verified Gradle from persistent Windows cache
         shell: powershell
-        run: ./scripts/ci-setup-gradle-windows.ps1
+        run: |
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci-setup-gradle-windows.ps1')
       - name: Install official Android commandline tools (Windows)
         shell: powershell
         run: |
