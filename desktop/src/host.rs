@@ -90,6 +90,8 @@ pub fn start(config: HostConfig) {
 }
 
 async fn run(config: &HostConfig) -> Result<()> {
+    // Also initialize on workers so direct library/test entry points are safe.
+    crate::tls::initialize();
     let mut endpoint = url::Url::parse(config.server.trim()).context("invalid relay URL")?;
     match endpoint.scheme() {
         "https" => { endpoint.set_scheme("wss").map_err(|_| anyhow!("scheme"))?; }
