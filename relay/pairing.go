@@ -183,6 +183,16 @@ func (p *pairingService) deviceRoute(w http.ResponseWriter,r *http.Request){
 }
 
 func clientHost(r *http.Request)string{h,_,err:=net.SplitHostPort(r.RemoteAddr);if err!=nil{return r.RemoteAddr};return h}
+func (p *pairingService) cleanupLocked(now time.Time) {
+ for id, request := range p.requests {
+  if now.Sub(request.CreatedAt) > 10*time.Minute { delete(p.requests, id) }
+ }
+ for key, history := range p.attempts {
+  kept := history[:0]
+  for _, at := range history { if now.Sub(at) < pairingRateWindow { kept = append(kept, at) } }
+  if len(kept) == 0 { delete(p.attempts, key) } else { p.attempts[key] = kept }
+ }
+}
 func (p *pairingService) allowPairAttempt(key string,now time.Time)bool{
  history:=p.attempts[key][:0];for _,at:=range p.attempts[key]{if now.Sub(at)<pairingRateWindow{history=append(history,at)}}
  if len(history)>=pairingRateLimit{p.attempts[key]=history;return false};p.attempts[key]=append(history,now);return true
@@ -194,7 +204,7 @@ func (p *pairingService) createRequest(w http.ResponseWriter,r *http.Request){
  if _,ok:=decodeKey(in.ViewerPublicKey,32);!ok{writeAPIError(w,400,"invalid viewer public key");return}
  if _,ok:=decodeKey(in.Nonce,16);!ok{writeAPIError(w,400,"invalid pairing nonce");return}
  if _,ok:=decodeKey(in.Proof,32);!ok{writeAPIError(w,400,"invalid pairing proof");return}
- now:=time.Now();p.mu.Lock();defer p.mu.Unlock();id:=p.numbers[in.DeviceNumber];d:=p.devices[id]
+ now:=time.Now();p.mu.Lock();defer p.mu.Unlock();p.cleanupLocked(now);id:=p.numbers[in.DeviceNumber];d:=p.devices[id]
  if d==nil||now.Sub(d.LastSeen)>deviceOnlineTTL||d.PairingPublicKey==""||!d.PairingExpiresAt.After(now){writeAPIError(w,404,"device is offline or not accepting pairing requests");return}
  rateKey:=clientHost(r)+"|"+in.DeviceNumber;if !p.allowPairAttempt(rateKey,now){writeAPIError(w,429,"too many pairing attempts; wait 10 minutes");return}
  pending:=0;for _,req:=range p.requests{if req.DeviceID==id&&req.Status=="pending"&&req.ExpiresAt.After(now){pending++}}
