@@ -862,8 +862,10 @@ fn view(state: &App) -> Element<'_, Msg> {
             .background(Color::from_rgb8(21, 23, 29))
             .border(Border {color: Color::from_rgb8(46, 49, 57), width: 1.0, radius: 0.0.into()}));
     if state.viewer_fullscreen {
+        // The fullscreen workspace has its own status/exit bar; do not duplicate
+        // the normal top banner and steal space from remote video.
         return container(scrollable(
-            container(column![top, page_content].spacing(8)).padding(12)
+            container(page_content).padding(8)
         )).width(Length::Fill).height(Length::Fill)
             .center_x(Length::Fill).into();
     }
