@@ -5,6 +5,8 @@ mod app_logging;
 mod tray;
 mod host;
 mod protocol;
+#[allow(dead_code)]
+mod pairing_crypto;
 mod reconnect;
 mod local_settings;
 mod remote_ops;
