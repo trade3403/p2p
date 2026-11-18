@@ -1249,6 +1249,17 @@ fn view(state: &App) -> Element<'_, Msg> {
     } else {
         row![text("等待远程显示器信息").size(13)].into()
     };
+    let legacy_viewer: Element<'_, Msg> = if state.show_legacy_viewer_key {
+        column![
+            text_input::<Msg, Theme, iced::Renderer>("输入旧版远程 PC 的 64 位会话密钥", &state.viewer_key)
+                .on_input(Msg::ViewerKey).secure(true).padding(12).size(14),
+            button("使用旧版密钥连接")
+                .on_press_maybe((!state.viewer_active.load(Ordering::SeqCst)).then_some(Msg::ViewerConnect))
+        ].spacing(8).into()
+    } else {
+        text("").into()
+    };
+
     let viewer_panel: Element<'_, Msg> = if state.viewer_fullscreen {
         container(column![
             row![
@@ -1296,16 +1307,7 @@ fn view(state: &App) -> Element<'_, Msg> {
                     else { Color::from_rgb8(181, 190, 204) }),
             button(if state.show_legacy_viewer_key { "收起旧版64位密钥连接" } else { "旧版兼容连接（64位密钥）" })
                 .on_press(Msg::ToggleLegacyViewerKey).padding(8),
-            if state.show_legacy_viewer_key {
-                column![
-                    text_input::<Msg, Theme, iced::Renderer>("输入旧版远程 PC 的 64 位会话密钥", &state.viewer_key)
-                        .on_input(Msg::ViewerKey).secure(true).padding(12).size(14),
-                    button("使用旧版密钥连接")
-                        .on_press_maybe((!state.viewer_active.load(Ordering::SeqCst)).then_some(Msg::ViewerConnect))
-                ].spacing(8).into()
-            } else {
-                column![].into()
-            },
+            legacy_viewer,
             row![
                 text("画面大小").size(13),
                 button("紧凑").on_press(Msg::ViewerZoom(ViewerScale::Compact)).padding(9),
