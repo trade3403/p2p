@@ -22,6 +22,7 @@ func apiRequest(t *testing.T, handler http.Handler, method, path string, body an
  if body != nil { var err error; payload,err=json.Marshal(body);if err!=nil{t.Fatal(err)} }
  req:=httptest.NewRequest(method,path,strings.NewReader(string(payload)))
  if auth { req.Header.Set("Authorization","Bearer "+testPairToken) }
+ req.Header.Set("X-Forwarded-Proto","https")
  response:=httptest.NewRecorder();handler.ServeHTTP(response,req);return response
 }
 
