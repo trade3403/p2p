@@ -217,7 +217,10 @@ func (p *pairingService) createRequest(w http.ResponseWriter,r *http.Request){
  if d==nil||now.Sub(d.LastSeen)>deviceOnlineTTL||d.PairingPublicKey==""||!d.PairingExpiresAt.After(now){writeAPIError(w,404,"device is offline or not accepting pairing requests");return}
  rateKey:=clientHost(r)+"|"+in.DeviceNumber;if !p.allowPairAttempt(rateKey,now){writeAPIError(w,429,"too many pairing attempts; wait 10 minutes");return}
  pending:=0;for _,req:=range p.requests{if req.DeviceID==id&&req.Status=="pending"&&req.ExpiresAt.After(now){pending++}}
- if pending>=5{writeAPIError(w,429,"too many pending pairing requests");return}
+ // The Windows Host UI intentionally presents one approval prompt at a time.
+ // Reject concurrent requests instead of allowing prompts to overwrite each other
+ // and making an approval decision ambiguous.
+ if pending>=1{writeAPIError(w,429,"another pairing request is already awaiting approval");return}
  requestID,err:=randomID();if err!=nil{writeAPIError(w,500,"could not create pairing request");return}
  req:=&pairingRequest{ID:requestID,DeviceID:id,DeviceNumber:in.DeviceNumber,ViewerPublicKey:in.ViewerPublicKey,Nonce:in.Nonce,Proof:in.Proof,Status:"pending",CreatedAt:now.UTC(),ExpiresAt:now.Add(pairingRequestTTL).UTC()}
  p.requests[requestID]=req;writeJSON(w,201,map[string]any{"request_id":requestID,"expires_at":req.ExpiresAt.Unix()})
