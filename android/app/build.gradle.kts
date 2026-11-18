@@ -10,8 +10,8 @@ android {
         applicationId = "com.p2p.remote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.13.0"
+        versionCode = 15
+        versionName = "0.13.2"
     }
     buildTypes { release { isMinifyEnabled = false } }
     buildFeatures { compose = true }
