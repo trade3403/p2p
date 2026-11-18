@@ -29,7 +29,7 @@ fn main() -> iced::Result {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "P2P Remote starting");
     // Must run before App::default or any Host/Viewer WSS thread starts.
     tls::initialize();
-    iced::application("P2P Remote · 个人远程桌面", update, view)
+    iced::application("P2P Remote · 远程桌面", update, view)
         .theme(|_| Theme::TokyoNight)
         .exit_on_close_request(false)
         .default_font(Font::with_name("Microsoft YaHei UI"))
@@ -670,10 +670,10 @@ fn heading<'a>(title: &'a str, subtitle: &'a str) -> Element<'a, Msg> {
 fn view(state: &App) -> Element<'_, Msg> {
     let active = state.running.load(Ordering::SeqCst);
     let (page_title, page_subtitle) = match state.page {
-        Page::Home => ("我的设备", "查看本机状态、连接参数和已授权设备"),
-        Page::Remote => ("远程控制", "连接另一台 Windows，管理屏幕与输入"),
-        Page::Settings => ("安全与画质", "控制权限、编码方式与局域网连接"),
-        Page::Network => ("网络诊断", "检查 STUN、UDP 与连接质量"),
+        Page::Home => ("设备概览", "查看本机设备、共享状态和最近使用的功能"),
+        Page::Remote => ("远程控制", "连接另一台电脑，查看桌面并进行安全操作"),
+        Page::Settings => ("设置", "管理远程权限、画质和可信设备"),
+        Page::Network => ("连接设置", "配置中转服务并诊断网络连接"),
     };
     let (status_label, status_color) = if state.page == Page::Remote {
         if state.viewer_online {
@@ -687,7 +687,7 @@ fn view(state: &App) -> Element<'_, Msg> {
         ("○  本机共享未启动", Color::from_rgb8(53, 63, 80))
     };
     let top = row![
-        column![text("P2P REMOTE  /  V0.13.2").size(13).color(Color::from_rgb8(255,177,115)),
+        column![text("P2P REMOTE  /  V0.14").size(13).color(Color::from_rgb8(255,177,115)),
                 text(page_title).size(28),
                 text(page_subtitle).size(13).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
@@ -698,8 +698,8 @@ fn view(state: &App) -> Element<'_, Msg> {
     ].align_y(iced::Alignment::Center);
 
     let connection = card(column![
-        heading("01 / 连接设置", "本机共享和控制另一台电脑是两个不同功能"),
-        text("要查看另一台 PC 的桌面，请点击左侧【远程控制】，输入那台电脑的配对密钥。").size(13),
+        heading("连接与服务器配置", "高级网络参数仅在此页面管理"),
+        text("配置你的中转服务器和当前兼容配对凭据。数字验证码配对接入完成前，旧密钥连接仍保留。").size(13),
         text("中转服务器地址").size(13),
         text_input("wss://p2ptest.aikissgo.com", &state.server).on_input(Msg::Server).padding(13).size(15),
         text("中转访问口令（与 VPS 的 RELAY_ACCESS_TOKEN 一致）").size(13),
@@ -732,6 +732,50 @@ fn view(state: &App) -> Element<'_, Msg> {
              else {button("启动远程服务").on_press(Msg::Start).padding(13)}]
             .align_y(iced::Alignment::Center),
     ].spacing(15));
+
+    let home_overview = card(column![
+        heading("本机设备", "你的设备标识和远程共享状态"),
+        row![
+            column![
+                text("9 位设备号").size(13).color(Color::from_rgb8(153, 164, 185)),
+                text(protocol::device_number(&state.secret)).size(34)
+                    .color(Color::from_rgb8(91, 210, 225)),
+                text("这是当前会话密钥生成的识别编号；数字本身不授予访问权限。")
+                    .size(12).color(Color::from_rgb8(153, 164, 185))
+            ].spacing(7),
+            horizontal_space(),
+            button("复制设备号").on_press(Msg::CopyDeviceNumber).padding(12)
+        ].align_y(iced::Alignment::Center),
+        row![
+            container(text(if active { "● 共享服务运行中" } else { "○ 共享服务未启动" }).size(14))
+                .padding([10,14])
+                .style(move |_| container::Style::default()
+                    .background(if active { Color::from_rgb8(24, 70, 61) } else { Color::from_rgb8(48, 56, 72) })
+                    .border(Border { color: Color::TRANSPARENT, width: 0.0, radius: 18.into() })),
+            horizontal_space(),
+            if active {
+                button("停止共享").on_press(Msg::Stop).padding(12)
+            } else {
+                button("启动共享").on_press(Msg::Start).padding(12)
+            }
+        ].align_y(iced::Alignment::Center),
+        text(&state.status).size(13).color(Color::from_rgb8(166, 178, 197))
+    ].spacing(17));
+
+    let quick_connect = card(column![
+        heading("远程连接", "从另一台 Windows 或 Android 设备访问已授权电脑"),
+        row![
+            column![
+                text("远程桌面").size(18),
+                text("查看屏幕、缩放画面、操作鼠标键盘，并支持中文文字输入。")
+                    .size(13).color(Color::from_rgb8(153, 164, 185))
+            ].spacing(6),
+            horizontal_space(),
+            button("打开远程控制").on_press(Msg::Navigate(Page::Remote)).padding(13)
+        ].align_y(iced::Alignment::Center),
+        text("首次配对必须由被控电脑用户明确授权。隐藏窗口不会自动开放控制权限。")
+            .size(12).color(Color::from_rgb8(204, 178, 130))
+    ].spacing(14));
 
     let direct = card(column![
         heading("02 / 局域网 P2P 直连", "LAN 同一子网优先，手机直连失败会自动回退 VPS"),
@@ -997,10 +1041,10 @@ fn view(state: &App) -> Element<'_, Msg> {
     // Sunlogin-inspired information architecture, with original P2P branding:
     // one primary task per screen instead of ten stacked configuration panels.
     let page_content: Element<'_, Msg> = match state.page {
-        Page::Home => column![connection, status, trust].spacing(18).into(),
+        Page::Home => column![home_overview, quick_connect, trust].spacing(18).into(),
         Page::Remote => column![viewer_panel].spacing(18).into(),
         Page::Settings => column![safety, video, direct].spacing(18).into(),
-        Page::Network => column![diagnostics, udp].spacing(18).into(),
+        Page::Network => column![connection, diagnostics, udp].spacing(18).into(),
     };
     let menu = column![
         text("P2P").size(29).color(Color::from_rgb8(255, 177, 115)),
@@ -1010,9 +1054,9 @@ fn view(state: &App) -> Element<'_, Msg> {
             .on_press(Msg::Navigate(Page::Home)).width(Length::Fill).padding(14),
         button(if state.page == Page::Remote { "●  远程控制" } else { "    远程控制" })
             .on_press(Msg::Navigate(Page::Remote)).width(Length::Fill).padding(14),
-        button(if state.page == Page::Settings { "●  安全与画质" } else { "    安全与画质" })
+        button(if state.page == Page::Settings { "●  设置与权限" } else { "    设置与权限" })
             .on_press(Msg::Navigate(Page::Settings)).width(Length::Fill).padding(14),
-        button(if state.page == Page::Network { "●  网络诊断" } else { "    网络诊断" })
+        button(if state.page == Page::Network { "●  连接设置" } else { "    连接设置" })
             .on_press(Msg::Navigate(Page::Network)).width(Length::Fill).padding(14),
         vertical_space(),
         text(if active { "● 本机共享服务已启动" } else { "○ 本机共享服务未启动" })
