@@ -4,6 +4,8 @@ mod app_logging;
 #[cfg(windows)]
 mod tray;
 mod host;
+#[cfg(windows)]
+mod host_pairing;
 mod protocol;
 #[allow(dead_code)]
 mod pairing_crypto;
