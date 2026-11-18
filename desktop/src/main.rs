@@ -849,6 +849,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             {
                 state.viewer_status = "WSS 已连接但未收到画面：请确认被控电脑已启动服务、配对密钥一致，并更新为 V0.13.2".into();
             }
+            let mut connect_after_pair = false;
             while let Ok(message) = state.rx.try_recv() {
                 if message.starts_with("[STUN]") {
                     state.diagnostics = message.trim_start_matches("[STUN] ").to_string();
@@ -891,11 +892,26 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                         "pairing_status" => {
                             state.status = event.get("message").and_then(|v| v.as_str()).unwrap_or("数字配对状态更新").to_owned();
                         }
+                        "viewer_pairing_status" => {
+                            state.viewer_status = event.get("message").and_then(|v| v.as_str()).unwrap_or("数字配对进行中").to_owned();
+                        }
+                        "viewer_pairing_ready" => {
+                            state.viewer_key = event.get("session_secret_hex").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                            state.viewer_pairing_code.clear();
+                            state.viewer_status = event.get("message").and_then(|v| v.as_str()).unwrap_or("配对成功").to_owned();
+                            connect_after_pair = !state.viewer_key.is_empty();
+                        }
+                        "viewer_pairing_error" => {
+                            state.viewer_status = event.get("message").and_then(|v| v.as_str()).unwrap_or("数字配对失败").to_owned();
+                        }
                         _ => state.status = message,
                     }
                 } else {
                     state.status = message;
                 }
+            }
+            if connect_after_pair {
+                return update(state, Msg::ViewerConnect);
             }
         }
         _ => {}
