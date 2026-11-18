@@ -718,7 +718,7 @@ fn view(state: &App) -> Element<'_, Msg> {
         let mut chooser = row![text(format!("显示器 {}/{}", info.selected+1,info.count)).size(13)]
             .spacing(7).align_y(iced::Alignment::Center);
         for index in 0..info.count.min(6) {
-            chooser = chooser.push(button(format!("{}", index+1)).padding(8)
+            chooser = chooser.push(button(text(format!("{}", index+1))).padding(8)
                 .on_press_maybe(state.viewer_online.then_some(Msg::ViewerMonitor(index))));
         }
         chooser.into()
