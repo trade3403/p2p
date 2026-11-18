@@ -2,10 +2,16 @@ use std::{env, fs, path::PathBuf};
 
 /// Keep the non-blocking writer alive for the entire application lifetime.
 pub fn init() {
-    let base = env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir);
-    let directory = base.join("P2PRemote").join("logs");
+    let portable_directory = env::current_exe().ok()
+        .and_then(|path| path.parent().map(PathBuf::from))
+        .filter(|path| path.join("portable.flag").is_file())
+        .map(|path| path.join("data").join("logs"));
+    let directory = portable_directory.unwrap_or_else(|| {
+        env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(env::temp_dir)
+            .join("P2PRemote").join("logs")
+    });
 
     if let Err(error) = fs::create_dir_all(&directory) {
         #[cfg(debug_assertions)]
