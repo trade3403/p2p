@@ -11,11 +11,14 @@ mod udp_punch;
 mod udp_video;
 mod viewer;
 mod viewer_geometry;
+mod tls;
 
 use iced::{Font, Task, window, widget::{button, checkbox, column, container, horizontal_space, vertical_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
 
 fn main() -> iced::Result {
+    // Must run before App::default or any Host/Viewer WSS thread starts.
+    tls::initialize();
     iced::application("P2P Remote · 个人远程桌面", update, view)
         .theme(|_| Theme::TokyoNight)
         .default_font(Font::with_name("Microsoft YaHei UI"))
