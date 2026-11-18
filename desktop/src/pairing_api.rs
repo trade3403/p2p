@@ -115,10 +115,12 @@ impl PairingApiClient {
     }
 
     pub fn register(&self, identity: &DeviceIdentity, name: &str) -> Result<String> {
+        let device_id = identity.device_id_hex();
+        let identity_public_key = identity.public_key_b64();
         let body = RegisterBody {
-            device_id: &identity.device_id_hex(),
+            device_id: &device_id,
             name,
-            identity_public_key: &identity.public_key_b64(),
+            identity_public_key: &identity_public_key,
         };
         let response: RegisterResponse = self.request(reqwest::Method::POST, "/api/v1/devices/register")
             .json(&body).send()?.error_for_status()?.json()?;
@@ -129,7 +131,8 @@ impl PairingApiClient {
     }
 
     pub fn heartbeat(&self, identity: &DeviceIdentity) -> Result<()> {
-        let body = HeartbeatBody { device_id: &identity.device_id_hex() };
+        let device_id = identity.device_id_hex();
+        let body = HeartbeatBody { device_id: &device_id };
         self.request(reqwest::Method::POST, "/api/v1/devices/heartbeat")
             .json(&body).send()?.error_for_status()?;
         Ok(())
@@ -140,8 +143,9 @@ impl PairingApiClient {
     ) -> Result<()> {
         let public_key = window.public_key_b64();
         let signature = identity.sign_pairing_window(device_number, window.expires_at, &public_key);
+        let device_id = identity.device_id_hex();
         let body = WindowBody {
-            device_id: &identity.device_id_hex(),
+            device_id: &device_id,
             pairing_public_key: &public_key,
             signature: &signature,
             expires_at: window.expires_at,
@@ -166,8 +170,9 @@ impl PairingApiClient {
         let signature = identity.sign_decision(
             &request.id, &request.device_number, &request.viewer_public_key, &request.nonce, approved,
         );
+        let device_id = identity.device_id_hex();
         let body = DecisionBody {
-            device_id: &identity.device_id_hex(),
+            device_id: &device_id,
             approved,
             signature: &signature,
         };
