@@ -44,6 +44,24 @@ mod tests {
         assert_eq!(normalized_pointer(f32::NAN,0.0,800.0,450.0,1920,1080),None);
     }
     #[test]
+    fn v0121_zoom_presets_and_non_widescreen_hosts() {
+        for &(surface_w, surface_h) in &[
+            (560.0, 315.0),
+            (700.0, 394.0),
+            (840.0, 473.0),
+        ] {
+            let center = normalized_pointer(
+                surface_w / 2.0, surface_h / 2.0,
+                surface_w, surface_h, 1920, 1080,
+            ).expect("center must land inside image");
+            assert!((center.0 - 0.5).abs() < 0.0001);
+            assert!((center.1 - 0.5).abs() < 0.0001);
+            assert_eq!(normalized_pointer(
+                0.0, surface_h / 2.0, surface_w, surface_h, 1024, 768
+            ), None, "pillarbox clicks must not reach 4:3 remote desktops");
+        }
+    }
+    #[test]
     fn monitor_bounds_and_wrap() {
         let m=Monitors::parse(r#"{"count":3,"selected":2}"#).unwrap();
         assert_eq!(m.next(),0);
