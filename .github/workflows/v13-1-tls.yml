@@ -1,0 +1,106 @@
+name: V0.13.1 Windows TLS CryptoProvider Hotfix
+
+on:
+  push:
+    branches: ['feature/v0.13.1-*']
+    paths:
+      - 'desktop/**'
+      - 'android/**'
+      - 'relay/**'
+      - 'deploy/**'
+      - 'scripts/**'
+      - '.github/workflows/v13-1-tls.yml'
+  pull_request:
+    branches: [main]  # Development feature PRs use the branch push run to avoid duplicate builds.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v13-1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Rust Windows V0.13.1 EXE
+    # Owner PC-202310201945 self-hosted Windows runner.
+    # Must be ONLINE and have default self-hosted / Windows / X64 labels.
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      # Git for Windows intermittently resets HTTPS connections for this private repo.
+      # The official authenticated GitHub ZIP archive avoids Git TCP fetch entirely.
+      - name: Retrieve this commit from official GitHub archive API
+        id: source_archive
+        continue-on-error: true
+        shell: powershell
+        env:
+          GH_SOURCE_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-archive-' + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $zip = Join-Path $archiveRoot 'source.zip'
+          $uri = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/zipball/' + $env:GITHUB_SHA
+          $headers = @{ Authorization = ('Bearer ' + $env:GH_SOURCE_TOKEN); 'User-Agent' = 'p2p-v011-selfhost-ci'; Accept = 'application/vnd.github+json' }
+          Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $zip -UseBasicParsing -TimeoutSec 90
+          if ((Get-Item $zip).Length -lt 1024) { throw 'GitHub repository ZIP archive is empty' }
+          $unpack = Join-Path $archiveRoot 'extracted'
+          Expand-Archive -Path $zip -DestinationPath $unpack -Force
+          $root = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
+          if (-not $root) { throw 'Official archive contains no repository directory' }
+          Get-ChildItem -LiteralPath $root.FullName -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force
+          }
+          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop/Cargo.toml'))) { throw 'Missing desktop manifest after archive extraction' }
+          Write-Host ('Verified source archive checkout for commit ' + $env:GITHUB_SHA)
+      - uses: actions/checkout@v4
+        if: steps.source_archive.outcome == 'failure'
+      - name: Prefer Git Bash over WSL when installing Rust
+        shell: powershell
+        run: |
+          $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          if (-not (Test-Path $bash)) { throw "Git Bash not installed at $bash" }
+          $gitBin = Split-Path -Parent $bash
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, $gitBin + [Environment]::NewLine, $utf8)
+          & $bash -c 'echo Git Bash ready'
+          if ($LASTEXITCODE -ne 0) { throw "Git Bash execution failed" }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify self-hosted Windows environment
+        shell: powershell
+        run: |
+          Write-Host "Self-hosted runner: $env:RUNNER_NAME"
+          Write-Host "Runner OS: $env:RUNNER_OS / $env:RUNNER_ARCH"
+          Write-Host "Working directory: $env:GITHUB_WORKSPACE"
+          rustc --version
+          cargo --version
+          if (-not (Test-Path "desktop/Cargo.toml")) { throw "Missing desktop Cargo.toml" }
+          $disk = (Get-PSDrive -Name ((Get-Location).Drive.Name)).Free
+          Write-Host ("Free disk space: {0:N1} GB" -f ($disk / 1GB))
+          if ($disk -lt 5GB) { throw "Insufficient free disk: require at least 5 GB" }
+      # This self-hosted PC retains desktop/target across jobs; avoid a large remote cache upload.
+      - name: Run Rust tests (UDP punch, STUN, crypto, LAN)
+        run: cargo test --manifest-path desktop/Cargo.toml
+      - name: Build Windows Release EXE
+        run: cargo build --manifest-path desktop/Cargo.toml --release
+      - name: Package and hash portable EXE
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist/windows | Out-Null
+          Copy-Item desktop/target/release/p2p-remote.exe dist/windows/P2PRemote.exe
+          Copy-Item README.md dist/windows/README.md
+          Compress-Archive -Path dist/windows/* -DestinationPath P2PRemote-Windows-v0.13.1-tlsfix.zip -Force
+          (Get-FileHash P2PRemote-Windows-v0.13.1-tlsfix.zip -Algorithm SHA256).Hash | Out-File P2PRemote-Windows-v0.13.1-tlsfix.sha256 -Encoding ASCII
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Windows-v0.13.1-tlsfix
+          path: |
+            P2PRemote-Windows-v0.13.1-tlsfix.zip
+            P2PRemote-Windows-v0.13.1-tlsfix.sha256
+          retention-days: 14
+
