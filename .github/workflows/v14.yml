@@ -1,0 +1,97 @@
+name: P2P Remote V0.14.1 Windows Product Shell
+
+on:
+  push:
+    branches: ['feature/v0.14-*']
+    paths:
+      - 'desktop/**'
+      - 'docs/V0.14*'
+      - '.github/workflows/v14.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2p-v14-windows-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows tests, GUI-subsystem check and portable package
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Windows build environment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "Runner: $env:RUNNER_NAME / $env:RUNNER_OS / $env:RUNNER_ARCH"
+          rustc --version
+          cargo --version
+          if (-not (Test-Path "desktop/Cargo.toml")) { throw "Missing desktop/Cargo.toml" }
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path desktop/Cargo.toml
+
+      - name: Build Windows release executable
+        run: cargo build --manifest-path desktop/Cargo.toml --release
+
+      - name: Verify release executable uses Windows GUI subsystem
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Resolve-Path 'desktop/target/release/p2p-remote.exe'
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw 'Release output is not a valid Windows PE executable'
+          }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ($peOffset -lt 64 -or $peOffset + 90 -gt $bytes.Length) {
+            throw 'Invalid PE header offset'
+          }
+          if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45) {
+            throw 'Missing PE signature'
+          }
+          $optionalHeader = $peOffset + 24
+          $subsystem = [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+          if ($subsystem -ne 2) {
+            throw "Expected Windows GUI subsystem (2), got $subsystem"
+          }
+          Write-Host 'Verified: Release EXE uses Windows GUI subsystem; no console window is requested.'
+
+      - name: Package phase-one portable test build and SHA-256
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\v0.14.1-portable'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item 'desktop/target/release/p2p-remote.exe' (Join-Path $dist 'P2PRemote.exe') -Force
+          @'
+          P2P Remote V0.14.1 - Phase 1 engineering build
+          This is a portable test package, not the final NSIS installer.
+          Configuration and logs are stored under the current Windows user's LOCALAPPDATA.
+          Close hides the main window to the notification area when tray initialization succeeds.
+          Use the tray menu's "完全退出" command to stop all sessions and exit.
+          '@ | Set-Content -Path (Join-Path $dist 'README.txt') -Encoding UTF8
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.14.1-phase1.zip'
+          Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          ($hash + '  P2PRemote-Portable-v0.14.1-phase1.zip') |
+            Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.14.1-phase1.sha256') -Encoding ASCII
+          Write-Host "Portable package SHA256: $hash"
+
+      - name: Upload phase-one artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Portable-v0.14.1-phase1
+          path: |
+            P2PRemote-Portable-v0.14.1-phase1.zip
+            P2PRemote-Portable-v0.14.1-phase1.sha256
+          retention-days: 14
