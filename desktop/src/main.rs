@@ -562,7 +562,7 @@ fn view(state: &App) -> Element<'_, Msg> {
         ("○  本机共享未启动", Color::from_rgb8(53, 63, 80))
     };
     let top = row![
-        column![text("P2P REMOTE  /  V0.13").size(13).color(Color::from_rgb8(255,177,115)),
+        column![text("P2P REMOTE  /  V0.13.2").size(13).color(Color::from_rgb8(255,177,115)),
                 text(page_title).size(28),
                 text(page_subtitle).size(13).color(Color::from_rgb8(156,168,189))].spacing(9),
         horizontal_space(),
