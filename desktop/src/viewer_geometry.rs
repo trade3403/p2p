@@ -15,6 +15,22 @@ impl Monitors {
     pub fn next(self) -> usize { (self.selected + 1) % self.count }
 }
 
+/// Compute the visible viewer surface. All UI drawing and input events must
+/// use this one function, including after a real OS fullscreen resize.
+pub fn viewer_dimensions(
+    fullscreen: bool,
+    window_size: (f32, f32),
+    windowed: (f32, f32),
+) -> (f32, f32) {
+    if !fullscreen { return windowed; }
+    let (window_w, window_h) = window_size;
+    if !window_w.is_finite() || !window_h.is_finite() { return windowed; }
+    let available_w = (window_w - 40.0).max(320.0);
+    let available_h = (window_h - 152.0).max(200.0);
+    let width = available_w.min(available_h * 16.0 / 9.0);
+    (width, width * 9.0 / 16.0)
+}
+
 /// Map a pointer in a fixed viewer surface into normalized coordinates in the
 /// remote image, respecting black bars caused by aspect-ratio fitting.
 /// Returns None for clicks on empty margins rather than clicking the remote desktop.
@@ -42,6 +58,26 @@ mod tests {
         assert_eq!(normalized_pointer(400.0,225.0,800.0,450.0,1024,768),Some((0.5,0.5)));
         assert_eq!(normalized_pointer(-1.0,0.0,800.0,450.0,1920,1080),None);
         assert_eq!(normalized_pointer(f32::NAN,0.0,800.0,450.0,1920,1080),None);
+    }
+    #[test]
+    fn fullscreen_surface_and_pointer_stay_in_sync() {
+        let expected = (700.0, 394.0);
+        assert_eq!(viewer_dimensions(false, (1920.0,1080.0), expected), expected);
+        for screen in [(1366.0, 768.0), (1920.0, 1080.0), (2560.0, 1440.0)] {
+            let (width, height) = viewer_dimensions(true, screen, expected);
+            assert!(width > 0.0 && height > 0.0);
+            assert!(width <= screen.0 && height < screen.1);
+            let middle = normalized_pointer(
+                width/2.0, height/2.0, width, height, 1920, 1080
+            ).unwrap();
+            assert!((middle.0-0.5).abs() < 0.0001);
+            assert!((middle.1-0.5).abs() < 0.0001);
+            // Non-widescreen remote content must not receive clicks on black bars.
+            assert_eq!(normalized_pointer(0.0, height/2.0, width, height, 1024,768), None);
+        }
+        assert_eq!(
+            viewer_dimensions(true, (f32::NAN, 600.0), expected), expected
+        );
     }
     #[test]
     fn v0121_zoom_presets_and_non_widescreen_hosts() {
