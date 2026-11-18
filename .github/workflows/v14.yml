@@ -200,14 +200,15 @@ jobs:
           $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\v0.14.1-portable'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item 'desktop/target/release/p2p-remote.exe' (Join-Path $dist 'P2PRemote.exe') -Force
+          New-Item -ItemType File -Path (Join-Path $dist 'portable.flag') | Out-Null
           @'
           P2P Remote V0.14.2 - Windows engineering build
           Includes a per-user NSIS installer and a portable ZIP for engineering validation.
-          Configuration and logs are stored under the current Windows user's LOCALAPPDATA.
+          Configuration, DPAPI-protected device identity and logs are stored in the data folder beside this executable.
+          Portable data is isolated from the installed version; DPAPI remains bound to this Windows user and machine.
           Close hides the main window to the notification area when tray initialization succeeds.
           Use the tray menu's "完全退出" command to stop all sessions and exit.
           '@ | Set-Content -Path (Join-Path $dist 'README.txt') -Encoding UTF8
-          Copy-Item 'P2PRemote-Setup-v0.14.0.exe' (Join-Path $dist 'P2PRemote-Setup-v0.14.0.exe') -Force
           $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.14.2.zip'
           Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -223,4 +224,5 @@ jobs:
             P2PRemote-Portable-v0.14.2.zip
             P2PRemote-Portable-v0.14.2.sha256
             P2PRemote-Setup-v0.14.0.exe
+            P2PRemote-Setup-v0.14.0.sha256
           retention-days: 14
