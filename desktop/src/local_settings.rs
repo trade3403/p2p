@@ -10,8 +10,7 @@ struct PublicSettings {
 }
 
 fn settings_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(|base| PathBuf::from(base).join("P2PRemote").join("settings.json"))
+    crate::trusted_profile::app_data_dir().ok().map(|base| base.join("settings.json"))
 }
 
 pub fn is_safe_address(value: &str) -> bool {
