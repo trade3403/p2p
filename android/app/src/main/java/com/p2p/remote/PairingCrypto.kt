@@ -61,6 +61,8 @@ internal object PairingCrypto {
 
     fun publicKeyBase64(bytes: ByteArray): String = b64(bytes)
 
+    fun decodeBase64Url(value: String): ByteArray = decodeB64(value)
+
     fun signPairingWindow(
         signingSeed: ByteArray, deviceNumber: String, expiresAt: Long, pairingPublicBase64: String
     ): String {
