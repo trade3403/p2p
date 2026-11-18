@@ -871,21 +871,36 @@ fn view(state: &App) -> Element<'_, Msg> {
             .align_y(iced::Alignment::Center),
     ].spacing(15));
 
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let code_seconds_left = state.pairing_expires_at.saturating_sub(now_unix).max(0);
+    let device_number_display = if state.device_number.is_empty() { "启动共享后自动分配" } else { state.device_number.as_str() };
+    let pairing_code_display = if state.pairing_code.is_empty() { "等待生成" } else { state.pairing_code.as_str() };
     let home_overview = card(column![
-        heading("本机设备", "你的设备标识和远程共享状态"),
+        heading("本机设备", "服务器分配的设备号和限时配对验证码"),
         row![
             column![
                 text("9 位设备号").size(13).color(Color::from_rgb8(153, 164, 185)),
-                text(protocol::device_number(&state.secret)).size(34)
+                text(device_number_display).size(32)
                     .color(Color::from_rgb8(91, 210, 225)),
-                text("这是当前会话密钥生成的识别编号；数字本身不授予访问权限。")
-                    .size(12).color(Color::from_rgb8(153, 164, 185))
+                text("设备号只用于定位设备，不是访问凭据。").size(12)
+                    .color(Color::from_rgb8(153, 164, 185))
             ].spacing(7),
             horizontal_space(),
             button("复制设备号").on_press(Msg::CopyDeviceNumber).padding(12)
         ].align_y(iced::Alignment::Center),
         row![
-            container(text(if active { "● 共享服务运行中" } else { "○ 共享服务未启动" }).size(14))
+            column![
+                text("6 位动态验证码").size(13).color(Color::from_rgb8(153, 164, 185)),
+                text(pairing_code_display).size(30).color(Color::from_rgb8(245, 190, 108)),
+                text(if code_seconds_left > 0 { format!("剩余 {} 秒 · 使用一次后立即失效", code_seconds_left) } else { "有效期 120 秒 · 等待共享服务启动".into() })
+                    .size(12).color(Color::from_rgb8(153, 164, 185))
+            ].spacing(7),
+            horizontal_space(),
+            button("复制验证码").on_press(Msg::CopyPairingCode).padding(12)
+        ].align_y(iced::Alignment::Center),
+        row![
+            container(text(if active { "● 配对服务运行中" } else { "○ 配对服务未启动" }).size(14))
                 .padding([10,14])
                 .style(move |_| container::Style::default()
                     .background(if active { Color::from_rgb8(24, 70, 61) } else { Color::from_rgb8(48, 56, 72) })
@@ -899,6 +914,19 @@ fn view(state: &App) -> Element<'_, Msg> {
         ].align_y(iced::Alignment::Center),
         text(&state.status).size(13).color(Color::from_rgb8(166, 178, 197))
     ].spacing(17));
+
+    let pairing_approval: Element<'_, Msg> = if let Some(request) = &state.pending_pairing_request {
+        card(column![
+            heading("新的远程连接请求", "验证码校验已通过，请确认是否允许该设备连接"),
+            text(format!("请求设备指纹：{}", request.viewer_fingerprint)).size(14),
+            row![
+                button("拒绝").on_press(Msg::DenyPairing).padding(12),
+                button("允许连接").on_press(Msg::ApprovePairing).padding(12)
+            ].spacing(10)
+        ].spacing(12))
+    } else {
+        column![].into()
+    };
 
     let quick_connect = card(column![
         heading("远程连接", "从另一台 Windows 或 Android 设备访问已授权电脑"),
@@ -1179,7 +1207,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     // Sunlogin-inspired information architecture, with original P2P branding:
     // one primary task per screen instead of ten stacked configuration panels.
     let page_content: Element<'_, Msg> = match state.page {
-        Page::Home => column![home_overview, quick_connect, trust].spacing(18).into(),
+        Page::Home => column![home_overview, pairing_approval, quick_connect, trust].spacing(18).into(),
         Page::Remote => column![viewer_panel].spacing(18).into(),
         Page::Settings => column![safety, video, direct].spacing(18).into(),
         Page::Network => column![connection, diagnostics, udp].spacing(18).into(),
