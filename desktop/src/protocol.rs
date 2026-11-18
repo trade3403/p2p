@@ -18,6 +18,18 @@ pub fn new_secret() -> [u8; 32] {
     secret
 }
 
+/// Human-friendly numeric label for identifying a device.
+// IMPORTANT: Not a password and never sufficient for connection authorization.
+pub fn device_number(secret: &[u8;32]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"p2p-device-number-v1:");
+    hash.update(secret);
+    let digest = hash.finalize();
+    let mut prefix = [0u8;8];
+    prefix.copy_from_slice(&digest[..8]);
+    format!("{:09}", u64::from_be_bytes(prefix) % 1_000_000_000)
+}
+
 pub fn room_id(secret: &[u8; 32]) -> String {
     let mut hash = Sha256::new();
     hash.update(b"p2p-v02-room:");
@@ -59,6 +71,16 @@ mod tests {
         assert!(decrypt(&secret, &wrong_type).is_err(), "packet type is authenticated");
         *packet.last_mut().unwrap() ^= 1;
         assert!(decrypt(&secret, &packet).is_err());
+    }
+    #[test]
+    fn numeric_device_label_is_stable_and_not_credential() {
+        let a = [0x52u8;32];
+        let b = [0x53u8;32];
+        let number = device_number(&a);
+        assert_eq!(number.len(),9);
+        assert!(number.bytes().all(|c| c.is_ascii_digit()));
+        assert_eq!(number, device_number(&a));
+        assert_ne!(number, device_number(&b));
     }
     #[test]
     fn room_is_stable_but_not_raw_key() {
