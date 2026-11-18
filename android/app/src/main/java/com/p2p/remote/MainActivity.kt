@@ -133,6 +133,12 @@ class MainActivity : ComponentActivity() {
                     .getString("lan_ipv4", "") ?: ""
             ) }
             var sessionKey by remember { mutableStateOf("") }
+            var deviceNumber by remember { mutableStateOf("") }
+            var pairingCode by remember { mutableStateOf("") }
+            var pairingBusy by remember { mutableStateOf(false) }
+            var pairingStatus by remember { mutableStateOf("输入电脑显示的9位设备号和6位动态验证码") }
+            var showLegacyPairing by remember { mutableStateOf(false) }
+            val pairingCancelled = remember { AtomicBoolean(false) }
             var textToSend by remember { mutableStateOf("") }
             var clipboardToSend by remember { mutableStateOf("") }
             var savedPairAvailable by remember { mutableStateOf(trustedStore.hasSaved()) }
@@ -246,6 +252,14 @@ class MainActivity : ComponentActivity() {
                         }
                         if(showAdvancedNetwork) {
                             OutlinedTextField(
+                                value=relayToken,
+                                onValueChange={relayToken=it.take(512)},
+                                modifier=Modifier.fillMaxWidth(),
+                                singleLine=true,
+                                visualTransformation=PasswordVisualTransformation(),
+                                label={Text("私测中转访问口令（仅开发测试）")}
+                            )
+                            OutlinedTextField(
                                 value=lanIp,
                                 onValueChange={lanIp=it.take(24)},
                                 modifier=Modifier.fillMaxWidth(),
@@ -261,41 +275,100 @@ class MainActivity : ComponentActivity() {
                                 Text(stunReport,color=Muted,fontSize=12.sp,modifier=Modifier.weight(1f))
                             }
                         }
-                        OutlinedTextField(value=relayToken,onValueChange={relayToken=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("中转服务器访问口令")})
-                        OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it.trim().take(64)},
-                            modifier=Modifier.fillMaxWidth(),singleLine=true,
+                        Text("数字验证码配对",fontSize=18.sp,fontWeight=FontWeight.SemiBold)
+                        Text("在被控电脑上查看设备号和动态验证码。连接请求仍需电脑端用户批准。",
+                            color=Muted,fontSize=12.sp)
+                        OutlinedTextField(
+                            value=deviceNumber,
+                            onValueChange={deviceNumber=it.filter(Char::isDigit).take(9)},
+                            modifier=Modifier.fillMaxWidth(),
+                            singleLine=true,
+                            label={Text("9位设备号")},
+                            placeholder={Text("例如 123456789")}
+                        )
+                        OutlinedTextField(
+                            value=pairingCode,
+                            onValueChange={pairingCode=it.filter(Char::isDigit).take(6)},
+                            modifier=Modifier.fillMaxWidth(),
+                            singleLine=true,
                             visualTransformation=PasswordVisualTransformation(),
-                            label={Text("当前兼容模式：Windows 64 位配对密钥")})
-                        Row(verticalAlignment=Alignment.CenterVertically) {
-                            Text("当前版本的 9 位编号由密钥本地计算，仅用于识别；数字验证码配对正在接入服务端。",
-                                modifier=Modifier.weight(1f),color=Muted,fontSize=11.sp)
-                            TextButton(onClick={
-                                val mgr=getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                val pasted=mgr.primaryClip?.getItemAt(0)?.coerceToText(this@MainActivity)?.toString()?.trim() ?: ""
-                                if(pasted.length==64 && pasted.all{it in "0123456789abcdefABCDEF"}) {
-                                    sessionKey=pasted
-                                    status="已从手机剪贴板填入加密配对密钥"
+                            label={Text("6位动态验证码")}
+                        )
+                        Button(
+                            onClick={
+                                if(pairingBusy) {
+                                    pairingCancelled.set(true)
+                                    pairingStatus="正在取消配对…"
                                 } else {
-                                    status="剪贴板没有完整的 64 位配对密钥，请先从电脑复制"
+                                    pairingCancelled.set(false)
+                                    pairingBusy=true
+                                    pairingStatus="正在发起安全配对…"
+                                    Thread {
+                                        try {
+                                            val derived = PairingApiClient(server,relayToken)
+                                                .pairAndDeriveSession(
+                                                    deviceNumber,
+                                                    pairingCode,
+                                                    cancelled={pairingCancelled.get()},
+                                                    onProgress={ message -> main.post { pairingStatus=message } }
+                                                )
+                                            val keyHex=derived.joinToString("") { "%02x".format(it) }
+                                            main.post {
+                                                pairingBusy=false
+                                                pairingCode=""
+                                                sessionKey=keyHex
+                                                pairingStatus="配对成功，正在连接远程桌面…"
+                                                connect(server,relayToken,keyHex,lanIp)
+                                                mobilePage=1
+                                            }
+                                        } catch(error:Exception) {
+                                            main.post {
+                                                pairingBusy=false
+                                                pairingStatus=error.message ?: "配对失败，请检查网络和验证码"
+                                            }
+                                        }
+                                    }.start()
                                 }
-                            }) { Text("粘贴密钥") }
+                            },
+                            enabled=pairingBusy || (!requested && deviceNumber.length==9 && pairingCode.length==6),
+                            modifier=Modifier.fillMaxWidth()
+                        ) {
+                            Text(if(pairingBusy) "取消配对" else "请求连接电脑")
                         }
+                        Text(pairingStatus,color=if(pairingStatus.contains("成功"))Color(0xFF72D9AB) else Muted,fontSize=13.sp)
 
-                        val parsedNumber = remember(sessionKey) {
-                            runCatching { DeviceNumber.fromSecret(decodeKey(sessionKey)) }.getOrNull()
+                        TextButton(onClick={showLegacyPairing=!showLegacyPairing}) {
+                            Text(if(showLegacyPairing) "收起旧版密钥连接" else "旧版兼容连接（64位密钥）")
                         }
-                        if(parsedNumber!=null) {
+                        if(showLegacyPairing) {
+                            OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it.trim().take(64)},
+                                modifier=Modifier.fillMaxWidth(),singleLine=true,
+                                visualTransformation=PasswordVisualTransformation(),
+                                label={Text("Windows 64位会话密钥")})
                             Row(verticalAlignment=Alignment.CenterVertically) {
-                                Text("电脑设备号：$parsedNumber",color=Accent,fontSize=15.sp,
-                                    modifier=Modifier.weight(1f))
+                                Text("旧版设备号仅由密钥本地计算，不是服务端注册编号。",
+                                    modifier=Modifier.weight(1f),color=Muted,fontSize=11.sp)
                                 TextButton(onClick={
                                     val mgr=getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    mgr.setPrimaryClip(ClipData.newPlainText("P2P Remote 设备号",parsedNumber))
-                                }) { Text("复制设备号") }
+                                    val pasted=mgr.primaryClip?.getItemAt(0)?.coerceToText(this@MainActivity)?.toString()?.trim() ?: ""
+                                    if(pasted.length==64 && pasted.all{it in "0123456789abcdefABCDEF"}) {
+                                        sessionKey=pasted
+                                        status="已从手机剪贴板填入旧版配对密钥"
+                                    } else {
+                                        status="剪贴板没有完整的64位密钥"
+                                    }
+                                }) { Text("粘贴密钥") }
                             }
-                        }
-                        Button(onClick={ if (requested) disconnect() else connect(server, relayToken, sessionKey, lanIp) },modifier=Modifier.fillMaxWidth()) {
-                            Text(if(requested)"停止连接 / 取消重试" else "连接电脑")
+                            val parsedNumber = remember(sessionKey) {
+                                runCatching { DeviceNumber.fromSecret(decodeKey(sessionKey)) }.getOrNull()
+                            }
+                            if(parsedNumber!=null) {
+                                Text("旧版本地识别号：$parsedNumber",color=Accent,fontSize=13.sp)
+                            }
+                            Button(
+                                onClick={ if (requested) disconnect() else connect(server,relayToken,sessionKey,lanIp) },
+                                modifier=Modifier.fillMaxWidth()
+                            ) { Text(if(requested)"停止连接 / 取消重试" else "使用旧版密钥连接") }
                         }
                         Text(status,color=if(receivingFrames)Color(0xFF72D9AB) else Muted,fontSize=13.sp)
                         Text("当前链路：$transport",color=Accent,fontSize=13.sp)
