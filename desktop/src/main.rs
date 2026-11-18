@@ -1382,7 +1382,7 @@ fn view(state: &App) -> Element<'_, Msg> {
     let menu = column![
         text("P2P").size(32).color(Color::from_rgb8(76, 211, 196)),
         text("REMOTE DESKTOP").size(10).color(Color::from_rgb8(151, 169, 190)),
-        container(text("工作空间").size(11).color(Color::from_rgb8(111, 135, 160))).padding([26, 0, 10, 0]),
+        container(text("工作空间").size(11).color(Color::from_rgb8(111, 135, 160))).padding([26, 0]),
         button(if state.page == Page::Home { "●  我的设备" } else { "    我的设备" })
             .on_press(Msg::Navigate(Page::Home)).width(Length::Fill).padding(14),
         button(if state.page == Page::Remote { "●  远程控制" } else { "    远程控制" })
