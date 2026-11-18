@@ -185,6 +185,15 @@ jobs:
           if (-not (Test-Path "P2PRemote-Setup-v0.14.0.exe")) { throw "NSIS output file was not generated" }
           Write-Host "Built per-user NSIS installer; user profile and logs remain outside install directory."
 
+      - name: Hash Windows installer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Resolve-Path 'P2PRemote-Setup-v0.14.0.exe'
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          ($hash + '  P2PRemote-Setup-v0.14.0.exe') |
+            Out-File 'P2PRemote-Setup-v0.14.0.sha256' -Encoding ASCII
+          Write-Host "Installer SHA256: $hash"
+
       - name: Package phase-one portable test build and SHA-256
         run: |
           $ErrorActionPreference = 'Stop'
