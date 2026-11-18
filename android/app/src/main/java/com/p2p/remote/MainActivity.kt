@@ -130,26 +130,36 @@ class MainActivity : ComponentActivity() {
             var clipboardToSend by remember { mutableStateOf("") }
             var savedPairAvailable by remember { mutableStateOf(trustedStore.hasSaved()) }
             var mobilePage by remember { mutableIntStateOf(0) }
+            var showAdvancedNetwork by remember { mutableStateOf(false) }
             MaterialTheme(colorScheme=darkColorScheme(primary=Accent, background=Ink,surface=Panel,onSurface=Color.White,onBackground=Color.White)) {
-                Column(Modifier.fillMaxSize().background(Ink).verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(15.dp)) {
-                    Spacer(Modifier.height(8.dp))
-                    Text("P2P REMOTE  /  V0.12",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
+                Scaffold(
+                    containerColor=Ink,
+                    bottomBar={
+                        NavigationBar(containerColor=Panel) {
+                            listOf("连接设备","远程画面","更多设置").forEachIndexed { index, label ->
+                                NavigationBarItem(
+                                    selected=mobilePage==index,
+                                    onClick={mobilePage=index},
+                                    icon={Text(listOf("连","控","设")[index],fontSize=16.sp)},
+                                    label={Text(label,fontSize=12.sp)}
+                                )
+                            }
+                        }
+                    }
+                ) { contentPadding ->
+                Column(
+                    Modifier.fillMaxSize().background(Ink).padding(contentPadding)
+                        .verticalScroll(rememberScrollState()).padding(horizontal=16.dp,vertical=12.dp),
+                    verticalArrangement=Arrangement.spacedBy(15.dp)
+                ) {
+                    Text("P2P REMOTE  /  V0.12.1",fontSize=12.sp,color=Accent,letterSpacing=2.sp)
                     Text("远程协助",fontSize=30.sp,fontWeight=FontWeight.Bold)
                     Row(verticalAlignment=Alignment.CenterVertically) {
                         Text("Android 控制端  ·  测试环境",fontSize=13.sp,color=Muted,modifier=Modifier.weight(1f))
                         Text(if(online) "● 已连接" else "○ 未连接",
                             fontSize=13.sp,color=if(online) Color(0xFF65D6B0) else Muted)
                     }
-                    Row(horizontalArrangement=Arrangement.spacedBy(8.dp),modifier=Modifier.fillMaxWidth()) {
-                        listOf("连接设备","远程画面","更多设置").forEachIndexed { index, label ->
-                            FilterChip(
-                                selected=mobilePage==index,
-                                onClick={ mobilePage=index },
-                                label={Text(label,fontSize=13.sp)},
-                                modifier=Modifier.weight(1f)
-                            )
-                        }
-                    }
+                    // Persistent bottom navigation keeps the remote screen one tap away.
                     if (mobilePage==0) {
                     PanelCard {
                         Text("已授权的电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
@@ -205,20 +215,25 @@ class MainActivity : ComponentActivity() {
                         Text("连接另一台电脑",fontSize=20.sp,fontWeight=FontWeight.SemiBold)
                         Text("跨公网使用 VPS 中转，无需家庭固定 IP",fontSize=12.sp,color=Muted)
                         OutlinedTextField(value=server,onValueChange={server=it},modifier=Modifier.fillMaxWidth(),singleLine=true,label={Text("中转服务器 WSS 地址")})
-                        OutlinedTextField(
-                            value=lanIp,
-                            onValueChange={lanIp=it.take(24)},
-                            modifier=Modifier.fillMaxWidth(),
-                            singleLine=true,
-                            label={Text("可选：家中电脑的局域网 IPv4")},
-                            placeholder={Text("例如 192.168.1.100")}
-                        )
-                        Text("局域网直连优先，跨公网使用 VPS；STUN 仅探测 NAT 映射，尚未实现 ICE/UDP 穿透。",
-                            color=Muted,fontSize=12.sp)
-                        Row(verticalAlignment=Alignment.CenterVertically,
-                            horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                            Button(onClick={probeSTUN(server)}) { Text("检测公网 UDP") }
-                            Text(stunReport,color=Muted,fontSize=12.sp,modifier=Modifier.weight(1f))
+                        TextButton(onClick={showAdvancedNetwork=!showAdvancedNetwork}) {
+                            Text(if(showAdvancedNetwork) "收起高级网络设置" else "高级网络设置（LAN / STUN）")
+                        }
+                        if(showAdvancedNetwork) {
+                            OutlinedTextField(
+                                value=lanIp,
+                                onValueChange={lanIp=it.take(24)},
+                                modifier=Modifier.fillMaxWidth(),
+                                singleLine=true,
+                                label={Text("可选：家中电脑的局域网 IPv4")},
+                                placeholder={Text("例如 192.168.1.100")}
+                            )
+                            Text("局域网直连优先，跨公网使用 VPS；STUN 仅探测 NAT 映射，尚未实现 ICE/UDP 穿透。",
+                                color=Muted,fontSize=12.sp)
+                            Row(verticalAlignment=Alignment.CenterVertically,
+                                horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                Button(onClick={probeSTUN(server)}) { Text("检测公网 UDP") }
+                                Text(stunReport,color=Muted,fontSize=12.sp,modifier=Modifier.weight(1f))
+                            }
                         }
                         OutlinedTextField(value=relayToken,onValueChange={relayToken=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("中转服务器访问口令")})
                         OutlinedTextField(value=sessionKey,onValueChange={sessionKey=it},modifier=Modifier.fillMaxWidth(),singleLine=true,visualTransformation=PasswordVisualTransformation(),label={Text("Windows 显示的 64 位会话密钥")})
@@ -227,6 +242,10 @@ class MainActivity : ComponentActivity() {
                         }
                         Text(status,color=if(receivingFrames)Color(0xFF72D9AB) else Muted,fontSize=13.sp)
                         Text("当前链路：$transport",color=Accent,fontSize=13.sp)
+                        Button(onClick={mobilePage=1},enabled=requested,modifier=Modifier.fillMaxWidth()){
+                            Text(if(receivingFrames) "查看远程桌面画面" else "进入远程画面")
+                        }
+                        if(showAdvancedNetwork) {
                         Row(verticalAlignment=Alignment.CenterVertically,
                             horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                             Button(onClick={startUdpPunch()},
@@ -239,6 +258,7 @@ class MainActivity : ComponentActivity() {
                             color=Muted,fontSize=12.sp)
                         Text("端到端信令 RTT：${rttMs?.let{"$it ms"} ?: "等待响应"}",
                             color=Muted,fontSize=12.sp)
+                        }
                         Text("只有主动点击加密保存才会存储可信配对；网络中断期间允许当前会话自动重连",color=Muted,fontSize=12.sp)
                     }
                     }
@@ -253,29 +273,35 @@ class MainActivity : ComponentActivity() {
                         val displayWidth = if(h264Active) h264Width else (bitmap?.width ?: 1280)
                         val displayHeight = if(h264Active) h264Height else (bitmap?.height ?: 720)
                         Box(
-                            Modifier.fillMaxWidth().height(260.dp)
+                            Modifier.fillMaxWidth().height(240.dp)
                                 .background(Color(0xFF0F1625),RoundedCornerShape(12.dp))
                                 .pointerInput(online, h264Active, displayWidth, displayHeight) {
                                     if (!online) return@pointerInput
                                     awaitEachGesture {
                                         val down = awaitFirstDown(requireUnconsumed=false)
-                                        val first = coordinate(
-                                            down.position,size.width.toFloat(),size.height.toFloat(),
+                                        val first = RemoteGeometry.normalizedPointer(
+                                            down.position.x,down.position.y,
+                                            size.width.toFloat(),size.height.toFloat(),
                                             displayWidth,displayHeight
                                         )
+                                        if(first==null) return@awaitEachGesture
                                         pointerX=first.first; pointerY=first.second
                                         sendControl("down",first.first,first.second)
                                         do {
                                             val event=awaitPointerEvent()
                                             val change=event.changes.firstOrNull() ?: break
-                                            val position=coordinate(
-                                                change.position,size.width.toFloat(),size.height.toFloat(),
+                                            val position=RemoteGeometry.normalizedPointer(
+                                                change.position.x,change.position.y,
+                                                size.width.toFloat(),size.height.toFloat(),
                                                 displayWidth,displayHeight
                                             )
-                                            pointerX=position.first; pointerY=position.second
-                                            if(change.pressed) sendControl("move",position.first,position.second)
-                                            else {
-                                                sendControl("up",position.first,position.second)
+                                            if(position!=null) {
+                                                pointerX=position.first; pointerY=position.second
+                                            }
+                                            if(change.pressed) {
+                                                if(position!=null) sendControl("move",position.first,position.second)
+                                            } else {
+                                                sendControl("up",pointerX,pointerY)
                                                 break
                                             }
                                         } while(true)
@@ -368,6 +394,7 @@ class MainActivity : ComponentActivity() {
                     }
                     }
                     Spacer(Modifier.height(15.dp))
+                }
                 }
             }
         }
