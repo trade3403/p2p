@@ -13,7 +13,7 @@ mod viewer;
 mod viewer_geometry;
 mod tls;
 
-use iced::{Font, Task, window, widget::{button, checkbox, column, container, horizontal_space, vertical_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
+use iced::{Font, Task, window, clipboard, widget::{button, checkbox, column, container, horizontal_space, vertical_space, row, scrollable, text, text_input, image, mouse_area}, Border, Color, Element, Length, Subscription, Theme};
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, Sender}}, time::Duration};
 
 fn main() -> iced::Result {
@@ -193,7 +193,7 @@ impl Drop for App {
 #[derive(Debug, Clone)]
 enum Msg { Navigate(Page), ViewerZoom(ViewerScale), ToggleViewerFullscreen,
     ViewerWindow(Option<window::Id>), WindowResized(f32, f32),
-    ToggleSessionKey, Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
+    ToggleSessionKey, CopyDeviceNumber, CopyPairingKey, Server(String), Token(String), Allow(bool), Clipboard(bool), NextMonitor,
     LoginStart(bool), UnattendedInput(bool), SaveTrust, RevokeTrust,
     H264(bool), Fps(u32), Lan(bool), AllowUdpProbe(bool), AllowUdpPreview(bool), ProbeNetwork, Start, Stop, NewKey, Tick, ViewerKey(String), ViewerText(String), ViewerConnect, ViewerDisconnect, ViewerMove(iced::Point), ViewerDown, ViewerUp, ViewerRight, ViewerSendText, ViewerScroll(i32), ViewerMonitor(usize), ViewerClipboardGet, ViewerClipboardSet, ViewerKeyPress(&'static str) }
 
@@ -234,6 +234,14 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             state.viewer_pointer_valid = false;
         }
         Msg::ToggleSessionKey => state.show_session_key = !state.show_session_key,
+        Msg::CopyDeviceNumber => {
+            state.status = "已复制 9 位设备号（仅用于识别，不是连接凭据）".into();
+            return clipboard::write(protocol::device_number(&state.secret));
+        }
+        Msg::CopyPairingKey => {
+            state.status = "已复制配对密钥；请仅通过可信渠道分享".into();
+            return clipboard::write(hex::encode(state.secret));
+        }
         Msg::ViewerKey(value) if !state.viewer_active.load(Ordering::SeqCst) => {
             state.viewer_key = value.trim().to_owned();
         }
@@ -545,13 +553,19 @@ fn view(state: &App) -> Element<'_, Msg> {
     ].align_y(iced::Alignment::Center);
 
     let connection = card(column![
-        heading("01 / 连接设置", "局域网可选 P2P 直连；跨公网仍通过 VPS 的 WSS 中转"),
+        heading("01 / 连接设置", "本机共享和控制另一台电脑是两个不同功能"),
+        text("要查看另一台 PC 的桌面，请点击左侧【远程控制】，输入那台电脑的配对密钥。").size(13),
         text("中转服务器地址").size(13),
         text_input("wss://p2ptest.aikissgo.com", &state.server).on_input(Msg::Server).padding(13).size(15),
         text("中转访问口令（与 VPS 的 RELAY_ACCESS_TOKEN 一致）").size(13),
         text_input("输入服务器访问口令", &state.relay_token).on_input(Msg::Token).secure(true).padding(13).size(15),
-        text(format!("本机设备指纹：{}", &protocol::room_id(&state.secret)[..12]))
-            .size(15).color(Color::from_rgb8(255, 177, 115)),
+        row![
+            text(format!("本机设备号：{}", protocol::device_number(&state.secret)))
+                .size(19).color(Color::from_rgb8(255, 177, 115)),
+            button("复制设备号").on_press(Msg::CopyDeviceNumber).padding(10)
+        ].spacing(14).align_y(iced::Alignment::Center),
+        text("数字设备号仅用于识别；不能代替加密配对密钥。手机可粘贴密钥直接连接。").size(12)
+            .color(Color::from_rgb8(156, 168, 189)),
         text("配对密钥仅向已授权的 Windows / Android 控制端分享").size(13),
         row![
             container(text(if state.show_session_key {
@@ -564,7 +578,8 @@ fn view(state: &App) -> Element<'_, Msg> {
                     .background(Color::from_rgb8(19, 21, 27))
                     .border(Border {color:Color::from_rgb8(60,74,102),width:1.0,radius:9.into()})),
             button(if state.show_session_key { "隐藏密钥" } else { "显示密钥" })
-                .on_press(Msg::ToggleSessionKey).padding(12)
+                .on_press(Msg::ToggleSessionKey).padding(12),
+            button("复制配对密钥").on_press(Msg::CopyPairingKey).padding(12)
         ].spacing(8).align_y(iced::Alignment::Center),
         row![button("生成新密钥并撤销旧配对").on_press_maybe((!active).then_some(Msg::NewKey)).padding(13),
              horizontal_space(),
