@@ -22,6 +22,11 @@ hex = "0.4"
 rand = "0.8"
 aes-gcm = "0.10"
 anyhow = "1"
+base64 = "0.22"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+hkdf = "0.12"
+hmac = "0.12"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
