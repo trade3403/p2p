@@ -1,0 +1,271 @@
+name: P2P Remote V0.16.0 UI Redesign - Fixed Windows Padding
+
+on:
+  push:
+    branches: ['feature/v0.16-*']
+    paths:
+      - 'desktop/**'
+      - 'android/**'
+      - 'relay/**'
+      - 'installer/**'
+      - 'docs/V0.15*'
+      - '.github/workflows/v16.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2p-v15-ui-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android unit tests and debug APK
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Configure Android SDK without obsolete sdkmanager tools package
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-$HOME/.android/sdk}"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Android sdkmanager not found under $SDK_ROOT/cmdline-tools" >&2
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          sdk_status=${PIPESTATUS[1]}
+          set -o pipefail
+          if [ "$sdk_status" -ne 0 ]; then exit "$sdk_status"; fi
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Run Android tests and build APK
+        run: |
+          gradle -p android :app:testDebugUnitTest :app:assembleDebug --no-daemon
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Android-v0.16.0-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
+
+  relay:
+    name: Go Relay tests and race detector
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - name: Test Relay
+        working-directory: relay
+        run: go test -race -count=1 ./...
+      - name: Static analysis
+        working-directory: relay
+        run: go vet ./...
+
+  windows:
+    name: Windows tests, GUI-subsystem check and portable package
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Retrieve exact commit from the official GitHub archive API
+        id: source_archive
+        continue-on-error: true
+        shell: powershell
+        env:
+          GH_SOURCE_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-v14-archive-' + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $zip = Join-Path $archiveRoot 'source.zip'
+          $uri = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/zipball/' + $env:GITHUB_SHA
+          $headers = @{ Authorization = ('Bearer ' + $env:GH_SOURCE_TOKEN); 'User-Agent' = 'p2p-v014-selfhost-ci'; Accept = 'application/vnd.github+json' }
+          Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $zip -UseBasicParsing -TimeoutSec 120
+          if ((Get-Item $zip).Length -lt 1024) { throw 'GitHub repository ZIP archive is empty' }
+          $unpack = Join-Path $archiveRoot 'extracted'
+          Expand-Archive -Path $zip -DestinationPath $unpack -Force
+          $root = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
+          if (-not $root) { throw 'Official archive contains no repository directory' }
+          Get-ChildItem -LiteralPath $root.FullName -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force
+          }
+          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop/Cargo.toml'))) {
+            throw 'Missing desktop manifest after archive extraction'
+          }
+          Write-Host ('Verified source archive checkout for commit ' + $env:GITHUB_SHA)
+
+      - uses: actions/checkout@v4
+        if: steps.source_archive.outcome == 'failure'
+
+      - name: Prefer Git Bash over WSL for the Rust toolchain action
+        shell: powershell
+        run: |
+          $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          if (-not (Test-Path $bash)) { throw "Git Bash not installed at $bash" }
+          $gitBin = Split-Path -Parent $bash
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, $gitBin + [Environment]::NewLine, $utf8)
+          & $bash -c 'echo Git Bash ready'
+          if ($LASTEXITCODE -ne 0) { throw "Git Bash execution failed" }
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Windows build environment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "Runner: $env:RUNNER_NAME / $env:RUNNER_OS / $env:RUNNER_ARCH"
+          rustc --version
+          cargo --version
+          if (-not (Test-Path "desktop/Cargo.toml")) { throw "Missing desktop/Cargo.toml" }
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path desktop/Cargo.toml
+
+      - name: Build Windows release executable
+        run: cargo build --manifest-path desktop/Cargo.toml --release
+
+      - name: Verify release executable uses Windows GUI subsystem
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Resolve-Path 'desktop/target/release/p2p-remote.exe'
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw 'Release output is not a valid Windows PE executable'
+          }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ($peOffset -lt 64 -or $peOffset + 90 -gt $bytes.Length) {
+            throw 'Invalid PE header offset'
+          }
+          if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45) {
+            throw 'Missing PE signature'
+          }
+          $optionalHeader = $peOffset + 24
+          $subsystem = [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+          if ($subsystem -ne 2) {
+            throw "Expected Windows GUI subsystem (2), got $subsystem"
+          }
+          Write-Host 'Verified: Release EXE uses Windows GUI subsystem; no console window is requested.'
+
+      - name: Package phase-one portable test build and SHA-256
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\v0.16.0-portable'
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.16.0.zip'
+          $checksum = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.16.0.sha256'
+          # Self-hosted runners retain untracked files between jobs. Remove this
+          # version's previous staging output before recreating the portable package.
+          if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
+          foreach ($stale in @($zip, $checksum)) {
+            if (Test-Path $stale) { Remove-Item -LiteralPath $stale -Force }
+          }
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item 'desktop/target/release/p2p-remote.exe' (Join-Path $dist 'P2PRemote.exe') -Force
+          New-Item -ItemType File -Path (Join-Path $dist 'portable.flag') -Force | Out-Null
+          @'
+          P2P Remote V0.16.0 - UI redesign engineering build
+          Includes a per-user NSIS installer and a portable ZIP for engineering validation.
+          Configuration, DPAPI-protected device identity and logs are stored in the data folder beside this executable.
+          Portable data is isolated from the installed version; DPAPI remains bound to this Windows user and machine.
+          Close hides the main window to the notification area when tray initialization succeeds.
+          Use the tray menu's "完全退出" command to stop all sessions and exit.
+          '@ | Set-Content -Path (Join-Path $dist 'README.txt') -Encoding UTF8
+          Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          ($hash + '  P2PRemote-Portable-v0.16.0.zip') |
+            Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.16.0.sha256') -Encoding ASCII
+          Write-Host "Portable package SHA256: $hash"
+
+      - name: Upload Windows build inputs for installer job
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2p-windows-build-input
+          path: |
+            desktop/target/release/p2p-remote.exe
+            P2PRemote-Portable-v0.16.0.zip
+            P2PRemote-Portable-v0.16.0.sha256
+          retention-days: 1
+
+      - name: Verify local Windows NSIS installation
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+          $candidates = @()
+          if ($env:NSIS_HOME) { $candidates += (Join-Path $env:NSIS_HOME 'makensis.exe') }
+          if ($env:NSIS_HOME) { $candidates += $env:NSIS_HOME }
+          if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles 'NSIS\makensis.exe') }
+          if ($programFilesX86) { $candidates += (Join-Path $programFilesX86 'NSIS\makensis.exe') }
+          $command = Get-Command makensis.exe -ErrorAction SilentlyContinue
+          if ($command) { $candidates += $command.Source }
+          $makensis = $candidates | Where-Object { $_ -and (Test-Path $_ -PathType Leaf) } | Select-Object -First 1
+          if (-not $makensis) {
+            throw 'NSIS 3.x is not installed on this Windows self-hosted runner. Install NSIS 3.10 or newer once on the runner (default folder: C:\Program Files (x86)\NSIS), or set machine environment variable NSIS_HOME to the NSIS folder. Then restart the GitHub Actions runner service.'
+          }
+          $nsisDir = Split-Path -Parent $makensis
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, $nsisDir + [Environment]::NewLine, $utf8)
+          $env:PATH = $nsisDir + ';' + $env:PATH
+          & $makensis /VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS compiler verification failed' }
+          Write-Host "Using local Windows NSIS: $makensis"
+
+      - name: Build Windows per-user NSIS installer
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'desktop\target\release\p2p-remote.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "Windows release executable not found at expected path: $exe"
+          }
+          $exe = (Resolve-Path -LiteralPath $exe).Path
+          Write-Host "Embedding Windows executable into installer: $exe"
+          Push-Location installer
+          try {
+            & makensis.exe -V3 "/DAPP_SOURCE_EXE=$exe" P2PRemote.nsi
+            if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          $installer = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Setup-v0.16.0.exe'
+          if (-not (Test-Path $installer) -or (Get-Item $installer).Length -lt 100000) {
+            throw 'NSIS installer was not generated or is unexpectedly small'
+          }
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          ($hash + '  P2PRemote-Setup-v0.16.0.exe') |
+            Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Setup-v0.16.0.sha256') -Encoding ASCII
+          Write-Host "Windows installer SHA256: $hash"
+
+      - name: Upload Windows installer, portable package and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Windows-v0.16.0
+          path: |
+            P2PRemote-Setup-v0.16.0.exe
+            P2PRemote-Setup-v0.16.0.sha256
+            P2PRemote-Portable-v0.16.0.zip
+            P2PRemote-Portable-v0.16.0.sha256
+          if-no-files-found: error
+          retention-days: 14
