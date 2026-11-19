@@ -7,7 +7,7 @@ Unicode true
 !define APP_EXE "P2PRemote.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\P2PRemote"
 Name "${APP_NAME} ${APP_VERSION}"
-OutFile "..\P2PRemote-Setup-v${APP_VERSION}.exe"
+OutFile "../P2PRemote-Setup-v${APP_VERSION}.exe"
 InstallDir "$LOCALAPPDATA\Programs\P2P Remote"
 RequestExecutionLevel user
 SetShellVarContext current
@@ -29,7 +29,7 @@ VIAddVersionKey /LANG=2052 "FileDescription" "P2P Remote Desktop Client"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 Section "P2P Remote" SEC_MAIN
   SetOutPath "$INSTDIR"
-  File /oname=${APP_EXE} "..\desktop\target\release\p2p-remote.exe"
+  File /oname=${APP_EXE} "../desktop/target/release/p2p-remote.exe"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\P2P Remote"
   CreateShortcut "$SMPROGRAMS\P2P Remote\P2P Remote.lnk" "$INSTDIR${APP_EXE}"
