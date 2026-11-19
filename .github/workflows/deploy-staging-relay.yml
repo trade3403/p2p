@@ -161,6 +161,7 @@ jobs:
               --request POST "$url" \
               --header "Authorization: Bearer ${TEST_RELAY_ACCESS_TOKEN}" \
               --header 'Content-Type: application/json' \
+              --header 'X-Forwarded-Proto: https' \
               --data '{}')"
             if [ "$status" != "400" ] || ! grep -q '"error":"invalid device registration"' "$body"; then
               echo "::error::Expected V0.15 registration handler JSON 400 from $url; received HTTP $status"
