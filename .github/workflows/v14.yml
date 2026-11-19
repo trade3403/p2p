@@ -20,6 +20,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  nsis:
+    name: Prepare checksum-verified NSIS toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download official NSIS 3.13 archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected='BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8'
+          mkdir -p dist/nsis
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 \
+            'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13.zip' \
+            --output dist/nsis/nsis-3.13.zip
+          actual="$(sha256sum dist/nsis/nsis-3.13.zip | awk '{print toupper($1)}')"
+          if [ "$actual" != "$expected" ]; then
+            echo "NSIS checksum mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
+          test "$(stat -c%s dist/nsis/nsis-3.13.zip)" -gt 1000000
+          echo "Verified NSIS 3.13 SHA-256: $actual"
+      - name: Publish NSIS toolchain artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2p-nsis-3.13
+          path: dist/nsis/nsis-3.13.zip
+          retention-days: 1
+
   android:
     name: Android unit tests and debug APK
     runs-on: [self-hosted, Linux, X64]
@@ -82,6 +110,7 @@ jobs:
         run: go vet ./...
 
   windows:
+    needs: [nsis]
     name: Windows tests, GUI-subsystem check and portable package
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
@@ -169,65 +198,35 @@ jobs:
           }
           Write-Host 'Verified: Release EXE uses Windows GUI subsystem; no console window is requested.'
 
-      - name: Install or locate verified portable NSIS 3.13
+      - name: Download verified NSIS toolchain from preparation job
+        uses: actions/download-artifact@v4
+        with:
+          name: p2p-nsis-3.13
+          path: ${{ runner.temp }}/p2p-nsis
+
+      - name: Install portable NSIS toolchain locally
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '3.13'
+          $archive = Join-Path $env:RUNNER_TEMP 'p2p-nsis/nsis-3.13.zip'
           $expectedSha256 = 'BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8'
-          $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
-          $candidates = @()
-          if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles 'NSIS\makensis.exe') }
-          if ($programFilesX86) { $candidates += (Join-Path $programFilesX86 'NSIS\makensis.exe') }
-          $existing = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-          if ($existing) {
-            Write-Host "Using preinstalled NSIS: $existing"
-            $makensis = $existing
-          } else {
-            $toolsRoot = Join-Path $env:RUNNER_TEMP 'p2p-tools'
-            $nsisRoot = Join-Path $toolsRoot "nsis-$version"
-            $archive = Join-Path $toolsRoot "nsis-$version.zip"
-            New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
-            $urls = @(
-              "https://github.com/egoist/mygo/releases/download/nsis-$version/nsis-$version.zip",
-              "https://downloads.sourceforge.net/project/nsis/NSIS%203/$version/nsis-$version.zip"
-            )
-            $downloaded = $false
-            foreach ($uri in $urls) {
-              Write-Host "Trying NSIS mirror: $uri"
-              if (Test-Path $archive) { Remove-Item $archive -Force }
-              & curl.exe --fail --location --silent --show-error --retry 2 --retry-all-errors --connect-timeout 20 --max-time 180 --output $archive $uri
-              if ($LASTEXITCODE -eq 0 -and (Test-Path $archive) -and (Get-Item $archive).Length -gt 1000000) {
-                $actualSha256 = (Get-FileHash $archive -Algorithm SHA256).Hash.ToUpperInvariant()
-                if ($actualSha256 -eq $expectedSha256) {
-                  $downloaded = $true
-                  Write-Host "Downloaded and verified NSIS archive from $uri"
-                  break
-                }
-                Write-Warning "Checksum mismatch for mirror $uri; trying next mirror"
-              } else {
-                Write-Warning "Download failed from $uri; trying next mirror"
-              }
-            }
-            if (-not $downloaded) {
-              throw 'Could not download a checksum-verified NSIS 3.13 archive from any configured mirror.'
-            }
-            if (Test-Path $nsisRoot) { Remove-Item $nsisRoot -Recurse -Force }
-            New-Item -ItemType Directory -Force -Path $nsisRoot | Out-Null
-            Expand-Archive -Path $archive -DestinationPath $nsisRoot -Force
-            $found = Get-ChildItem -LiteralPath $nsisRoot -Filter makensis.exe -File -Recurse | Select-Object -First 1
-            if (-not $found) { throw 'Verified NSIS archive did not contain makensis.exe' }
-            $makensis = $found.FullName
+          if (-not (Test-Path $archive)) { throw "NSIS artifact not found: $archive" }
+          $actualSha256 = (Get-FileHash $archive -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "NSIS artifact SHA-256 mismatch: $actualSha256"
           }
-
-          $nsisDir = Split-Path -Parent $makensis
+          $nsisRoot = Join-Path $env:RUNNER_TEMP 'p2p-nsis/extracted'
+          New-Item -ItemType Directory -Force -Path $nsisRoot | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $nsisRoot -Force
+          $found = Get-ChildItem -LiteralPath $nsisRoot -Filter makensis.exe -File -Recurse | Select-Object -First 1
+          if (-not $found) { throw 'NSIS artifact does not contain makensis.exe' }
+          $nsisDir = Split-Path -Parent $found.FullName
           $utf8 = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::AppendAllText($env:GITHUB_PATH, $nsisDir + [Environment]::NewLine, $utf8)
           $env:PATH = $nsisDir + ';' + $env:PATH
-          & $makensis /VERSION
+          & $found.FullName /VERSION
           if ($LASTEXITCODE -ne 0) { throw 'NSIS makensis verification failed' }
-          Write-Host "Verified NSIS compiler: $makensis"
+          Write-Host "Installed verified NSIS toolchain from job artifact: $($found.FullName)"
 
       - name: Build per-user Windows installer with NSIS
         run: |
