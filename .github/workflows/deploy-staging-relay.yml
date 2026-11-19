@@ -64,11 +64,11 @@ jobs:
           # Locate the pre-existing test-only token file without printing its contents.
           ENV_FILE=""
           for candidate in \
+            "$HOME/.config/p2p-relay-test/.env" \
             "$HOME/p2p-relay-test-source/deploy/.env.test" \
             "$HOME/p2p-relay-test-source/.env.test" \
-            "$HOME/.config/p2p-relay-test/.env" \
             "$HOME/.env.p2ptest"; do
-            if [ -f "$candidate" ] && grep -q '^TEST_RELAY_ACCESS_TOKEN=.' "$candidate"; then
+            if [ -f "$candidate" ] && grep -q '^RELAY_ACCESS_TOKEN=.' "$candidate"; then
               ENV_FILE="$candidate"
               break
             fi
@@ -79,13 +79,21 @@ jobs:
             exit 1
           fi
           echo "P2P_STAGING_ENV_FILE=$ENV_FILE" >> "$GITHUB_ENV"
-          echo "Existing test token file found; its contents were not displayed."
+          echo "Existing test token file found; RELAY_ACCESS_TOKEN is present; its contents were not displayed."
 
       - name: Build and replace only p2p-relay-test
         shell: bash
         run: |
           set -euo pipefail
           ENV_FILE="$P2P_STAGING_ENV_FILE"
+          # The existing server env uses RELAY_ACCESS_TOKEN; the isolated
+          # staging Compose file expects TEST_RELAY_ACCESS_TOKEN. Map it in
+          # process memory without changing or printing the original token.
+          set -a
+          . "$ENV_FILE"
+          set +a
+          test -n "${RELAY_ACCESS_TOKEN:-}"
+          export TEST_RELAY_ACCESS_TOKEN="$RELAY_ACCESS_TOKEN"
           if [[ "${P2P_DOCKER_SUDO:-false}" == "true" ]]; then
             DOCKER=(sudo -n docker)
           else
@@ -93,7 +101,6 @@ jobs:
           fi
           "${DOCKER[@]}" compose \
             --project-name p2p-relay-test \
-            --env-file "$ENV_FILE" \
             --file deploy/compose.test.yml \
             up -d --build --force-recreate --no-deps relay-test
 
@@ -107,7 +114,8 @@ jobs:
           # during prerequisite checks; never print its contents.
           . "$ENV_FILE"
           set +a
-          test -n "${TEST_RELAY_ACCESS_TOKEN:-}"
+          test -n "${RELAY_ACCESS_TOKEN:-}"
+          TEST_RELAY_ACCESS_TOKEN="$RELAY_ACCESS_TOKEN"
           if [[ "${P2P_DOCKER_SUDO:-false}" == "true" ]]; then
             DOCKER=(sudo -n docker)
           else
