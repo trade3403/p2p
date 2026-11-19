@@ -426,7 +426,7 @@ fn handle_control(command: &Control, index: usize) -> Result<(), String> {
 
 #[cfg(windows)]
 mod win_input {
-    use std::{mem, ptr};
+    use std::mem;
 
     const INPUT_MOUSE: u32 = 0;
     const INPUT_KEYBOARD: u32 = 1;
