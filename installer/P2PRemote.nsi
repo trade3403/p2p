@@ -28,7 +28,7 @@ VIAddVersionKey /LANG=2052 "FileDescription" "P2P Remote Desktop Client"
 Section "P2P Remote" SEC_MAIN
   SetShellVarContext current
   SetOutPath "$INSTDIR"
-  File /oname=${APP_EXE} "../desktop/target/release/p2p-remote.exe"
+  File /oname=${APP_EXE} "${APP_SOURCE_EXE}"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\P2P Remote"
   CreateShortcut "$SMPROGRAMS\P2P Remote\P2P Remote.lnk" "$INSTDIR${APP_EXE}"
