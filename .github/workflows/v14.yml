@@ -201,45 +201,58 @@ jobs:
             P2PRemote-Portable-v0.15.0.sha256
           retention-days: 1
 
-  installer:
-    name: Build Windows installer on Linux NSIS toolchain
-    needs: [windows]
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download Windows release executable
-        uses: actions/download-artifact@v4
-        with:
-          name: p2p-windows-build-input
-          path: dist/windows-input
-
-      - name: Install NSIS from Linux package manager
-        shell: bash
+      - name: Verify local Windows NSIS installation
+        shell: powershell
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y nsis
-          makensis -VERSION
+          $ErrorActionPreference = 'Stop'
+          $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+          $candidates = @()
+          if ($env:NSIS_HOME) { $candidates += (Join-Path $env:NSIS_HOME 'makensis.exe') }
+          if ($env:NSIS_HOME) { $candidates += $env:NSIS_HOME }
+          if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles 'NSIS\makensis.exe') }
+          if ($programFilesX86) { $candidates += (Join-Path $programFilesX86 'NSIS\makensis.exe') }
+          $command = Get-Command makensis.exe -ErrorAction SilentlyContinue
+          if ($command) { $candidates += $command.Source }
+          $makensis = $candidates | Where-Object { $_ -and (Test-Path $_ -PathType Leaf) } | Select-Object -First 1
+          if (-not $makensis) {
+            throw 'NSIS 3.x is not installed on this Windows self-hosted runner. Install NSIS 3.10 or newer once on the runner (default folder: C:\Program Files (x86)\NSIS), or set machine environment variable NSIS_HOME to the NSIS folder. Then restart the GitHub Actions runner service.'
+          }
+          $nsisDir = Split-Path -Parent $makensis
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, $nsisDir + [Environment]::NewLine, $utf8)
+          $env:PATH = $nsisDir + ';' + $env:PATH
+          & $makensis /VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS compiler verification failed' }
+          Write-Host "Using local Windows NSIS: $makensis"
 
-      - name: Stage Windows executable and compile installer
-        shell: bash
+      - name: Build Windows per-user NSIS installer
+        shell: powershell
         run: |
-          set -euo pipefail
-          mkdir -p desktop/target/release
-          cp dist/windows-input/p2p-remote.exe desktop/target/release/p2p-remote.exe
-          cd installer
-          makensis -V3 P2PRemote.nsi
-          test -s ../P2PRemote-Setup-v0.15.0.exe
-          cd ..
-          sha256sum P2PRemote-Setup-v0.15.0.exe | awk '{print tolower($1) "  P2PRemote-Setup-v0.15.0.exe"}' > P2PRemote-Setup-v0.15.0.sha256
+          $ErrorActionPreference = 'Stop'
+          Push-Location installer
+          try {
+            makensis.exe -V3 P2PRemote.nsi
+            if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          $installer = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Setup-v0.15.0.exe'
+          if (-not (Test-Path $installer) -or (Get-Item $installer).Length -lt 100000) {
+            throw 'NSIS installer was not generated or is unexpectedly small'
+          }
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          ($hash + '  P2PRemote-Setup-v0.15.0.exe') |
+            Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Setup-v0.15.0.sha256') -Encoding ASCII
+          Write-Host "Windows installer SHA256: $hash"
 
-      - name: Upload Windows installer
+      - name: Upload Windows installer, portable package and checksums
         uses: actions/upload-artifact@v4
         with:
-          name: P2PRemote-Windows-Installer-v0.15.0
+          name: P2PRemote-Windows-v0.15.0
           path: |
             P2PRemote-Setup-v0.15.0.exe
             P2PRemote-Setup-v0.15.0.sha256
+            P2PRemote-Portable-v0.15.0.zip
+            P2PRemote-Portable-v0.15.0.sha256
+          if-no-files-found: error
           retention-days: 14
