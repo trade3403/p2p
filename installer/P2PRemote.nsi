@@ -1,4 +1,3 @@
-!pragma codepage 65001
 Unicode true
 !include "MUI2.nsh"
 !define APP_NAME "P2P Remote"
@@ -10,7 +9,6 @@ Name "${APP_NAME} ${APP_VERSION}"
 OutFile "../P2PRemote-Setup-v${APP_VERSION}.exe"
 InstallDir "$LOCALAPPDATA\Programs\P2P Remote"
 RequestExecutionLevel user
-SetShellVarContext current
 ShowInstDetails show
 ShowUnInstDetails show
 VIProductVersion "0.15.0.0"
@@ -28,6 +26,7 @@ VIAddVersionKey /LANG=2052 "FileDescription" "P2P Remote Desktop Client"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 Section "P2P Remote" SEC_MAIN
+  SetShellVarContext current
   SetOutPath "$INSTDIR"
   File /oname=${APP_EXE} "../desktop/target/release/p2p-remote.exe"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -44,6 +43,7 @@ Section "P2P Remote" SEC_MAIN
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
 SectionEnd
 Section "Uninstall"
+  SetShellVarContext current
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "P2PRemote"
   Delete "$DESKTOP\P2P Remote.lnk"
   Delete "$SMPROGRAMS\P2P Remote\P2P Remote.lnk"
