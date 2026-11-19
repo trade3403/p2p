@@ -47,11 +47,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! sudo -n docker info >/dev/null 2>&1; then
-            echo "::error::Runner lacks non-interactive Docker deployment permission. No Docker or production changes were attempted."
+          # Preserve the runner's existing Docker access model. Prefer direct
+          # docker-group access; use non-interactive sudo only when that is how
+          # this runner was originally provisioned. Never change host permissions.
+          if docker info >/dev/null 2>&1; then
+            echo "P2P_DOCKER_SUDO=false" >> "$GITHUB_ENV"
+            docker compose version
+          elif sudo -n docker info >/dev/null 2>&1; then
+            echo "P2P_DOCKER_SUDO=true" >> "$GITHUB_ENV"
+            sudo -n docker compose version
+          else
+            echo "::error::Runner has neither direct Docker access nor preconfigured non-interactive sudo access. No host permissions or production services were changed."
             exit 1
           fi
-          sudo -n docker compose version
 
           # Locate the pre-existing test-only token file without printing its contents.
           ENV_FILE=""
@@ -78,7 +86,12 @@ jobs:
         run: |
           set -euo pipefail
           ENV_FILE="$P2P_STAGING_ENV_FILE"
-          sudo -n docker compose \
+          if [[ "${P2P_DOCKER_SUDO:-false}" == "true" ]]; then
+            DOCKER=(sudo -n docker)
+          else
+            DOCKER=(docker)
+          fi
+          "${DOCKER[@]}" compose \
             --project-name p2p-relay-test \
             --env-file "$ENV_FILE" \
             --file deploy/compose.test.yml \
@@ -88,12 +101,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ENV_FILE="$HOME/p2p-relay-test-source/deploy/.env.test"
+          ENV_FILE="$P2P_STAGING_ENV_FILE"
           set -a
-          # The file is administrator-managed and contains only the test token.
+          # Reuse the exact administrator-managed test env file discovered
+          # during prerequisite checks; never print its contents.
           . "$ENV_FILE"
           set +a
           test -n "${TEST_RELAY_ACCESS_TOKEN:-}"
+          if [[ "${P2P_DOCKER_SUDO:-false}" == "true" ]]; then
+            DOCKER=(sudo -n docker)
+          else
+            DOCKER=(docker)
+          fi
 
           for attempt in $(seq 1 20); do
             if curl --fail --silent --show-error http://127.0.0.1:18080/healthz | grep -qx 'ok'; then
@@ -128,5 +147,5 @@ jobs:
           probe http://127.0.0.1:18080/api/v1/devices/register
           probe https://p2ptest.aikissgo.com/api/v1/devices/register
 
-          sudo -n docker inspect p2p-relay-test-relay-test-1 \
-            --format 'Deployed image={{.Image}} container={{.Id}} status={{.State.Status}}' || true
+          "${DOCKER[@]}" inspect p2p-relay-test-relay-test-1 \
+            --format 'Deployed image={{.Image}} container={{.Id}} status={{.State.Status}}'
