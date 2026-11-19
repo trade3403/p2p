@@ -20,34 +20,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  nsis:
-    name: Prepare checksum-verified NSIS toolchain
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Download official NSIS 3.13 archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected='BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8'
-          mkdir -p dist/nsis
-          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 \
-            'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13.zip' \
-            --output dist/nsis/nsis-3.13.zip
-          actual="$(sha256sum dist/nsis/nsis-3.13.zip | awk '{print toupper($1)}')"
-          if [ "$actual" != "$expected" ]; then
-            echo "NSIS checksum mismatch: expected $expected, got $actual" >&2
-            exit 1
-          fi
-          test "$(stat -c%s dist/nsis/nsis-3.13.zip)" -gt 1000000
-          echo "Verified NSIS 3.13 SHA-256: $actual"
-      - name: Publish NSIS toolchain artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: p2p-nsis-3.13
-          path: dist/nsis/nsis-3.13.zip
-          retention-days: 1
-
   android:
     name: Android unit tests and debug APK
     runs-on: [self-hosted, Linux, X64]
@@ -110,7 +82,6 @@ jobs:
         run: go vet ./...
 
   windows:
-    needs: [nsis]
     name: Windows tests, GUI-subsystem check and portable package
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
@@ -198,56 +169,6 @@ jobs:
           }
           Write-Host 'Verified: Release EXE uses Windows GUI subsystem; no console window is requested.'
 
-      - name: Download verified NSIS toolchain from preparation job
-        uses: actions/download-artifact@v4
-        with:
-          name: p2p-nsis-3.13
-          path: ${{ runner.temp }}/p2p-nsis
-
-      - name: Install portable NSIS toolchain locally
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $archive = Join-Path $env:RUNNER_TEMP 'p2p-nsis/nsis-3.13.zip'
-          $expectedSha256 = 'BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8'
-          if (-not (Test-Path $archive)) { throw "NSIS artifact not found: $archive" }
-          $actualSha256 = (Get-FileHash $archive -Algorithm SHA256).Hash.ToUpperInvariant()
-          if ($actualSha256 -ne $expectedSha256) {
-            throw "NSIS artifact SHA-256 mismatch: $actualSha256"
-          }
-          $nsisRoot = Join-Path $env:RUNNER_TEMP 'p2p-nsis/extracted'
-          New-Item -ItemType Directory -Force -Path $nsisRoot | Out-Null
-          Expand-Archive -Path $archive -DestinationPath $nsisRoot -Force
-          $found = Get-ChildItem -LiteralPath $nsisRoot -Filter makensis.exe -File -Recurse | Select-Object -First 1
-          if (-not $found) { throw 'NSIS artifact does not contain makensis.exe' }
-          $nsisDir = Split-Path -Parent $found.FullName
-          $utf8 = New-Object System.Text.UTF8Encoding($false)
-          [System.IO.File]::AppendAllText($env:GITHUB_PATH, $nsisDir + [Environment]::NewLine, $utf8)
-          $env:PATH = $nsisDir + ';' + $env:PATH
-          & $found.FullName /VERSION
-          if ($LASTEXITCODE -ne 0) { throw 'NSIS makensis verification failed' }
-          Write-Host "Installed verified NSIS toolchain from job artifact: $($found.FullName)"
-
-      - name: Build per-user Windows installer with NSIS
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Push-Location installer
-          try {
-            makensis /V3 P2PRemote.nsi
-            if ($LASTEXITCODE -ne 0) { throw "NSIS installer compilation failed with exit code $LASTEXITCODE" }
-          } finally { Pop-Location }
-          if (-not (Test-Path "P2PRemote-Setup-v0.15.0.exe")) { throw "NSIS output file was not generated" }
-          Write-Host "Built per-user NSIS installer; user profile and logs remain outside install directory."
-
-      - name: Hash Windows installer
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $installer = Resolve-Path 'P2PRemote-Setup-v0.15.0.exe'
-          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          ($hash + '  P2PRemote-Setup-v0.14.0.exe') |
-            Out-File 'P2PRemote-Setup-v0.15.0.sha256' -Encoding ASCII
-          Write-Host "Installer SHA256: $hash"
-
       - name: Package phase-one portable test build and SHA-256
         run: |
           $ErrorActionPreference = 'Stop'
@@ -270,13 +191,55 @@ jobs:
             Out-File (Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.15.0.sha256') -Encoding ASCII
           Write-Host "Portable package SHA256: $hash"
 
-      - name: Upload phase-one artifact
+      - name: Upload Windows build inputs for installer job
         uses: actions/upload-artifact@v4
         with:
-          name: P2PRemote-Windows-v0.15.0
+          name: p2p-windows-build-input
           path: |
-            P2PRemote-Portable-v0.14.2.zip
+            desktop/target/release/p2p-remote.exe
+            P2PRemote-Portable-v0.15.0.zip
             P2PRemote-Portable-v0.15.0.sha256
-            P2PRemote-Setup-v0.14.0.exe
+          retention-days: 1
+
+  installer:
+    name: Build Windows installer on Linux NSIS toolchain
+    needs: [windows]
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows release executable
+        uses: actions/download-artifact@v4
+        with:
+          name: p2p-windows-build-input
+          path: dist/windows-input
+
+      - name: Install NSIS from Linux package manager
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y nsis
+          makensis -VERSION
+
+      - name: Stage Windows executable and compile installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p desktop/target/release
+          cp dist/windows-input/p2p-remote.exe desktop/target/release/p2p-remote.exe
+          cd installer
+          makensis -V3 P2PRemote.nsi
+          test -s ../P2PRemote-Setup-v0.15.0.exe
+          cd ..
+          sha256sum P2PRemote-Setup-v0.15.0.exe | awk '{print tolower($1) "  P2PRemote-Setup-v0.15.0.exe"}' > P2PRemote-Setup-v0.15.0.sha256
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-Windows-Installer-v0.15.0
+          path: |
+            P2PRemote-Setup-v0.15.0.exe
             P2PRemote-Setup-v0.15.0.sha256
           retention-days: 14
