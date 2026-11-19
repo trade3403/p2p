@@ -1,0 +1,123 @@
+name: P2P V0.15 Staging Relay Deploy
+
+on:
+  push:
+    branches: ['feature/v0.15-*']
+    paths:
+      - 'relay/**'
+      - 'deploy/compose.test.yml'
+      - '.github/workflows/deploy-staging-relay.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2p-v015-staging-relay
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test V0.15 Go Relay
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - name: Unit tests with race detector
+        working-directory: relay
+        run: go test -race -count=1 ./...
+      - name: Static analysis
+        working-directory: relay
+        run: go vet ./...
+
+  deploy-staging:
+    name: Deploy V0.15 to isolated p2ptest Relay
+    needs: test
+    if: github.ref == 'refs/heads/feature/v0.15-ui-redesign'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify isolated staging deployment prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV_FILE="$HOME/p2p-relay-test-source/deploy/.env.test"
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "::error::Missing persistent test-only environment file: $ENV_FILE"
+            exit 1
+          fi
+          if ! grep -q '^TEST_RELAY_ACCESS_TOKEN=.' "$ENV_FILE"; then
+            echo "::error::TEST_RELAY_ACCESS_TOKEN is missing from the test environment file"
+            exit 1
+          fi
+          if ! sudo -n docker info >/dev/null 2>&1; then
+            echo "::error::Runner lacks passwordless, restricted Docker deployment permission. No Docker or production changes were attempted."
+            echo "An administrator must authorize the existing runner for the staging Compose deployment command."
+            exit 1
+          fi
+          sudo -n docker compose version
+          echo "Staging env file and non-interactive Docker permission verified."
+
+      - name: Build and replace only p2p-relay-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV_FILE="$HOME/p2p-relay-test-source/deploy/.env.test"
+          sudo -n docker compose \
+            --project-name p2p-relay-test \
+            --env-file "$ENV_FILE" \
+            --file deploy/compose.test.yml \
+            up -d --build --force-recreate --no-deps relay-test
+
+      - name: Verify deployed V0.15 Relay locally and through HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV_FILE="$HOME/p2p-relay-test-source/deploy/.env.test"
+          set -a
+          # The file is administrator-managed and contains only the test token.
+          . "$ENV_FILE"
+          set +a
+          test -n "${TEST_RELAY_ACCESS_TOKEN:-}"
+
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/healthz | grep -qx 'ok'; then
+              break
+            fi
+            if [ "$attempt" -eq 20 ]; then
+              echo "::error::Staging Relay health check did not become ready"
+              exit 1
+            fi
+            sleep 3
+          done
+
+          probe() {
+            local url="$1"
+            local body status
+            body="$(mktemp)"
+            status="$(curl --silent --show-error --output "$body" --write-out '%{http_code}' \
+              --request POST "$url" \
+              --header "Authorization: Bearer ${TEST_RELAY_ACCESS_TOKEN}" \
+              --header 'Content-Type: application/json' \
+              --data '{}')"
+            if [ "$status" != "400" ] || ! grep -q '"error":"invalid device registration"' "$body"; then
+              echo "::error::Expected V0.15 registration handler JSON 400 from $url; received HTTP $status"
+              cat "$body"
+              rm -f "$body"
+              return 1
+            fi
+            rm -f "$body"
+            echo "V0.15 registration route verified: $url (HTTP 400 application response)"
+          }
+
+          probe http://127.0.0.1:18080/api/v1/devices/register
+          probe https://p2ptest.aikissgo.com/api/v1/devices/register
+
+          sudo -n docker inspect p2p-relay-test-relay-test-1 \
+            --format 'Deployed image={{.Image}} container={{.Id}} status={{.State.Status}}' || true
