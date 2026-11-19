@@ -99,6 +99,26 @@ jobs:
           else
             DOCKER=(docker)
           fi
+
+          # Preserve any existing on-container pairing registry before handoff.
+          # The legacy container has no bind/volume mounts; keep it stopped for
+          # rollback rather than deleting it. Copy registry only if it exists.
+          if "${DOCKER[@]}" inspect p2p-relay-test >/dev/null 2>&1; then
+            if "${DOCKER[@]}" exec p2p-relay-test test -f /data/devices.json 2>/dev/null; then
+              BACKUP_DIR="$HOME/p2p-relay-test-backup"
+              mkdir -p "$BACKUP_DIR"
+              chmod 700 "$BACKUP_DIR"
+              "${DOCKER[@]}" cp p2p-relay-test:/data/devices.json \
+                "$BACKUP_DIR/devices-$(date -u +%Y%m%dT%H%M%SZ).json"
+              chmod 600 "$BACKUP_DIR"/devices-*.json
+              echo "Existing device registry backed up outside the container."
+            else
+              echo "Legacy container has no /data/devices.json registry; no persistent registry file to migrate."
+            fi
+            "${DOCKER[@]}" stop p2p-relay-test
+            echo "Legacy p2p-relay-test stopped and retained for rollback."
+          fi
+
           "${DOCKER[@]}" compose \
             --project-name p2p-relay-test \
             --file deploy/compose.test.yml \
