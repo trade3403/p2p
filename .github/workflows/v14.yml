@@ -189,15 +189,29 @@ jobs:
             $nsisRoot = Join-Path $toolsRoot "nsis-$version"
             $archive = Join-Path $toolsRoot "nsis-$version.zip"
             New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
-            $uri = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$version/nsis-$version.zip"
-            Write-Host "Downloading official portable NSIS $version archive"
-            Invoke-WebRequest -Uri $uri -OutFile $archive -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 180
-            if (-not (Test-Path $archive) -or (Get-Item $archive).Length -lt 1000000) {
-              throw 'Downloaded NSIS archive is missing or unexpectedly small'
+            $urls = @(
+              "https://github.com/egoist/mygo/releases/download/nsis-$version/nsis-$version.zip",
+              "https://downloads.sourceforge.net/project/nsis/NSIS%203/$version/nsis-$version.zip"
+            )
+            $downloaded = $false
+            foreach ($uri in $urls) {
+              Write-Host "Trying NSIS mirror: $uri"
+              if (Test-Path $archive) { Remove-Item $archive -Force }
+              & curl.exe --fail --location --silent --show-error --retry 2 --retry-all-errors --connect-timeout 20 --max-time 180 --output $archive $uri
+              if ($LASTEXITCODE -eq 0 -and (Test-Path $archive) -and (Get-Item $archive).Length -gt 1000000) {
+                $actualSha256 = (Get-FileHash $archive -Algorithm SHA256).Hash.ToUpperInvariant()
+                if ($actualSha256 -eq $expectedSha256) {
+                  $downloaded = $true
+                  Write-Host "Downloaded and verified NSIS archive from $uri"
+                  break
+                }
+                Write-Warning "Checksum mismatch for mirror $uri; trying next mirror"
+              } else {
+                Write-Warning "Download failed from $uri; trying next mirror"
+              }
             }
-            $actualSha256 = (Get-FileHash $archive -Algorithm SHA256).Hash.ToUpperInvariant()
-            if ($actualSha256 -ne $expectedSha256) {
-              throw "NSIS archive SHA-256 mismatch. Expected $expectedSha256, got $actualSha256"
+            if (-not $downloaded) {
+              throw 'Could not download a checksum-verified NSIS 3.13 archive from any configured mirror.'
             }
             if (Test-Path $nsisRoot) { Remove-Item $nsisRoot -Recurse -Force }
             New-Item -ItemType Directory -Force -Path $nsisRoot | Out-Null
