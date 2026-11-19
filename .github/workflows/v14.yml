@@ -236,9 +236,15 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'desktop\target\release\p2p-remote.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "Windows release executable not found at expected path: $exe"
+          }
+          $exe = (Resolve-Path -LiteralPath $exe).Path
+          Write-Host "Embedding Windows executable into installer: $exe"
           Push-Location installer
           try {
-            makensis.exe -V3 P2PRemote.nsi
+            & makensis.exe -V3 "/DAPP_SOURCE_EXE=$exe" P2PRemote.nsi
             if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
           } finally {
             Pop-Location
