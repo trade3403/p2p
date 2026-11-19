@@ -47,28 +47,37 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ENV_FILE="$HOME/p2p-relay-test-source/deploy/.env.test"
-          if [ ! -f "$ENV_FILE" ]; then
-            echo "::error::Missing persistent test-only environment file: $ENV_FILE"
-            exit 1
-          fi
-          if ! grep -q '^TEST_RELAY_ACCESS_TOKEN=.' "$ENV_FILE"; then
-            echo "::error::TEST_RELAY_ACCESS_TOKEN is missing from the test environment file"
-            exit 1
-          fi
           if ! sudo -n docker info >/dev/null 2>&1; then
-            echo "::error::Runner lacks passwordless, restricted Docker deployment permission. No Docker or production changes were attempted."
-            echo "An administrator must authorize the existing runner for the staging Compose deployment command."
+            echo "::error::Runner lacks non-interactive Docker deployment permission. No Docker or production changes were attempted."
             exit 1
           fi
           sudo -n docker compose version
-          echo "Staging env file and non-interactive Docker permission verified."
+
+          # Locate the pre-existing test-only token file without printing its contents.
+          ENV_FILE=""
+          for candidate in \
+            "$HOME/p2p-relay-test-source/deploy/.env.test" \
+            "$HOME/p2p-relay-test-source/.env.test" \
+            "$HOME/.config/p2p-relay-test/.env" \
+            "$HOME/.env.p2ptest"; do
+            if [ -f "$candidate" ] && grep -q '^TEST_RELAY_ACCESS_TOKEN=.' "$candidate"; then
+              ENV_FILE="$candidate"
+              break
+            fi
+          done
+          if [ -z "$ENV_FILE" ]; then
+            echo "::error::No existing test-only env file with TEST_RELAY_ACCESS_TOKEN was found in the documented runner locations."
+            echo "The workflow will not generate or replace the token because Windows/Android clients must use the same test token."
+            exit 1
+          fi
+          echo "P2P_STAGING_ENV_FILE=$ENV_FILE" >> "$GITHUB_ENV"
+          echo "Existing test token file found; its contents were not displayed."
 
       - name: Build and replace only p2p-relay-test
         shell: bash
         run: |
           set -euo pipefail
-          ENV_FILE="$HOME/p2p-relay-test-source/deploy/.env.test"
+          ENV_FILE="$P2P_STAGING_ENV_FILE"
           sudo -n docker compose \
             --project-name p2p-relay-test \
             --env-file "$ENV_FILE" \
