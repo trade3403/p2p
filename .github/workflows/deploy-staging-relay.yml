@@ -64,7 +64,7 @@ jobs:
           # Locate the pre-existing test-only token file without printing its contents.
           ENV_FILE=""
           for candidate in \
-            "$HOME/.config/p2p-relay-test/.env" \
+            "/home/ubuntu/.config/p2p-relay-test/.env" \
             "$HOME/p2p-relay-test-source/deploy/.env.test" \
             "$HOME/p2p-relay-test-source/.env.test" \
             "$HOME/.env.p2ptest"; do
