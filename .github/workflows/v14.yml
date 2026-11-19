@@ -173,9 +173,17 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\v0.15.0-portable'
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.15.0.zip'
+          $checksum = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.15.0.sha256'
+          # Self-hosted runners retain untracked files between jobs. Remove this
+          # version's previous staging output before recreating the portable package.
+          if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
+          foreach ($stale in @($zip, $checksum)) {
+            if (Test-Path $stale) { Remove-Item -LiteralPath $stale -Force }
+          }
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item 'desktop/target/release/p2p-remote.exe' (Join-Path $dist 'P2PRemote.exe') -Force
-          New-Item -ItemType File -Path (Join-Path $dist 'portable.flag') | Out-Null
+          New-Item -ItemType File -Path (Join-Path $dist 'portable.flag') -Force | Out-Null
           @'
           P2P Remote V0.15.0 - UI redesign engineering build
           Includes a per-user NSIS installer and a portable ZIP for engineering validation.
@@ -184,7 +192,6 @@ jobs:
           Close hides the main window to the notification area when tray initialization succeeds.
           Use the tray menu's "完全退出" command to stop all sessions and exit.
           '@ | Set-Content -Path (Join-Path $dist 'README.txt') -Encoding UTF8
-          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Portable-v0.15.0.zip'
           Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           ($hash + '  P2PRemote-Portable-v0.15.0.zip') |
