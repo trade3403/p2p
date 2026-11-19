@@ -318,25 +318,21 @@ fn start_input_worker(
     messages: Sender<String>,
 ) -> std::sync::mpsc::SyncSender<Control> {
     use std::sync::mpsc::{self, RecvTimeoutError};
-    use enigo::{Button, Direction, Enigo, Mouse, Settings};
     let (tx, rx) = mpsc::sync_channel::<Control>(128);
     std::thread::spawn(move || {
-        let Ok(mut enigo) = Enigo::new(&Settings::default()) else {
-            let _ = messages.send("远程输入初始化失败；请检查 Windows 桌面会话权限".into());
-            return;
-        };
+        let _ = messages.send("Windows 原生 SendInput 输入线程已启动".into());
         let mut held = false;
         let mut last_action = std::time::Instant::now();
         loop {
             if !allowed.load(Ordering::SeqCst) && held {
-                let _ = enigo.button(Button::Left, Direction::Release);
+                let _ = win_input::mouse_button(false, false);
                 held = false;
             }
             let command = match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(command) => command,
                 Err(RecvTimeoutError::Timeout) => {
                     if held && last_action.elapsed() > Duration::from_secs(20) {
-                        let _ = enigo.button(Button::Left, Direction::Release);
+                        let _ = win_input::mouse_button(false, false);
                         held = false;
                     }
                     continue;
@@ -345,29 +341,30 @@ fn start_input_worker(
             };
             if !allowed.load(Ordering::SeqCst) { continue; }
             last_action = std::time::Instant::now();
-            match command.kind.as_str() {
+            let result = match command.kind.as_str() {
                 "down" if valid_pointer(&command) => {
                     if !held {
-                        handle_control(&mut enigo, &command, monitor.load(Ordering::SeqCst));
-                        held = true;
-                    }
+                        let result = handle_control(&command, monitor.load(Ordering::SeqCst));
+                        if result.is_ok() { held = true; }
+                        result
+                    } else { Ok(()) }
                 }
                 "up" => {
-                    // Release even when pointer position is outside the current
-                    // monitor after a drag, display switch or zoom gesture.
-                    if held {
-                        let _ = enigo.button(Button::Left, Direction::Release);
-                        held = false;
-                    }
+                    let result = if held { win_input::mouse_button(false, false) } else { Ok(()) };
+                    held = false;
+                    result
                 }
                 "right_click" | "move" if valid_pointer(&command) =>
-                    handle_control(&mut enigo, &command, monitor.load(Ordering::SeqCst)),
+                    handle_control(&command, monitor.load(Ordering::SeqCst)),
                 "text" | "key" | "scroll" =>
-                    handle_control(&mut enigo, &command, monitor.load(Ordering::SeqCst)),
-                _ => {}
+                    handle_control(&command, monitor.load(Ordering::SeqCst)),
+                _ => Ok(()),
+            };
+            if let Err(error) = result {
+                let _ = messages.send(format!("远程输入执行失败：{error}"));
             }
         }
-        if held { let _ = enigo.button(Button::Left, Direction::Release); }
+        if held { let _ = win_input::mouse_button(false, false); }
     });
     tx
 }
@@ -382,76 +379,191 @@ fn valid_pointer(command: &Control) -> bool {
 }
 
 #[cfg(windows)]
-fn handle_control(enigo: &mut enigo::Enigo, command: &Control, index: usize) {
-    use enigo::{Axis, Button, Coordinate, Direction, Keyboard, Mouse};
+fn handle_control(command: &Control, index: usize) -> Result<(), String> {
     if command.kind == "text" {
         if let Some(value) = &command.text {
-            if value.chars().count() <= 250 { let _ = enigo.text(value); }
+            if value.chars().count() <= 250 { win_input::unicode_text(value)?; }
         }
-        return;
+        return Ok(());
     }
     if command.kind == "key" {
-        use enigo::Key;
-        let Some(name) = command.key.as_deref() else { return; };
-        if !crate::remote_ops::valid_remote_key(name) { return; }
-        // Whitelisted combinations are emitted with a guaranteed Control
-        // release, even if injecting the letter fails.
-        if let Some(letter) = match name {
-            "ctrl_a" => Some('a'), "ctrl_c" => Some('c'),
-            "ctrl_v" => Some('v'), "ctrl_x" => Some('x'),
-            "ctrl_z" => Some('z'), "ctrl_y" => Some('y'),
-            _ => None,
-        } {
-            if enigo.key(Key::Control, Direction::Press).is_ok() {
-                let _ = enigo.key(Key::Unicode(letter), Direction::Click);
-                let _ = enigo.key(Key::Control, Direction::Release);
+        if let Some(name) = command.key.as_deref() {
+            if crate::remote_ops::valid_remote_key(name) {
+                win_input::key(name)?;
             }
-            return;
         }
-        let key = match name {
-            "enter" => Key::Return,
-            "backspace" => Key::Backspace,
-            "tab" => Key::Tab,
-            "escape" => Key::Escape,
-            "delete" => Key::Delete,
-            "up" => Key::UpArrow,
-            "down" => Key::DownArrow,
-            "left" => Key::LeftArrow,
-            "right" => Key::RightArrow,
-            "home" => Key::Home,
-            "end" => Key::End,
-            "page_up" => Key::PageUp,
-            "page_down" => Key::PageDown,
-            "space" => Key::Space,
-            _ => return,
-        };
-        let _ = enigo.key(key, Direction::Click);
-        return;
+        return Ok(());
     }
     if command.kind == "scroll" {
         if let Some(delta) = command.delta {
             if (-10..=10).contains(&delta) && delta != 0 {
-                let _ = enigo.scroll(delta, Axis::Vertical);
+                win_input::wheel(delta)?;
             }
         }
-        return;
+        return Ok(());
     }
-    if !matches!(command.kind.as_str(), "down" | "up" | "move" | "right_click") { return; }
-    let (Some(x), Some(y)) = (command.x, command.y) else { return; };
+    if !matches!(command.kind.as_str(), "down" | "up" | "move" | "right_click") {
+        return Ok(());
+    }
+    let (Some(x), Some(y)) = (command.x, command.y) else { return Ok(()); };
     if !x.is_finite() || !y.is_finite()
-        || !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) { return; }
-    if let Ok(screens) = screenshots::Screen::all() {
-        if let Some(screen) = screens.get(index) {
-            let info = &screen.display_info;
-            let px = info.x + (x * (info.width.saturating_sub(1) as f64)) as i32;
-            let py = info.y + (y * (info.height.saturating_sub(1) as f64)) as i32;
-            let _ = enigo.move_mouse(px, py, Coordinate::Abs);
-            match command.kind.as_str() {
-                "down" => { let _ = enigo.button(Button::Left, Direction::Press); }
-                "up" => { let _ = enigo.button(Button::Left, Direction::Release); }
-                "right_click" => { let _ = enigo.button(Button::Right, Direction::Click); }
-                _ => {}
-            }
+        || !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+        return Ok(());
+    }
+    let screens = screenshots::Screen::all().map_err(|e| format!("读取显示器失败：{e}"))?;
+    let screen = screens.get(index).ok_or_else(|| "目标显示器不存在".to_string())?;
+    let info = &screen.display_info;
+    let px = info.x + (x * (info.width.saturating_sub(1) as f64)) as i32;
+    let py = info.y + (y * (info.height.saturating_sub(1) as f64)) as i32;
+    win_input::move_to(px, py)?;
+    match command.kind.as_str() {
+        "down" => win_input::mouse_button(true, false),
+        "up" => win_input::mouse_button(false, false),
+        "right_click" => win_input::right_click(),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+mod win_input {
+    use std::{mem, ptr};
+
+    const INPUT_MOUSE: u32 = 0;
+    const INPUT_KEYBOARD: u32 = 1;
+    const MOUSEEVENTF_MOVE: u32 = 0x0001;
+    const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+    const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
+    const MOUSEEVENTF_RIGHTUP: u32 = 0x0010;
+    const MOUSEEVENTF_WHEEL: u32 = 0x0800;
+    const MOUSEEVENTF_VIRTUALDESK: u32 = 0x4000;
+    const MOUSEEVENTF_ABSOLUTE: u32 = 0x8000;
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    const KEYEVENTF_UNICODE: u32 = 0x0004;
+    const SM_XVIRTUALSCREEN: i32 = 76;
+    const SM_YVIRTUALSCREEN: i32 = 77;
+    const SM_CXVIRTUALSCREEN: i32 = 78;
+    const SM_CYVIRTUALSCREEN: i32 = 79;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct MouseInput {
+        dx: i32, dy: i32, mouse_data: u32, flags: u32, time: u32, extra_info: usize,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct KeyboardInput {
+        vk: u16, scan: u16, flags: u32, time: u32, extra_info: usize,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct HardwareInput { message: u32, param_l: u16, param_h: u16 }
+    #[repr(C)]
+    union InputData { mouse: MouseInput, keyboard: KeyboardInput, hardware: HardwareInput }
+    #[repr(C)]
+    struct Input { kind: u32, data: InputData }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
+        fn GetSystemMetrics(index: i32) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    fn submit(input: Input) -> Result<(), String> {
+        let sent = unsafe { SendInput(1, &input, mem::size_of::<Input>() as i32) };
+        if sent == 1 { Ok(()) } else {
+            let error = unsafe { GetLastError() };
+            Err(format!("SendInput 未注入事件（返回 {sent}，Win32 错误 {error}）。若目标程序以管理员身份运行，请以相同权限启动 P2P Remote"))
         }
+    }
+
+    fn mouse(flags: u32, data: u32) -> Result<(), String> {
+        submit(Input { kind: INPUT_MOUSE, data: InputData { mouse: MouseInput {
+            dx: 0, dy: 0, mouse_data: data, flags, time: 0, extra_info: 0,
+        }}})
+    }
+
+    pub fn move_to(x: i32, y: i32) -> Result<(), String> {
+        let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1);
+        let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1);
+        let dx = (((x - left) as i64 * 65535) / (width - 1).max(1) as i64).clamp(0, 65535) as i32;
+        let dy = (((y - top) as i64 * 65535) / (height - 1).max(1) as i64).clamp(0, 65535) as i32;
+        submit(Input { kind: INPUT_MOUSE, data: InputData { mouse: MouseInput {
+            dx, dy, mouse_data: 0,
+            flags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+            time: 0, extra_info: 0,
+        }}})
+    }
+
+    pub fn mouse_button(down: bool, right: bool) -> Result<(), String> {
+        let flags = match (down, right) {
+            (true, false) => MOUSEEVENTF_LEFTDOWN,
+            (false, false) => MOUSEEVENTF_LEFTUP,
+            (true, true) => MOUSEEVENTF_RIGHTDOWN,
+            (false, true) => MOUSEEVENTF_RIGHTUP,
+        };
+        mouse(flags, 0)
+    }
+
+    pub fn right_click() -> Result<(), String> {
+        mouse_button(true, true)?;
+        mouse_button(false, true)
+    }
+
+    pub fn wheel(delta: i32) -> Result<(), String> {
+        mouse(MOUSEEVENTF_WHEEL, (delta * 120) as u32)
+    }
+
+    fn vk(name: &str) -> Option<u16> {
+        Some(match name {
+            "enter" => 0x0D, "backspace" => 0x08, "tab" => 0x09,
+            "escape" => 0x1B, "delete" => 0x2E, "up" => 0x26,
+            "down" => 0x28, "left" => 0x25, "right" => 0x27,
+            "home" => 0x24, "end" => 0x23, "page_up" => 0x21,
+            "page_down" => 0x22, "space" => 0x20,
+            _ => return None,
+        })
+    }
+
+    fn keyboard(vk: u16, flags: u32) -> Result<(), String> {
+        submit(Input { kind: INPUT_KEYBOARD, data: InputData { keyboard: KeyboardInput {
+            vk, scan: 0, flags, time: 0, extra_info: 0,
+        }}})
+    }
+
+    pub fn key(name: &str) -> Result<(), String> {
+        let combo = match name {
+            "ctrl_a" => Some(0x41), "ctrl_c" => Some(0x43),
+            "ctrl_v" => Some(0x56), "ctrl_x" => Some(0x58),
+            "ctrl_z" => Some(0x5A), "ctrl_y" => Some(0x59),
+            _ => None,
+        };
+        if let Some(letter) = combo {
+            keyboard(0x11, 0)?;
+            let result = keyboard(letter, 0).and_then(|_| keyboard(letter, KEYEVENTF_KEYUP));
+            let release = keyboard(0x11, KEYEVENTF_KEYUP);
+            result?;
+            return release;
+        }
+        if let Some(code) = vk(name) {
+            keyboard(code, 0)?;
+            keyboard(code, KEYEVENTF_KEYUP)?;
+        }
+        Ok(())
+    }
+
+    pub fn unicode_text(value: &str) -> Result<(), String> {
+        for unit in value.encode_utf16() {
+            submit(Input { kind: INPUT_KEYBOARD, data: InputData { keyboard: KeyboardInput {
+                vk: 0, scan: unit, flags: KEYEVENTF_UNICODE, time: 0, extra_info: 0,
+            }}})?;
+            submit(Input { kind: INPUT_KEYBOARD, data: InputData { keyboard: KeyboardInput {
+                vk: 0, scan: unit, flags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, time: 0, extra_info: 0,
+            }}})?;
+        }
+        Ok(())
     }
 }
