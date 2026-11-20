@@ -59,7 +59,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                 children: [
                   const Text('中转服务器', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                   const SizedBox(height: 6),
-                  const Text(
+                  Text(
                     defaultTargetPlatform == TargetPlatform.android
                         ? '使用 HTTPS/WSS 地址。访问口令由 Android Keystore 加密保存，不会返回 Flutter 页面。'
                         : '使用 HTTPS/WSS 地址。访问口令会保存在 Windows DPAPI 加密凭据库中，不会返回 Flutter 页面.',
@@ -152,7 +152,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                   Text('当前连接策略', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                   SizedBox(height: 10),
                   Text(
-                    'V0.18 首个桥接阶段沿用现有 WSS Relay、AES-256-GCM 会话协议和数字配对。LAN / UDP 路径将在保持原协议的前提下逐项接入。',
+                    'V0.19 Android 原生桥接阶段沿用现有 WSS Relay、AES-256-GCM 会话协议和数字配对。LAN / UDP 路径将在保持原协议的前提下逐项接入。',
                     style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.55),
                   ),
                 ],
