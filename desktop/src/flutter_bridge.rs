@@ -5,7 +5,7 @@ use crate::{
     host::{self, HostConfig},
     host_pairing::{self, PairingDecision},
     local_settings,
-    pairing_api::PairingApiClient,
+    pairing_api::{self, PairingApiClient},
     pairing_crypto::{self, DeviceIdentity, ViewerEphemeral},
     protocol,
     remote_ops,
@@ -409,6 +409,7 @@ impl Engine {
         shared.snapshot.pending_viewer_fingerprint = None;
         shared.snapshot.host_status = "本机共享已停止".into();
         shared.emit(json!({"type":"hostState","running":false}));
+        drop(shared);
         self.response(json!({"stopped": true}))
     }
 
@@ -419,6 +420,7 @@ impl Engine {
         let mut shared = shared_lock(&self.shared);
         shared.snapshot.allow_input = allowed;
         shared.emit(json!({"type":"permission","name":"remoteInput","allowed":allowed}));
+        drop(shared);
         self.response(json!({"allowed": allowed}))
     }
 
@@ -429,6 +431,7 @@ impl Engine {
         let mut shared = shared_lock(&self.shared);
         shared.snapshot.allow_clipboard = allowed;
         shared.emit(json!({"type":"permission","name":"clipboard","allowed":allowed}));
+        drop(shared);
         self.response(json!({"allowed": allowed}))
     }
 
@@ -625,6 +628,7 @@ impl Engine {
         shared.snapshot.viewer_status = "已手动断开".into();
         shared.frame = None;
         shared.emit(json!({"type":"viewerDisconnected"}));
+        drop(shared);
         self.response(json!({"disconnected": true}))
     }
 
@@ -738,6 +742,7 @@ impl Engine {
         shared.snapshot.viewer_connected = false;
         shared.snapshot.viewer_status = "本机凭据已撤销".into();
         shared.emit(json!({"type":"trustRevoked"}));
+        drop(shared);
         self.response(json!({"revoked":true}))
     }
 }
