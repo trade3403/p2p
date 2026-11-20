@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../app_theme.dart';
+import '../app_page.dart';
 import '../widgets/p2p_widgets.dart';
 
 class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
+  const SettingsScreen({super.key, required this.onNavigate});
+
+  final ValueChanged<AppPage> onNavigate;
 
   @override
   Widget build(BuildContext context) {
@@ -42,6 +45,29 @@ class SettingsScreen extends StatelessWidget {
                 title: '连接通知',
                 subtitle: '连接请求、断开和安全提醒',
                 value: '默认',
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 15),
+        PanelCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('更多设置', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 10),
+              _NavigationSetting(
+                icon: Icons.shield_outlined,
+                title: '安全与权限',
+                subtitle: '远程输入、剪贴板和设备信任',
+                onTap: () => onNavigate(AppPage.security),
+              ),
+              const Divider(color: P2PColors.outline),
+              _NavigationSetting(
+                icon: Icons.hub_rounded,
+                title: '网络连接',
+                subtitle: 'Relay、局域网直连和诊断',
+                onTap: () => onNavigate(AppPage.network),
               ),
             ],
           ),
@@ -127,6 +153,32 @@ class _SettingRow extends StatelessWidget {
           Text(value, style: const TextStyle(color: P2PColors.muted, fontSize: 12)),
         ],
       ),
+    );
+  }
+}
+
+class _NavigationSetting extends StatelessWidget {
+  const _NavigationSetting({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(icon, color: P2PColors.mint),
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+      subtitle: Text(subtitle, style: const TextStyle(color: P2PColors.muted, fontSize: 11)),
+      trailing: const Icon(Icons.chevron_right_rounded, color: P2PColors.muted),
+      onTap: onTap,
     );
   }
 }
