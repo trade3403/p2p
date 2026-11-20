@@ -70,6 +70,7 @@ class P2PRemoteController extends ChangeNotifier {
   int _lastFrameVersion = 0;
   String lastEvent = '';
 
+  bool get isAndroid => Platform.isAndroid;
   bool get hostRunning => _snapshot['host_running'] == true;
   bool get viewerConnected => _snapshot['viewer_connected'] == true;
   bool get pairingActive => _snapshot['pairing_active'] == true;
@@ -99,6 +100,9 @@ class P2PRemoteController extends ChangeNotifier {
   }
 
   String get clipboardText => (_snapshot['clipboard_text'] as String?) ?? '';
+  String get udpReport => (_snapshot['udp_report'] as String?) ?? '尚未执行公网 UDP 双端验证';
+  String get stunReport => (_snapshot['stun_report'] as String?) ?? 'STUN UDP 尚未探测';
+  bool get udpAttempted => _snapshot['udp_attempted'] == true;
 
   Future<void> initialize() async {
     if (_initialized || _initializing) return;
@@ -332,6 +336,15 @@ class P2PRemoteController extends ChangeNotifier {
 
   Future<bool> selectMonitor(int index) async =>
       (await _invoke(<String, Object?>{'method': 'selectMonitor', 'index': index}))['ok'] == true;
+
+  Future<bool> probeStun() async =>
+      (await _invoke(<String, Object?>{
+        'method': 'probeSTUN',
+        'server': relayUrl,
+      }))['ok'] == true;
+
+  Future<bool> startUdpPunch() async =>
+      (await _invoke(const <String, Object?>{'method': 'startUdpPunch'}))['ok'] == true;
 
   Future<bool> getClipboardText() async =>
       (await _invoke(const <String, Object?>{'method': 'getClipboardText'}))['ok'] == true;
