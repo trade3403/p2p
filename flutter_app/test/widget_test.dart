@@ -5,8 +5,8 @@ import 'package:p2p_remote_ui/app_theme.dart';
 
 void main() {
   testWidgets('mobile shell navigates between primary screens', (tester) async {
-    await tester.view.setPhysicalSize(const Size(800, 900));
-    await tester.view.setDevicePixelRatio(1);
+    tester.view.physicalSize = const Size(800, 900);
+    tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
