@@ -17,10 +17,10 @@ class NetworkScreen extends StatelessWidget {
           trailing: PrototypePill(),
         ),
         const SizedBox(height: 24),
-        PanelCard(
+        const PanelCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
+            children: const [
               const Text('中转服务器', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
               const SizedBox(height: 5),
               const Text('测试环境地址仅作为界面样例，不会在原型中发起网络请求。',
@@ -28,7 +28,7 @@ class NetworkScreen extends StatelessWidget {
               const SizedBox(height: 18),
               const Text('WSS 地址', style: TextStyle(color: P2PColors.muted, fontSize: 12)),
               const SizedBox(height: 7),
-              SelectableText('wss://p2ptest.aikissgo.com',
+              const SelectableText('wss://p2ptest.aikissgo.com',
                 style: const TextStyle(color: P2PColors.mint, fontSize: 15, fontWeight: FontWeight.w700)),
               const SizedBox(height: 17),
               const _NetworkRow(icon: Icons.cloud_done_rounded, title: 'Relay 中转', value: '演示状态 · 未检测'),
