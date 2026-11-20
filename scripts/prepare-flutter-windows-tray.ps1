@@ -67,9 +67,9 @@ void FlutterWindow::ShowFromTray() {
 void FlutterWindow::ShowTrayMenu() {
   HMENU menu = CreatePopupMenu();
   if (menu == nullptr) return;
-  AppendMenuW(menu, MF_STRING, kTrayMenuShow, L"\u663E\u793A\u4E3B\u754C\u9762");
+  AppendMenuW(menu, MF_STRING, kTrayMenuShow, L"Show P2P Remote");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"\u9000\u51FA P2P Remote");
+  AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"Exit P2P Remote");
   POINT point{};
   GetCursorPos(&point);
   SetForegroundWindow(GetHandle());
@@ -82,16 +82,18 @@ void FlutterWindow::ShowTrayMenu() {
     $source = $source -replace 'bool FlutterWindow::OnCreate\(\)', ($methods + 'bool FlutterWindow::OnCreate()')
     $source = $source -replace '(SetChildContent\(flutter_controller_->view\(\)->GetNativeWindow\(\)\);)', ('$1' + $nl + '  AddTrayIcon();')
     $source = $source -replace '(void FlutterWindow::OnDestroy\(\) \{)', ('$1' + $nl + '  RemoveTrayIcon();')
-    $messagePattern = 'LRESULT\s+FlutterWindow::MessageHandler\([^)]*\)\s*noexcept\s*\{'
-    if (-not [regex]::IsMatch($source, $messagePattern)) {
-        throw 'Could not locate FlutterWindow::MessageHandler for tray message handling.'
+    $messagePattern = 'LRESULT\s+FlutterWindow::MessageHandler\s*\(\s*HWND\s+(?<window>\w+)\s*,[^)]*\)\s*noexcept\s*\{'
+    $messageMatch = [regex]::Match($source, $messagePattern)
+    if (-not $messageMatch.Success) {
+        throw 'Could not locate FlutterWindow::MessageHandler(HWND, ...) for tray message handling.'
     }
+    $windowVariable = $messageMatch.Groups['window'].Value
     $messageHandling = @'
-LRESULT FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
+LRESULT FlutterWindow::MessageHandler(HWND __WINDOW__, UINT const message,
                                       WPARAM const wparam,
                                       LPARAM const lparam) noexcept {
   if (message == WM_CLOSE && tray_icon_added_) {
-    ShowWindow(hwnd, SW_HIDE);
+    ShowWindow(__WINDOW__, SW_HIDE);
     return 0;
   }
   if (message == kTrayCallbackMessage) {
@@ -108,12 +110,24 @@ LRESULT FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         ShowFromTray();
         return 0;
       case kTrayMenuExit:
-        DestroyWindow(hwnd);
+        DestroyWindow(__WINDOW__);
         return 0;
     }
   }
 '@
-    $source = [regex]::Replace($source, $messagePattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $messageHandling }, 1)
+    $messageHandling = $messageHandling.Replace('__WINDOW__', $windowVariable)
+    if ($source -match 'if \(message == WM_CLOSE && tray_icon_added_\)') {
+        # Make a previous generated patch safe when Flutter names the HWND parameter differently.
+        $source = $source.Replace('ShowWindow(hwnd, SW_HIDE);', ('ShowWindow(' + $windowVariable + ', SW_HIDE);'))
+        $source = $source.Replace('DestroyWindow(hwnd);', ('DestroyWindow(' + $windowVariable + ');'))
+    } else {
+        $source = [regex]::Replace(
+            $source,
+            $messagePattern,
+            [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $messageHandling },
+            1
+        )
+    }
     Set-Content -LiteralPath $sourcePath -Value $source -Encoding UTF8
 }
 
