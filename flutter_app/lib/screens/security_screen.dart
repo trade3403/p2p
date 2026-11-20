@@ -80,8 +80,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
           ),
         ),
         const SizedBox(height: 15),
-        PanelCard(
-          child: const Column(
+        const PanelCard(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
