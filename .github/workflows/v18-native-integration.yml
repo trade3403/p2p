@@ -27,6 +27,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prefer Git Bash over WSL for the Rust toolchain action
+        shell: powershell
+        run: |
+          $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          if (-not (Test-Path $bash)) { throw "Git Bash not installed at $bash" }
+          $gitBin = Split-Path -Parent $bash
+          Add-Content -Path $env:GITHUB_PATH -Value $gitBin
+          $env:PATH = $gitBin + ';' + $env:PATH
+          & $bash -c 'echo Git Bash ready'
+          if ($LASTEXITCODE -ne 0) { throw 'Git Bash execution failed' }
+
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
