@@ -286,6 +286,11 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value ('ANDROID_HOME=' + $sdk)
           flutter --version
           if ($LASTEXITCODE -ne 0) { throw 'Flutter SDK is unavailable.' }
+          $licenseAnswers = 1..100 | ForEach-Object { 'y' }
+          $licenseAnswers | flutter doctor --android-licenses
+          if ($LASTEXITCODE -ne 0) { throw 'Android SDK licenses could not be accepted.' }
+          flutter precache --android
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android engine artifacts could not be precached.' }
           flutter doctor -v
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Android toolchain check failed.' }
 
