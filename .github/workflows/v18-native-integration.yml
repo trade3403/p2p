@@ -77,10 +77,10 @@ jobs:
           $runnerCmake = Join-Path $env:GITHUB_WORKSPACE 'flutter_app\windows\runner\CMakeLists.txt'
           if (-not (Test-Path $runnerCmake)) { throw 'Flutter Windows runner CMakeLists.txt was not generated.' }
           $lines = @(
-            'add_custom_command(TARGET \${BINARY_NAME} POST_BUILD',
-            '  COMMAND \${CMAKE_COMMAND} -E copy_if_different',
+            'add_custom_command(TARGET ${BINARY_NAME} POST_BUILD',
+            '  COMMAND ${CMAKE_COMMAND} -E copy_if_different',
             ('  "' + $rustDll + '"'),
-            '  "$<TARGET_FILE_DIR:\${BINARY_NAME}>/p2p_remote.dll"',
+            '  "$<TARGET_FILE_DIR:${BINARY_NAME}>/p2p_remote.dll"',
             ')'
           )
           Add-Content -Path $runnerCmake -Value ($lines -join [Environment]::NewLine)
