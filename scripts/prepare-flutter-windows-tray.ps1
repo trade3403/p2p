@@ -82,7 +82,7 @@ void FlutterWindow::ShowTrayMenu() {
     $source = $source -replace 'bool FlutterWindow::OnCreate\(\)', ($methods + 'bool FlutterWindow::OnCreate()')
     $source = $source -replace '(SetChildContent\(flutter_controller_->view\(\)->GetNativeWindow\(\)\);)', ('$1' + $nl + '  AddTrayIcon();')
     $source = $source -replace '(void FlutterWindow::OnDestroy\(\) \{)', ('$1' + $nl + '  RemoveTrayIcon();')
-    $messagePattern = 'LRESULT FlutterWindow::MessageHandler\([^)]*\)\s*noexcept\s*\{'
+    $messagePattern = 'LRESULT\s+FlutterWindow::MessageHandler\([^)]*\)\s*noexcept\s*\{'
     if (-not [regex]::IsMatch($source, $messagePattern)) {
         throw 'Could not locate FlutterWindow::MessageHandler for tray message handling.'
     }
