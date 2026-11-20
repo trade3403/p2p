@@ -145,7 +145,15 @@ class P2PRemoteController extends ChangeNotifier {
           return <String, dynamic>{'ok': false, 'error': 'Invalid native response'};
         }
         final snapshot = decoded['snapshot'];
-        if (snapshot is Map<String, dynamic>) _snapshot = snapshot;
+        if (snapshot is Map<String, dynamic>) {
+          _snapshot = snapshot;
+          if (_snapshot['viewer_connected'] != true) {
+            frame = null;
+            frameWidth = 0;
+            frameHeight = 0;
+            _lastFrameVersion = 0;
+          }
+        }
         if (decoded['ok'] != true) {
           lastEvent = (decoded['error'] as String?) ?? 'Native command failed';
         }
@@ -252,6 +260,7 @@ class P2PRemoteController extends ChangeNotifier {
     final poll = _pollEvent;
     final free = _freeString;
     if (!bridgeAvailable || poll == null || free == null) return;
+    var changed = false;
     for (var i = 0; i < 64; i++) {
       final pointer = poll();
       if (pointer == nullptr) break;
@@ -263,13 +272,14 @@ class P2PRemoteController extends ChangeNotifier {
         } else {
           lastEvent = raw;
         }
+        changed = true;
       } catch (_) {
         // Malformed status events are ignored; the command/snapshot path is authoritative.
       } finally {
         free(pointer);
       }
     }
-    if (lastEvent.isNotEmpty) {
+    if (changed) {
       unawaited(refreshSnapshot());
     }
   }
