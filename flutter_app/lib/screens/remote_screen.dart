@@ -76,6 +76,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                           enabled: !connected && !_controller.pairingActive,
                           keyboardType: TextInputType.number,
                           inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(9)],
+                          onChanged: (_) => setState(() {}),
                           decoration: const InputDecoration(labelText: '9位设备号', hintText: '输入电脑上的设备号'),
                         ),
                       ),
@@ -87,6 +88,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                           keyboardType: TextInputType.number,
                           obscureText: true,
                           inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(6)],
+                          onChanged: (_) => setState(() {}),
                           decoration: const InputDecoration(labelText: '6位动态验证码', hintText: '一次性验证码'),
                         ),
                       ),
@@ -126,6 +128,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       controller: _legacyKey,
                       obscureText: true,
                       maxLength: 64,
+                      onChanged: (_) => setState(() {}),
                       decoration: const InputDecoration(
                         labelText: '64位十六进制会话密钥',
                         counterText: '',
@@ -168,7 +171,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       ),
                       if (connected && _controller.monitorCount > 1)
                         DropdownButton<int>(
-                          value: _controller.selectedMonitor.clamp(0, _controller.monitorCount - 1),
+                          value: _controller.selectedMonitor.clamp(0, _controller.monitorCount - 1).toInt(),
                           items: List.generate(
                             _controller.monitorCount,
                             (index) => DropdownMenuItem(value: index, child: Text('显示器 ${index + 1}')),
@@ -271,6 +274,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                             TextField(
                               controller: _textToSend,
                               enabled: connected,
+                              onChanged: (_) => setState(() {}),
                               maxLength: 250,
                               decoration: const InputDecoration(
                                 labelText: '发送文字到远程输入框',
@@ -331,6 +335,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                             TextField(
                               controller: _clipboardToSend,
                               enabled: connected,
+                              onChanged: (_) => setState(() {}),
                               maxLines: 2,
                               maxLength: 4096,
                               decoration: const InputDecoration(labelText: '发送到远程剪贴板', counterText: ''),
@@ -375,8 +380,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
       return null;
     }
     return (
-      ((point.dx - left) / shownWidth).clamp(0.0, 1.0),
-      ((point.dy - top) / shownHeight).clamp(0.0, 1.0),
+      ((point.dx - left) / shownWidth).clamp(0.0, 1.0).toDouble(),
+      ((point.dy - top) / shownHeight).clamp(0.0, 1.0).toDouble(),
     );
   }
 
