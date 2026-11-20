@@ -259,6 +259,43 @@ class _RemoteScreenState extends State<RemoteScreen> {
                 ],
               ),
             ),
+            if (_controller.isAndroid) ...[
+              const SizedBox(height: 14),
+              PanelCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('网络诊断与可选 UDP 预览',
+                      style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: _controller.probeStun,
+                          icon: const Icon(Icons.network_check_rounded),
+                          label: const Text('检测 STUN'),
+                        ),
+                        FilledButton.icon(
+                          onPressed: connected && _controller.tokenConfigured && !_controller.udpAttempted
+                              ? _controller.startUdpPunch
+                              : null,
+                          icon: const Icon(Icons.bolt_rounded),
+                          label: const Text('尝试加密 UDP 预览'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(_controller.stunReport,
+                      style: const TextStyle(color: P2PColors.muted, fontSize: 11)),
+                    const SizedBox(height: 4),
+                    Text(_controller.udpReport,
+                      style: const TextStyle(color: P2PColors.muted, fontSize: 11)),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 14),
             LayoutBuilder(
               builder: (context, constraints) {
