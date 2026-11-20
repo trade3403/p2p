@@ -131,6 +131,43 @@ LRESULT FlutterWindow::MessageHandler(HWND __WINDOW__, UINT const message,
     Set-Content -LiteralPath $sourcePath -Value $source -Encoding UTF8
 }
 
+
+# Normalize the generated tray menu and HWND references even if this script is rerun
+# against an already-generated Flutter Windows runner.
+$source = Get-Content -LiteralPath $sourcePath -Raw
+$trayMenuMethod = @'
+void FlutterWindow::ShowTrayMenu() {
+  HMENU menu = CreatePopupMenu();
+  if (menu == nullptr) return;
+  AppendMenuW(menu, MF_STRING, kTrayMenuShow, L"Show P2P Remote");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"Exit P2P Remote");
+  POINT point{};
+  GetCursorPos(&point);
+  SetForegroundWindow(GetHandle());
+  TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, point.x, point.y, 0,
+                 GetHandle(), nullptr);
+  DestroyMenu(menu);
+}
+'@
+$source = [regex]::Replace(
+    $source,
+    'void FlutterWindow::ShowTrayMenu\(\)\s*\{[\s\S]*?\n\}',
+    [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $trayMenuMethod },
+    1
+)
+$messagePattern = 'LRESULT\s+FlutterWindow::MessageHandler\s*\(\s*HWND\s+(?<window>\w+)\s*,[^)]*\)\s*noexcept\s*\{'
+$messageMatch = [regex]::Match($source, $messagePattern)
+if (-not $messageMatch.Success) {
+    throw 'Could not locate FlutterWindow::MessageHandler(HWND, ...) for final tray validation.'
+}
+$windowVariable = $messageMatch.Groups['window'].Value
+if ($source -match 'if \(message == WM_CLOSE && tray_icon_added_\)') {
+    $source = [regex]::Replace($source, 'ShowWindow\(\w+,\s*SW_HIDE\);', ('ShowWindow(' + $windowVariable + ', SW_HIDE);'), 1)
+    $source = [regex]::Replace($source, 'DestroyWindow\(\w+\);', ('DestroyWindow(' + $windowVariable + ');'), 1)
+}
+Set-Content -LiteralPath $sourcePath -Value $source -Encoding UTF8
+
 $cmake = Get-Content -LiteralPath $cmakePath -Raw
 if ($cmake -notmatch 'shell32') {
     $binaryName = '$' + '{BINARY_NAME}'
