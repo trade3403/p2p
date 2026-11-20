@@ -499,10 +499,13 @@ internal class AndroidRemoteEngine(
                             val index = metadata.optInt("selected", 0).coerceIn(0, count - 1)
                             val inputAllowed = if(metadata.has("allow_input"))
                                 metadata.optBoolean("allow_input") else null
+                            val clipboardAllowed = if(metadata.has("allow_clipboard"))
+                                metadata.optBoolean("allow_clipboard") else null
                             main.post {
                                 if(socket===webSocket && requested){
                                         monitorCount=count;selectedMonitor=index
                                         hostAllowsInput=inputAllowed
+                                        hostAllowsClipboard=clipboardAllowed
                                     }
                             }
                         }
