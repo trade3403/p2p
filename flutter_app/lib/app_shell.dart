@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
 
 import 'app_theme.dart';
@@ -9,6 +11,7 @@ import 'screens/remote_screen.dart';
 import 'screens/security_screen.dart';
 import 'screens/settings_screen.dart';
 import 'widgets/p2p_widgets.dart';
+import 'widgets/desktop_window_frame.dart';
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
@@ -63,7 +66,7 @@ class _AppShellState extends State<AppShell> {
         );
 
         if (desktop) {
-          return Scaffold(
+          final scaffold = Scaffold(
             body: Row(
               children: [
                 SizedBox(
@@ -78,6 +81,9 @@ class _AppShellState extends State<AppShell> {
               ],
             ),
           );
+          return Platform.isWindows
+              ? DesktopWindowFrame(child: scaffold)
+              : scaffold;
         }
 
         const mobilePages = [
@@ -94,7 +100,7 @@ class _AppShellState extends State<AppShell> {
           Icons.person_rounded,
         ];
         final selectedMobileIndex = mobilePages.indexOf(_page);
-        return Scaffold(
+        final scaffold = Scaffold(
           body: SafeArea(child: content),
           bottomNavigationBar: NavigationBar(
             selectedIndex: selectedMobileIndex < 0 ? 3 : selectedMobileIndex,
@@ -108,6 +114,9 @@ class _AppShellState extends State<AppShell> {
             ),
           ),
         );
+        return Platform.isWindows
+            ? DesktopWindowFrame(child: scaffold)
+            : scaffold;
       },
     );
   }
