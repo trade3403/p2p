@@ -762,6 +762,7 @@ internal class AndroidRemoteEngine(
         pointerValid = false
         hostAllowsInput = null
         hostAllowsClipboard = null
+        secret?.fill(0)
         secret = null
         activeToken = ""
         activeEndpoint = ""
