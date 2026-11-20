@@ -78,7 +78,7 @@ class SecurityScreen extends StatelessWidget {
                   SizedBox(height: 12),
                   _SecurityPoint(text: '首次数字配对必须由被控电脑用户批准。'),
                   _SecurityPoint(text: '设备号用于识别；6位动态验证码有效期为120秒。'),
-                  _SecurityPoint(text: 'Windows 长期凭据由当前用户 DPAPI 加密保存。'),
+                  _SecurityPoint(text: 'Windows 长期凭据由当前用户 DPAPI 加密保存；Android Relay 口令由 Android Keystore 加密保存。'),
                   _SecurityPoint(text: '剪贴板不会自动监听或后台同步。'),
                   _SecurityPoint(text: 'UAC、安全桌面和锁屏界面不在当前支持范围内。'),
                 ],
