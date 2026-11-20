@@ -43,13 +43,24 @@ jobs:
           export PATH="$FLUTTER_ROOT/bin:$PATH"
           flutter --version
           flutter precache --android
-      - name: Verify Android SDK
+      - name: Configure Android SDK
         shell: bash
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_HOME:-$HOME/.android/sdk}"
-          test -d "$SDK_ROOT/platforms"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Android sdkmanager not found under $SDK_ROOT/cmdline-tools" >&2
+            exit 1
+          fi
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          sdk_status=${PIPESTATUS[1]}
+          set -o pipefail
+          if [ "$sdk_status" -ne 0 ]; then exit "$sdk_status"; fi
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
       - name: Generate Flutter platform runners
         working-directory: flutter_app
         run: flutter create --platforms=windows,android --project-name p2p_remote_ui .
