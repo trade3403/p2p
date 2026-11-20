@@ -120,7 +120,12 @@ class PanelCard extends StatelessWidget {
           ),
         ],
       ),
-      child: child,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(20),
+        clipBehavior: Clip.antiAlias,
+        child: child,
+      ),
     );
   }
 }
