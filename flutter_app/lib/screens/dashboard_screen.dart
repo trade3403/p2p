@@ -273,7 +273,7 @@ class _LocalDeviceCard extends StatelessWidget {
                       const Text('待确认的连接请求', style: TextStyle(fontWeight: FontWeight.w800)),
                       const SizedBox(height: 5),
                       Text(
-                        '控制端指纹：\${controller.pendingViewerFingerprint ?? "未知设备"}',
+                        '控制端指纹：${controller.pendingViewerFingerprint ?? "未知设备"}',
                         style: const TextStyle(color: P2PColors.muted, fontSize: 12),
                       ),
                       const SizedBox(height: 10),
@@ -304,7 +304,7 @@ class _LocalDeviceCard extends StatelessWidget {
   static Future<void> _copy(BuildContext context, String value, String label) async {
     await Clipboard.setData(ClipboardData(text: value));
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('\$label已复制')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$label已复制')));
     }
   }
 }
