@@ -756,6 +756,7 @@ internal class AndroidRemoteEngine(
         selectedMonitor = 0
         pointerValid = false
         hostAllowsInput = null
+        hostAllowsClipboard = null
         secret = null
         activeToken = ""
         activeEndpoint = ""
