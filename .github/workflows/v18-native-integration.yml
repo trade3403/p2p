@@ -1,0 +1,128 @@
+name: P2P Remote V0.18 Native Integration
+
+on:
+  push:
+    branches: ['feature/v0.18-native-integration']
+    paths:
+      - 'desktop/**'
+      - 'flutter_app/**'
+      - '.github/workflows/v18-native-integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2p-v18-native-integration
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Rust native core + Flutter Windows integration
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Windows Rust toolchain
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc --version
+          cargo --version
+          if (-not (Test-Path 'desktop/src/flutter_bridge.rs')) {
+            throw 'Missing Rust Flutter bridge source.'
+          }
+
+      - name: Test existing Rust core and native bridge
+        run: cargo test --manifest-path desktop/Cargo.toml
+
+      - name: Build Rust native shared library
+        run: |
+          cargo build --manifest-path desktop/Cargo.toml --lib --release
+          $dll = 'desktop/target/release/p2p_remote.dll'
+          if (-not (Test-Path $dll) -or (Get-Item $dll).Length -lt 100000) {
+            throw "Rust native DLL missing or unexpectedly small: $dll"
+          }
+
+      - name: Install Flutter stable SDK
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
+          $flutterRoot = Join-Path $cacheRoot 'flutter-stable'
+          $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
+          if (-not (Test-Path $flutterExe)) {
+            if (Test-Path $flutterRoot) { Remove-Item -LiteralPath $flutterRoot -Recurse -Force }
+            git clone --depth 1 --branch stable https://github.com/flutter/flutter.git $flutterRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Could not clone Flutter stable SDK.' }
+          }
+          $flutterBin = Join-Path $flutterRoot 'bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $flutterBin
+          $env:PATH = $flutterBin + ';' + $env:PATH
+          flutter --version
+          flutter config --enable-windows-desktop
+          flutter precache --windows
+
+      - name: Generate Windows platform runner and link Rust DLL
+        working-directory: flutter_app
+        run: |
+          $ErrorActionPreference = 'Stop'
+          flutter create --platforms=windows,android --project-name p2p_remote_ui .
+          $rustDll = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop\target\release\p2p_remote.dll')).Path.Replace('\','/')
+          $runnerCmake = Join-Path $env:GITHUB_WORKSPACE 'flutter_app\windows\runner\CMakeLists.txt'
+          if (-not (Test-Path $runnerCmake)) { throw 'Flutter Windows runner CMakeLists.txt was not generated.' }
+          $lines = @(
+            'add_custom_command(TARGET \${BINARY_NAME} POST_BUILD',
+            '  COMMAND \${CMAKE_COMMAND} -E copy_if_different',
+            ('  "' + $rustDll + '"'),
+            '  "$<TARGET_FILE_DIR:\${BINARY_NAME}>/p2p_remote.dll"',
+            ')'
+          )
+          Add-Content -Path $runnerCmake -Value ($lines -join [Environment]::NewLine)
+          Write-Host 'Configured post-build copy of p2p_remote.dll beside the Flutter executable.'
+
+      - name: Analyze, test and build Flutter Windows
+        working-directory: flutter_app
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build windows --release
+
+      - name: Verify linked native DLL and package Windows build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem -Path 'flutter_app\build\windows' -Filter 'p2p_remote_ui.exe' -Recurse |
+            Select-Object -First 1
+          if (-not $exe) { throw 'Flutter Windows executable was not generated.' }
+          $dll = Join-Path $exe.Directory.FullName 'p2p_remote.dll'
+          if (-not (Test-Path $dll)) { throw 'Rust native bridge DLL was not copied beside the Flutter executable.' }
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\v0.18-windows'
+          if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item -Path (Join-Path $exe.Directory.FullName '*') -Destination $dist -Recurse -Force
+          @'
+          P2P Remote V0.18 Windows native integration build.
+          The Flutter UI calls the existing Rust Host/Viewer core through a narrow C ABI.
+          First-run setup: configure the WSS Relay URL and access token in Network Settings.
+          The access token and Windows trusted profile are protected by the current user's DPAPI.
+          Start local sharing from the Dashboard. Remote input and clipboard remain opt-in.
+          Android Flutter bridge and multi-device vault migration are not included in this build.
+          '@ | Set-Content -Path (Join-Path $dist 'README.txt') -Encoding UTF8
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-V0.18-Windows-Native-Integration.zip'
+          if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
+          if ((Get-Item $zip).Length -lt 1000000) { throw 'Windows package is unexpectedly small.' }
+          Write-Host ('Packaged ' + $zip + ' (' + (Get-Item $zip).Length + ' bytes)')
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-V0.18-Windows-Native-Integration
+          path: P2PRemote-V0.18-Windows-Native-Integration.zip
+          if-no-files-found: error
+          retention-days: 14
