@@ -508,7 +508,7 @@ impl Engine {
                         return;
                     }
                     let mut engine = engine_lock();
-                    engine.start_viewer_with_secret(secret);
+                    engine.start_viewer_with_secret(&secret);
                     secret.fill(0);
                 }
                 Err(error) => {
@@ -543,11 +543,11 @@ impl Engine {
         if self.relay_token.len() < 32 {
             return self.fail("请先配置中转服务器访问口令");
         }
-        self.start_viewer_with_secret(secret);
+        self.start_viewer_with_secret(&secret);
         self.response(json!({"connected": true}))
     }
 
-    fn start_viewer_with_secret(&mut self, secret: [u8; 32]) {
+    fn start_viewer_with_secret(&mut self, secret: &[u8; 32]) {
         if let Some(old) = self.viewer.take() {
             old.active.store(false, Ordering::SeqCst);
         }
@@ -557,7 +557,7 @@ impl Engine {
         viewer::start(ViewerConfig {
             server: self.relay_url.clone(),
             token: self.relay_token.clone(),
-            secret,
+            secret: *secret,
             active: active.clone(),
             events,
             controls,
