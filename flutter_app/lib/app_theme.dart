@@ -78,14 +78,5 @@ ThemeData buildP2PTheme() {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     ),
-    cardTheme: CardTheme(
-      color: P2PColors.panel,
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(20),
-        side: const BorderSide(color: P2PColors.outline),
-      ),
-      margin: EdgeInsets.zero,
-    ),
   );
 }
