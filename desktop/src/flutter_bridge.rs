@@ -2,7 +2,7 @@
 //! All network, cryptographic, DPAPI and input-injection work remains in Rust.
 //! Dart receives sanitized snapshots and bounded JPEG frames only.
 use crate::{
-    host::{self, HostConfig},
+    host::HostConfig,
     host_pairing::{self, PairingDecision},
     local_settings,
     pairing_api::{self, PairingApiClient},
@@ -596,7 +596,8 @@ impl Engine {
                     }
                     ViewerEvent::Monitors(value) => {
                         state.snapshot.monitors = serde_json::from_str(&value).unwrap_or(json!({"count":1,"selected":0}));
-                        state.emit(json!({"type":"monitors","value":state.snapshot.monitors.clone()}));
+                        let monitors = state.snapshot.monitors.clone();
+                        state.emit(json!({"type":"monitors","value":monitors}));
                     }
                     ViewerEvent::Clipboard(value) => {
                         state.snapshot.clipboard_text = value.clone();
@@ -851,13 +852,17 @@ pub extern "C" fn p2p_bridge_poll_event() -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn p2p_bridge_latest_frame_version() -> u64 {
     let engine = engine_lock();
-    shared_lock(&engine.shared).frame.as_ref().map(|frame| frame.version).unwrap_or(0)
+    let version = shared_lock(&engine.shared).frame.as_ref()
+        .map(|frame| frame.version).unwrap_or(0);
+    version
 }
 
 #[no_mangle]
 pub extern "C" fn p2p_bridge_latest_frame_size() -> usize {
     let engine = engine_lock();
-    shared_lock(&engine.shared).frame.as_ref().map(|frame| frame.bytes.len()).unwrap_or(0)
+    let size = shared_lock(&engine.shared).frame.as_ref()
+        .map(|frame| frame.bytes.len()).unwrap_or(0);
+    size
 }
 
 #[no_mangle]
