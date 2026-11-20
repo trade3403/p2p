@@ -34,7 +34,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $workspace = $env:GITHUB_WORKSPACE
-          Get-ChildItem -LiteralPath $workspace -Force | Remove-Item -Recurse -Force
           $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-v018-archive-' + $env:GITHUB_RUN_ID)
           New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
           $zip = Join-Path $archiveRoot 'source.zip'
@@ -81,7 +80,7 @@ jobs:
           }
 
       - name: Test existing Rust core and native bridge
-        run: cargo test --manifest-path desktop/Cargo.toml
+        run: cargo test --manifest-path desktop/Cargo.toml --lib
 
       - name: Build Rust native shared library
         run: |
@@ -113,6 +112,10 @@ jobs:
         working-directory: flutter_app
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($generated in @('windows', 'android', 'build')) {
+            $path = Join-Path $env:GITHUB_WORKSPACE ('flutter_app\' + $generated)
+            if (Test-Path $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+          }
           flutter create --platforms=windows,android --project-name p2p_remote_ui .
           $rustDll = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop\target\release\p2p_remote.dll')).Path.Replace('\','/')
           $runnerCmake = Join-Path $env:GITHUB_WORKSPACE 'flutter_app\windows\runner\CMakeLists.txt'
