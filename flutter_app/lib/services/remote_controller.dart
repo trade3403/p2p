@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
@@ -42,6 +41,8 @@ class P2PRemoteController extends ChangeNotifier {
 
   static final P2PRemoteController instance = P2PRemoteController._();
 
+  // Retain the native library handle for the lifetime of the FFI function pointers.
+  // ignore: unused_field
   DynamicLibrary? _library;
   _CommandDart? _command;
   _PollDart? _pollEvent;
