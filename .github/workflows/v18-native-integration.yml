@@ -70,6 +70,10 @@ jobs:
           & $bash -c 'echo Git Bash ready'
           if ($LASTEXITCODE -ne 0) { throw 'Git Bash execution failed' }
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
