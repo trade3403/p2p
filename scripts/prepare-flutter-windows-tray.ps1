@@ -67,9 +67,9 @@ void FlutterWindow::ShowFromTray() {
 void FlutterWindow::ShowTrayMenu() {
   HMENU menu = CreatePopupMenu();
   if (menu == nullptr) return;
-  AppendMenuW(menu, MF_STRING, kTrayMenuShow, L"显示主界面");
+  AppendMenuW(menu, MF_STRING, kTrayMenuShow, L"\u663E\u793A\u4E3B\u754C\u9762");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"退出 P2P Remote");
+  AppendMenuW(menu, MF_STRING, kTrayMenuExit, L"\u9000\u51FA P2P Remote");
   POINT point{};
   GetCursorPos(&point);
   SetForegroundWindow(GetHandle());
@@ -87,11 +87,11 @@ void FlutterWindow::ShowTrayMenu() {
         throw 'Could not locate FlutterWindow::MessageHandler for tray message handling.'
     }
     $messageHandling = @'
-LRESULT FlutterWindow::MessageHandler(HWND window, UINT const message,
+LRESULT FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                                       WPARAM const wparam,
                                       LPARAM const lparam) noexcept {
   if (message == WM_CLOSE && tray_icon_added_) {
-    ShowWindow(window, SW_HIDE);
+    ShowWindow(hwnd, SW_HIDE);
     return 0;
   }
   if (message == kTrayCallbackMessage) {
@@ -108,7 +108,7 @@ LRESULT FlutterWindow::MessageHandler(HWND window, UINT const message,
         ShowFromTray();
         return 0;
       case kTrayMenuExit:
-        DestroyWindow(window);
+        DestroyWindow(hwnd);
         return 0;
     }
   }
