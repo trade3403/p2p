@@ -10,13 +10,19 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   if (Platform.isWindows) {
-    final window = WindowManager.instance.getCurrent();
-    if (window != null) {
-      window.title = 'P2P Remote';
-      window.titleBarStyle = TitleBarStyle.hidden;
-      window.minimumSize = const Size(980, 640).toNative();
-      window.hasShadow = true;
-    }
+    await windowManager.ensureInitialized();
+    const windowOptions = WindowOptions(
+      title: 'P2P Remote',
+      backgroundColor: Color(0xFF0A111D),
+      skipTaskbar: false,
+      titleBarStyle: TitleBarStyle.hidden,
+    );
+    windowManager.waitUntilReadyToShow(windowOptions, () async {
+      await windowManager.setMinimumSize(const Size(980, 640));
+      await windowManager.setHasShadow(true);
+      await windowManager.show();
+      await windowManager.focus();
+    });
   }
 
   runApp(const P2PRemoteApp());
