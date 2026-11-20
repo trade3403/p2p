@@ -92,7 +92,7 @@ class _AppShellState extends State<AppShell> {
               ],
             ),
           );
-          return showNativeWindowFrame && Platform.isWindows
+          return widget.showNativeWindowFrame && Platform.isWindows
               ? DesktopWindowFrame(child: scaffold)
               : scaffold;
         }
@@ -125,7 +125,7 @@ class _AppShellState extends State<AppShell> {
             ),
           ),
         );
-        return showNativeWindowFrame && Platform.isWindows
+        return widget.showNativeWindowFrame && Platform.isWindows
             ? DesktopWindowFrame(child: scaffold)
             : scaffold;
       },
