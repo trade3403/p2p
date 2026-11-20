@@ -23,6 +23,15 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Install jq required by Flutter setup action
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+          jq --version
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -60,6 +69,19 @@ jobs:
         shell: powershell
     steps:
       - uses: actions/checkout@v4
+      - name: Install jq required by Flutter setup action
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command jq.exe -ErrorAction SilentlyContinue)) {
+            $jqDir = Join-Path $env:RUNNER_TEMP 'jq'
+            New-Item -ItemType Directory -Force -Path $jqDir | Out-Null
+            $jqPath = Join-Path $jqDir 'jq.exe'
+            Invoke-WebRequest -Uri 'https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-windows-amd64.exe' -OutFile $jqPath
+            Add-Content -Path $env:GITHUB_PATH -Value $jqDir
+            $env:PATH = $jqDir + ';' + $env:PATH
+          }
+          jq --version
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
