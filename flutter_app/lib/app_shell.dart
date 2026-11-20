@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'dart:io';
 
 import 'package:material_ui/material_ui.dart';
@@ -12,6 +14,7 @@ import 'screens/security_screen.dart';
 import 'screens/settings_screen.dart';
 import 'widgets/p2p_widgets.dart';
 import 'widgets/desktop_window_frame.dart';
+import 'services/remote_controller.dart';
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
@@ -22,6 +25,12 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   AppPage _page = AppPage.home;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(P2PRemoteController.instance.initialize());
+  }
 
   static const _navigation = <(AppPage, String, IconData)>[
     (AppPage.home, '首页', Icons.space_dashboard_rounded),
