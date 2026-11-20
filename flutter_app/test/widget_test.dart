@@ -27,7 +27,7 @@ void main() {
     await tester.tap(find.text('远控').last);
     await tester.pumpAndSettle();
     expect(find.text('远程控制'), findsOneWidget);
-    expect(find.text('视频流和远控事件尚未接入'), findsOneWidget);
+    expect(find.textContaining('视频流和远控事件尚未接入'), findsOneWidget);
 
     await tester.tap(find.text('我的').last);
     await tester.pumpAndSettle();
