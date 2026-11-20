@@ -197,9 +197,13 @@ jobs:
             if (Test-Path $candidate) { $makensis = Get-Item $candidate }
           }
           if (-not $makensis) { throw 'NSIS makensis.exe could not be located.' }
+          $makensisPath = $makensis.Source
+          if (-not $makensisPath) { $makensisPath = $makensis.Path }
+          if (-not $makensisPath) { $makensisPath = $makensis.FullName }
+          if (-not $makensisPath) { throw 'NSIS executable path could not be resolved.' }
           Push-Location 'installer'
           try {
-            & $makensis.Source 'P2PRemote.nsi'
+            & $makensisPath 'P2PRemote.nsi'
             if ($LASTEXITCODE -ne 0) { throw 'NSIS installer compilation failed.' }
           } finally {
             Pop-Location
