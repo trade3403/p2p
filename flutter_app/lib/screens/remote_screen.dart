@@ -51,15 +51,15 @@ class RemoteScreen extends StatelessWidget {
                 ],
               );
               if (compact) {
-                return Column(
+                return const Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [device, const SizedBox(height: 15), actions],
+                  children: [device, SizedBox(height: 15), actions],
                 );
               }
-              return Row(
+              return const Row(
                 children: [
                   device,
-                  const Spacer(),
+                  Spacer(),
                   Flexible(child: actions),
                 ],
               );
