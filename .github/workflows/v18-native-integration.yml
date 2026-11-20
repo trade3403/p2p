@@ -302,17 +302,35 @@ jobs:
           & ..\scripts\prepare-flutter-android.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Android native bridge preparation failed.' }
 
-      - name: Analyze, test and build Android release APK
+      - name: Precache Flutter Android engine artifacts
         working-directory: flutter_app
         run: |
-          $ErrorActionPreference = 'Stop'
+          flutter precache --android
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android artifact precache failed.' }
+
+      - name: Resolve Flutter packages
+        working-directory: flutter_app
+        run: |
           flutter pub get
           if ($LASTEXITCODE -ne 0) { throw 'Android flutter pub get failed.' }
+
+      - name: Analyze Flutter Android client
+        working-directory: flutter_app
+        run: |
           flutter analyze
           if ($LASTEXITCODE -ne 0) { throw 'Android flutter analyze failed.' }
+
+      - name: Run Flutter widget tests
+        working-directory: flutter_app
+        run: |
           flutter test
           if ($LASTEXITCODE -ne 0) { throw 'Android flutter tests failed.' }
-          flutter build apk --release
+
+      - name: Build Android release APK
+        working-directory: flutter_app
+        timeout-minutes: 30
+        run: |
+          flutter build apk --release --verbose
           if ($LASTEXITCODE -ne 0) { throw 'Android release APK build failed.' }
 
       - uses: actions/upload-artifact@v4
