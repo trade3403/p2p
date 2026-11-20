@@ -826,13 +826,15 @@ fn command_inner(input: *const c_char) -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn p2p_bridge_init() -> i32 {
-    let _ = engine();
-    1
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = engine();
+        1
+    })).unwrap_or(0)
 }
 
 #[no_mangle]
 pub extern "C" fn p2p_bridge_command_json(input: *const c_char) -> *mut c_char {
-    std::panic::catch_unwind(|| command_inner(input))
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| command_inner(input)))
         .unwrap_or_else(|_| c_string(r#"{"ok":false,"error":"native bridge panic"}"#.into()))
 }
 
