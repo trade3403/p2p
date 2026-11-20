@@ -17,7 +17,9 @@ import 'widgets/desktop_window_frame.dart';
 import 'services/remote_controller.dart';
 
 class AppShell extends StatefulWidget {
-  const AppShell({super.key});
+  const AppShell({super.key, this.showNativeWindowFrame = true});
+
+  final bool showNativeWindowFrame;
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -90,7 +92,7 @@ class _AppShellState extends State<AppShell> {
               ],
             ),
           );
-          return Platform.isWindows
+          return showNativeWindowFrame && Platform.isWindows
               ? DesktopWindowFrame(child: scaffold)
               : scaffold;
         }
@@ -123,7 +125,7 @@ class _AppShellState extends State<AppShell> {
             ),
           ),
         );
-        return Platform.isWindows
+        return showNativeWindowFrame && Platform.isWindows
             ? DesktopWindowFrame(child: scaffold)
             : scaffold;
       },
