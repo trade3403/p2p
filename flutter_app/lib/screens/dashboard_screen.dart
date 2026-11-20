@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../app_page.dart';
@@ -21,7 +22,10 @@ class DashboardScreen extends StatelessWidget {
           trailing: PrototypePill(),
         ),
         const SizedBox(height: 26),
-        const _LocalDeviceCard(),
+        if (defaultTargetPlatform == TargetPlatform.android)
+          const _AndroidViewerHero()
+        else
+          const _LocalDeviceCard(),
         const SizedBox(height: 18),
         LayoutBuilder(
           builder: (context, constraints) {
@@ -111,6 +115,50 @@ class DashboardScreen extends StatelessWidget {
   static void _showDemoMessage(BuildContext context) {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('当前是界面原型，尚未连接真实设备服务。')),
+    );
+  }
+}
+
+class _AndroidViewerHero extends StatelessWidget {
+  const _AndroidViewerHero();
+
+  @override
+  Widget build(BuildContext context) {
+    return PanelCard(
+      padding: const EdgeInsets.all(23),
+      gradient: const LinearGradient(
+        colors: [Color(0xFF1A3549), Color(0xFF17273D), Color(0xFF142238)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 52,
+            height: 52,
+            decoration: BoxDecoration(
+              color: P2PColors.mintDeep,
+              borderRadius: BorderRadius.circular(15),
+            ),
+            child: const Icon(Icons.phonelink_rounded, color: P2PColors.mint, size: 27),
+          ),
+          const SizedBox(width: 15),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('连接你的 Windows 电脑',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                SizedBox(height: 6),
+                Text('输入电脑上的 9 位设备号和 6 位动态验证码；首次连接需要电脑端批准。',
+                  style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.45)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          const StatusDot(color: P2PColors.mint, label: 'Android 控制端'),
+        ],
+      ),
     );
   }
 }
