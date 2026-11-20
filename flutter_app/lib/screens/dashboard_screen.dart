@@ -1,9 +1,10 @@
-import 'package:material_ui/material_ui.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../app_page.dart';
 import '../app_theme.dart';
+import '../services/remote_controller.dart';
 import '../widgets/p2p_widgets.dart';
 
 class DashboardScreen extends StatelessWidget {
@@ -13,150 +14,126 @@ class DashboardScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      children: [
-        const PageHeading(
-          eyebrow: 'P2P REMOTE  /  V0.17',
-          title: '设备概览',
-          subtitle: '安全连接你的设备，随时随地访问远程桌面。',
-          trailing: PrototypePill(),
-        ),
-        const SizedBox(height: 26),
-        if (defaultTargetPlatform == TargetPlatform.android)
-          const _AndroidViewerHero()
-        else
-          const _LocalDeviceCard(),
-        const SizedBox(height: 18),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final columns = constraints.maxWidth > 1050 ? 3 : constraints.maxWidth > 650 ? 2 : 1;
-            final width = (constraints.maxWidth - (columns - 1) * 14) / columns;
-            return Wrap(
-              spacing: 14,
-              runSpacing: 14,
-              children: [
-                SizedBox(width: width, child: _QuickConnectCard(onPreview: () => onNavigate(AppPage.remote))),
-                SizedBox(width: width, child: const _OverviewCard(
-                  icon: Icons.shield_rounded,
-                  title: '安全状态',
-                  value: '权限受控',
-                  detail: '输入与剪贴板需单独授权',
-                  accent: P2PColors.mint,
-                )),
-                SizedBox(width: width, child: const _OverviewCard(
-                  icon: Icons.hub_rounded,
-                  title: '连接方式',
-                  value: 'P2P 优先',
-                  detail: '直连不可用时使用加密中转',
-                  accent: P2PColors.blue,
-                )),
-              ],
-            );
-          },
-        ),
-        const SizedBox(height: 28),
-        SectionTitle(
-          title: '最近设备',
-          actionLabel: '查看全部',
-          onAction: () => onNavigate(AppPage.devices),
-        ),
-        const SizedBox(height: 13),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final columns = constraints.maxWidth > 1050 ? 3 : constraints.maxWidth > 620 ? 2 : 1;
-            final width = (constraints.maxWidth - (columns - 1) * 14) / columns;
-            return Wrap(
-              spacing: 14,
-              runSpacing: 14,
-              children: [
-                SizedBox(
-                  width: width,
-                  child: DeviceTile(
-                    name: '办公室电脑',
-                    detail: 'Windows 11 · 上次连接 今天 09:18',
-                    online: true,
-                    icon: Icons.desktop_windows_rounded,
-                    onConnect: () => onNavigate(AppPage.remote),
+    final controller = P2PRemoteController.instance;
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        return ListView(
+          children: [
+            PageHeading(
+              eyebrow: 'P2P REMOTE  /  V0.18',
+              title: '设备概览',
+              subtitle: '管理本机共享服务，或连接已授权的远程电脑。',
+              trailing: StatusDot(
+                color: controller.hostRunning || controller.viewerConnected
+                    ? P2PColors.mint
+                    : P2PColors.muted,
+                label: controller.hostRunning
+                    ? '本机共享运行中'
+                    : controller.viewerConnected
+                        ? '远程会话已连接'
+                        : '未连接',
+              ),
+            ),
+            const SizedBox(height: 24),
+            if (defaultTargetPlatform == TargetPlatform.android)
+              const _AndroidBridgeNotice()
+            else
+              _LocalDeviceCard(onSettings: () => onNavigate(AppPage.network)),
+            const SizedBox(height: 16),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final columns = constraints.maxWidth > 1050 ? 3 : constraints.maxWidth > 650 ? 2 : 1;
+                final width = (constraints.maxWidth - (columns - 1) * 14) / columns;
+                return Wrap(
+                  spacing: 14,
+                  runSpacing: 14,
+                  children: [
+                    SizedBox(
+                      width: width,
+                      child: _OverviewCard(
+                        icon: Icons.shield_rounded,
+                        title: '远程输入',
+                        value: controller.allowInput ? '已授权' : '未授权',
+                        detail: '由本机用户明确控制',
+                        accent: controller.allowInput ? P2PColors.mint : P2PColors.amber,
+                      ),
+                    ),
+                    SizedBox(
+                      width: width,
+                      child: _OverviewCard(
+                        icon: Icons.content_paste_rounded,
+                        title: '剪贴板',
+                        value: controller.allowClipboard ? '已授权' : '未授权',
+                        detail: '仅按需读取或发送',
+                        accent: controller.allowClipboard ? P2PColors.mint : P2PColors.amber,
+                      ),
+                    ),
+                    SizedBox(
+                      width: width,
+                      child: _OverviewCard(
+                        icon: Icons.hub_rounded,
+                        title: '连接服务',
+                        value: controller.tokenConfigured ? '凭据已保存' : '尚未配置',
+                        detail: controller.relayUrl,
+                        accent: controller.tokenConfigured ? P2PColors.blue : P2PColors.amber,
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 22),
+            PanelCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('远程控制', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 5),
+                  const Text(
+                    '输入对方电脑的9位设备号和6位动态验证码。首次连接仍需被控电脑批准。',
+                    style: TextStyle(color: P2PColors.muted, fontSize: 12),
                   ),
-                ),
-                SizedBox(
-                  width: width,
-                  child: DeviceTile(
-                    name: '家用电脑',
-                    detail: 'Windows 11 · 上次连接 昨天 21:42',
-                    online: true,
-                    icon: Icons.computer_rounded,
-                    onConnect: () => onNavigate(AppPage.remote),
+                  const SizedBox(height: 14),
+                  FilledButton.icon(
+                    onPressed: () => onNavigate(AppPage.remote),
+                    icon: const Icon(Icons.desktop_windows_rounded),
+                    label: const Text('打开远程控制'),
                   ),
+                ],
+              ),
+            ),
+            if (!controller.bridgeAvailable) ...[
+              const SizedBox(height: 16),
+              PanelCard(
+                child: Text(
+                  controller.bridgeError,
+                  style: const TextStyle(color: P2PColors.amber, fontSize: 12),
                 ),
-                SizedBox(
-                  width: width,
-                  child: DeviceTile(
-                    name: '设计笔记本',
-                    detail: 'Windows 10 · 上次在线 2 小时前',
-                    online: false,
-                    icon: Icons.laptop_windows_rounded,
-                    onConnect: () => _showDemoMessage(context),
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
-        const SizedBox(height: 26),
-        const Text(
-          '以上设备号、状态和时间均为 UI 演示数据，不代表真实 Relay 状态。',
-          style: TextStyle(color: P2PColors.muted, fontSize: 11),
-        ),
-      ],
-    );
-  }
-
-  static void _showDemoMessage(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('当前是界面原型，尚未连接真实设备服务。')),
+              ),
+            ],
+          ],
+        );
+      },
     );
   }
 }
 
-class _AndroidViewerHero extends StatelessWidget {
-  const _AndroidViewerHero();
+class _AndroidBridgeNotice extends StatelessWidget {
+  const _AndroidBridgeNotice();
 
   @override
   Widget build(BuildContext context) {
-    return PanelCard(
-      padding: const EdgeInsets.all(23),
-      gradient: const LinearGradient(
-        colors: [Color(0xFF1A3549), Color(0xFF17273D), Color(0xFF142238)],
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-      ),
-      child: Row(
+    return const PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 52,
-            height: 52,
-            decoration: BoxDecoration(
-              color: P2PColors.mintDeep,
-              borderRadius: BorderRadius.circular(15),
-            ),
-            child: const Icon(Icons.phonelink_rounded, color: P2PColors.mint, size: 27),
+          Text('Android 控制端', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+          SizedBox(height: 7),
+          Text(
+            'Android 原生远控功能仍由现有 Kotlin 客户端提供。Flutter 页面与 Android 会话、MediaCodec 纹理的桥接正在 V0.18 后续阶段接入。',
+            style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.5),
           ),
-          const SizedBox(width: 15),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('连接你的 Windows 电脑',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-                SizedBox(height: 6),
-                Text('输入电脑上的 9 位设备号和 6 位动态验证码；首次连接需要电脑端批准。',
-                  style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.45)),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          const StatusDot(color: P2PColors.mint, label: 'Android 控制端'),
         ],
       ),
     );
@@ -164,101 +141,171 @@ class _AndroidViewerHero extends StatelessWidget {
 }
 
 class _LocalDeviceCard extends StatelessWidget {
-  const _LocalDeviceCard();
+  const _LocalDeviceCard({required this.onSettings});
+
+  final VoidCallback onSettings;
 
   @override
   Widget build(BuildContext context) {
-    return PanelCard(
-      padding: const EdgeInsets.all(26),
-      gradient: const LinearGradient(
-        colors: [Color(0xFF1A3549), Color(0xFF17273D), Color(0xFF142238)],
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('本机设备', style: TextStyle(color: P2PColors.muted, fontSize: 13)),
-                    SizedBox(height: 5),
-                    Text('让其他设备安全连接到这台电脑', style: TextStyle(color: P2PColors.text, fontSize: 17, fontWeight: FontWeight.w800)),
-                  ],
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF183E39),
-                  border: Border.all(color: const Color(0xFF2A665C)),
-                  borderRadius: BorderRadius.circular(30),
-                ),
-                child: const StatusDot(color: P2PColors.mint, label: '原型状态'),
-              ),
-            ],
+    final controller = P2PRemoteController.instance;
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final running = controller.hostRunning;
+        final hasCode = controller.pairingCode.isNotEmpty;
+        return PanelCard(
+          padding: const EdgeInsets.all(25),
+          gradient: const LinearGradient(
+            colors: [Color(0xFF1A3549), Color(0xFF17273D), Color(0xFF142238)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
           ),
-          const SizedBox(height: 25),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              if (constraints.maxWidth < 640) {
-                return const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _NumberBlock(
-                      label: '9 位设备号',
-                      value: '419 049 723',
-                      helper: '设备号用于识别设备，不是访问凭据。',
-                    ),
-                    SizedBox(height: 22),
-                    _NumberBlock(
-                      label: '6 位动态验证码',
-                      value: '582 614',
-                      helper: '演示有效期 02:00 · 成功配对后失效。',
-                      amber: true,
-                    ),
-                  ],
-                );
-              }
-              return const Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  Expanded(
-                    child: _NumberBlock(
-                      label: '9 位设备号',
-                      value: '419 049 723',
-                      helper: '设备号用于识别设备，不是访问凭据。',
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('本机 Windows 设备', style: TextStyle(color: P2PColors.muted, fontSize: 13)),
+                        SizedBox(height: 5),
+                        Text('启动共享后，其他设备可通过数字配对连接。',
+                          style: TextStyle(color: P2PColors.text, fontSize: 17, fontWeight: FontWeight.w800)),
+                      ],
                     ),
                   ),
-                  SizedBox(width: 26),
-                  SizedBox(height: 82, child: VerticalDivider(color: P2PColors.outline, width: 1)),
-                  SizedBox(width: 26),
-                  Expanded(
-                    child: _NumberBlock(
-                      label: '6 位动态验证码',
-                      value: '582 614',
-                      helper: '演示有效期 02:00 · 成功配对后失效。',
-                      amber: true,
-                    ),
+                  StatusDot(
+                    color: running ? P2PColors.mint : P2PColors.muted,
+                    label: running ? '共享已启动' : '共享已停止',
                   ),
                 ],
-              );
-            },
-          ),
-          const SizedBox(height: 23),
-          const Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
-              _CopyButton(value: '419049723', label: '复制设备号'),
-              _CopyButton(value: '582614', label: '复制验证码'),
+              ),
+              const SizedBox(height: 20),
+              if (controller.deviceNumber.isNotEmpty || hasCode)
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final compact = constraints.maxWidth < 620;
+                    final items = [
+                      _NumberBlock(
+                        label: '9位设备号',
+                        value: controller.deviceNumber.isEmpty ? '注册中…' : controller.deviceNumber,
+                        helper: '用于识别设备，不是访问凭据。',
+                      ),
+                      _NumberBlock(
+                        label: '6位动态验证码',
+                        value: hasCode ? controller.pairingCode : '等待生成…',
+                        helper: '由中转服务定时轮换；仅用于首次授权。',
+                        amber: true,
+                      ),
+                    ];
+                    return compact
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [items[0], const SizedBox(height: 18), items[1]],
+                          )
+                        : Row(
+                            children: [
+                              Expanded(child: items[0]),
+                              const SizedBox(width: 24),
+                              const SizedBox(height: 78, child: VerticalDivider(color: P2PColors.outline)),
+                              const SizedBox(width: 24),
+                              Expanded(child: items[1]),
+                            ],
+                          );
+                  },
+                )
+              else
+                const Text(
+                  '尚未启动共享，因此还没有设备号或动态验证码。',
+                  style: TextStyle(color: P2PColors.muted, fontSize: 12),
+                ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 9,
+                runSpacing: 9,
+                children: [
+                  if (controller.deviceNumber.isNotEmpty)
+                    OutlinedButton.icon(
+                      onPressed: () => _copy(context, controller.deviceNumber, '设备号'),
+                      icon: const Icon(Icons.copy_rounded, size: 15),
+                      label: const Text('复制设备号'),
+                    ),
+                  if (hasCode)
+                    OutlinedButton.icon(
+                      onPressed: () => _copy(context, controller.pairingCode, '验证码'),
+                      icon: const Icon(Icons.copy_rounded, size: 15),
+                      label: const Text('复制验证码'),
+                    ),
+                  if (!controller.tokenConfigured)
+                    OutlinedButton.icon(
+                      onPressed: onSettings,
+                      icon: const Icon(Icons.settings_rounded, size: 15),
+                      label: const Text('配置中转服务'),
+                    ),
+                  FilledButton.icon(
+                    onPressed: !controller.bridgeAvailable || (!running && !controller.tokenConfigured)
+                        ? onSettings
+                        : () => running ? controller.stopHost() : controller.startHost(),
+                    icon: Icon(running ? Icons.stop_rounded : Icons.play_arrow_rounded),
+                    label: Text(running ? '停止共享' : '启动本机共享'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                controller.hostStatus,
+                style: const TextStyle(color: P2PColors.muted, fontSize: 12),
+              ),
+              if (controller.pendingRequestId != null) ...[
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF302A22),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF75542D)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('待确认的连接请求', style: TextStyle(fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 5),
+                      Text(
+                        '控制端指纹：\${controller.pendingViewerFingerprint ?? "未知设备"}',
+                        style: const TextStyle(color: P2PColors.muted, fontSize: 12),
+                      ),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          FilledButton(
+                            onPressed: () => controller.approvePairing(controller.pendingRequestId!),
+                            child: const Text('允许本次连接'),
+                          ),
+                          OutlinedButton(
+                            onPressed: () => controller.denyPairing(controller.pendingRequestId!),
+                            child: const Text('拒绝'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
-        ],
-      ),
+        );
+      },
     );
+  }
+
+  static Future<void> _copy(BuildContext context, String value, String label) async {
+    await Clipboard.setData(ClipboardData(text: value));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('\$label已复制')));
+    }
   }
 }
 
@@ -276,126 +323,24 @@ class _NumberBlock extends StatelessWidget {
   final bool amber;
 
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: const TextStyle(color: P2PColors.muted, fontSize: 12)),
-        const SizedBox(height: 8),
-        SelectableText(
-          value,
-          style: TextStyle(
-            color: amber ? P2PColors.amber : P2PColors.mint,
-            fontSize: 31,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 2.3,
-          ),
-        ),
-        const SizedBox(height: 5),
-        Text(helper, style: const TextStyle(color: P2PColors.muted, fontSize: 11)),
-      ],
-    );
-  }
-}
-
-class _CopyButton extends StatelessWidget {
-  const _CopyButton({required this.value, required this.label});
-
-  final String value;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return OutlinedButton.icon(
-      onPressed: () async {
-        await Clipboard.setData(ClipboardData(text: value));
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('$label（演示数据）已复制')),
-          );
-        }
-      },
-      icon: const Icon(Icons.copy_rounded, size: 16),
-      label: Text(label),
-    );
-  }
-}
-
-class _QuickConnectCard extends StatefulWidget {
-  const _QuickConnectCard({required this.onPreview});
-
-  final VoidCallback onPreview;
-
-  @override
-  State<_QuickConnectCard> createState() => _QuickConnectCardState();
-}
-
-class _QuickConnectCardState extends State<_QuickConnectCard> {
-  final _device = TextEditingController();
-  final _code = TextEditingController();
-
-  @override
-  void dispose() {
-    _device.dispose();
-    _code.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return PanelCard(
-      padding: const EdgeInsets.all(19),
-      child: Column(
+  Widget build(BuildContext context) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
-            children: [
-              Icon(Icons.link_rounded, color: P2PColors.mint),
-              SizedBox(width: 9),
-              Text('快速连接', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
-            ],
-          ),
-          const SizedBox(height: 14),
-          TextField(
-            controller: _device,
-            keyboardType: TextInputType.number,
-            maxLength: 9,
-            decoration: const InputDecoration(
-              labelText: '9 位设备号',
-              hintText: '输入对方设备号',
-              counterText: '',
+          Text(label, style: const TextStyle(color: P2PColors.muted, fontSize: 12)),
+          const SizedBox(height: 8),
+          SelectableText(
+            value,
+            style: TextStyle(
+              color: amber ? P2PColors.amber : P2PColors.mint,
+              fontSize: 30,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 2,
             ),
           ),
-          const SizedBox(height: 9),
-          TextField(
-            controller: _code,
-            keyboardType: TextInputType.number,
-            maxLength: 6,
-            obscureText: true,
-            decoration: const InputDecoration(
-              labelText: '6 位动态验证码',
-              hintText: '输入一次性验证码',
-              counterText: '',
-            ),
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('UI 原型：真实配对接口将在后续阶段接入。')),
-                );
-                widget.onPreview();
-              },
-              icon: const Icon(Icons.arrow_forward_rounded, size: 18),
-              label: const Text('连接预览'),
-            ),
-          ),
+          const SizedBox(height: 5),
+          Text(helper, style: const TextStyle(color: P2PColors.muted, fontSize: 11)),
         ],
-      ),
-    );
-  }
+      );
 }
 
 class _OverviewCard extends StatelessWidget {
@@ -414,21 +359,19 @@ class _OverviewCard extends StatelessWidget {
   final Color accent;
 
   @override
-  Widget build(BuildContext context) {
-    return PanelCard(
-      padding: const EdgeInsets.all(19),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: accent, size: 23),
-          const SizedBox(height: 14),
-          Text(title, style: const TextStyle(color: P2PColors.muted, fontSize: 12)),
-          const SizedBox(height: 4),
-          Text(value, style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w900)),
-          const SizedBox(height: 4),
-          Text(detail, style: const TextStyle(color: P2PColors.muted, fontSize: 11)),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => PanelCard(
+        padding: const EdgeInsets.all(19),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: accent, size: 23),
+            const SizedBox(height: 14),
+            Text(title, style: const TextStyle(color: P2PColors.muted, fontSize: 12)),
+            const SizedBox(height: 4),
+            Text(value, style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 4),
+            Text(detail, style: const TextStyle(color: P2PColors.muted, fontSize: 11)),
+          ],
+        ),
+      );
 }
