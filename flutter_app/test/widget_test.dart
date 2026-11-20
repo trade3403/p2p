@@ -37,6 +37,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('允许远程鼠标和键盘'), findsOneWidget);
 
+    await tester.tap(find.text('我的').last);
+    await tester.pumpAndSettle();
     await tester.tap(find.text('网络连接'));
     await tester.pumpAndSettle();
     expect(find.text('中转服务器'), findsOneWidget);
