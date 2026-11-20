@@ -24,23 +24,23 @@ class SettingsScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('应用体验', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-              const SizedBox(height: 13),
-              const _SettingRow(
+              Text('应用体验', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+              SizedBox(height: 13),
+              _SettingRow(
                 icon: Icons.dark_mode_rounded,
                 title: '外观',
                 subtitle: '深色主题 · P2P Remote 专属配色',
                 value: '深色',
               ),
-              const Divider(color: P2PColors.outline),
-              const _SettingRow(
+              Divider(color: P2PColors.outline),
+              _SettingRow(
                 icon: Icons.language_rounded,
                 title: '语言',
                 subtitle: '应用界面语言',
                 value: '简体中文',
               ),
-              const Divider(color: P2PColors.outline),
-              const _SettingRow(
+              Divider(color: P2PColors.outline),
+              _SettingRow(
                 icon: Icons.notifications_active_outlined,
                 title: '连接通知',
                 subtitle: '连接请求、断开和安全提醒',
