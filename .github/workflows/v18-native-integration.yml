@@ -228,6 +228,7 @@ jobs:
   android:
     name: Flutter Android + Kotlin remote bridge
     needs: windows
+    if: always()
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     defaults:
