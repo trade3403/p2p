@@ -479,6 +479,7 @@ internal class AndroidRemoteEngine(
                                         }
                                         h264Width=accessUnit.width
                                         h264Height=accessUnit.height
+                                        onVideoSize(h264Width, h264Height)
                                         h264Active=true
                                         frame=null
                                     }
