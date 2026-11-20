@@ -80,11 +80,11 @@ jobs:
           }
 
       - name: Test existing Rust core and native bridge
-        run: cargo test --manifest-path desktop/Cargo.toml --lib
+        run: cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features
 
       - name: Build Rust native shared library
         run: |
-          cargo build --manifest-path desktop/Cargo.toml --lib --release
+          cargo build --manifest-path desktop/Cargo.toml --lib --no-default-features --release
           $dll = 'desktop/target/release/p2p_remote.dll'
           if (-not (Test-Path $dll) -or (Get-Item $dll).Length -lt 100000) {
             throw "Rust native DLL missing or unexpectedly small: $dll"
