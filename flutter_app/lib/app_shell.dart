@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'app_theme.dart';
+import 'app_page.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/devices_screen.dart';
 import 'screens/network_screen.dart';
@@ -8,8 +9,6 @@ import 'screens/remote_screen.dart';
 import 'screens/security_screen.dart';
 import 'screens/settings_screen.dart';
 import 'widgets/p2p_widgets.dart';
-
-enum AppPage { home, remote, devices, security, network, settings }
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
@@ -39,7 +38,7 @@ class _AppShellState extends State<AppShell> {
       AppPage.devices => DevicesScreen(onNavigate: _navigate),
       AppPage.security => const SecurityScreen(),
       AppPage.network => const NetworkScreen(),
-      AppPage.settings => const SettingsScreen(),
+      AppPage.settings => SettingsScreen(onNavigate: _navigate),
     };
   }
 
