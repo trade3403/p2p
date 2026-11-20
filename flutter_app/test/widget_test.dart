@@ -13,12 +13,12 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: buildP2PTheme(),
-        home: const AppShell(),
+        home: const AppShell(showNativeWindowFrame: false),
       ),
     );
 
     expect(find.text('设备概览'), findsOneWidget);
-    expect(find.text('UI 原型 · 演示数据'), findsOneWidget);
+    expect(find.text('P2P REMOTE  /  V0.18'), findsOneWidget);
 
     await tester.tap(find.text('设备').last);
     await tester.pumpAndSettle();
@@ -27,7 +27,8 @@ void main() {
     await tester.tap(find.text('远控').last);
     await tester.pumpAndSettle();
     expect(find.text('远程控制'), findsOneWidget);
-    expect(find.textContaining('视频流和远控事件尚未接入'), findsOneWidget);
+    expect(find.text('连接 Windows 电脑'), findsOneWidget);
+    expect(find.text('远程桌面'), findsOneWidget);
 
     await tester.tap(find.text('我的').last);
     await tester.pumpAndSettle();
