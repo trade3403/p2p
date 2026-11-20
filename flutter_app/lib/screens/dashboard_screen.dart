@@ -131,7 +131,7 @@ class _AndroidBridgeNotice extends StatelessWidget {
           Text('Android 控制端', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
           SizedBox(height: 7),
           Text(
-            'Android 原生远控功能仍由现有 Kotlin 客户端提供。Flutter 页面与 Android 会话、MediaCodec 纹理的桥接正在 V0.18 后续阶段接入。',
+            'Flutter 页面现已通过原生通道调用 Kotlin 配对、AES-GCM、WSS 会话和 Android MediaCodec 解码器。Android 作为控制端连接 Windows；本机共享仍由 Windows 端提供。',
             style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.5),
           ),
         ],
