@@ -43,6 +43,10 @@ jobs:
           export PATH="$FLUTTER_ROOT/bin:$PATH"
           flutter --version
           flutter precache --android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
       - name: Configure Android SDK
         shell: bash
         run: |
