@@ -1,10 +1,24 @@
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'app_shell.dart';
 import 'app_theme.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  if (Platform.isWindows) {
+    final window = WindowManager.instance.getCurrent();
+    if (window != null) {
+      window.title = 'P2P Remote';
+      window.titleBarStyle = TitleBarStyle.hidden;
+      window.minimumSize = const Size(980, 640).toNative();
+      window.hasShadow = true;
+    }
+  }
+
   runApp(const P2PRemoteApp());
 }
 
