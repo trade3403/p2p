@@ -151,6 +151,9 @@ internal class AndroidRemoteEngine(
         "clipboard_text" to clipboardResult,
         "transport" to transport,
         "rtt_ms" to rttMs,
+        "udp_report" to udpReport,
+        "stun_report" to stunReport,
+        "udp_attempted" to udpAttempted,
         "frame_width" to if (h264Active) h264Width else (frame?.width ?: 0),
         "frame_height" to if (h264Active) h264Height else (frame?.height ?: 0),
         "h264_active" to h264Active,
@@ -188,6 +191,8 @@ internal class AndroidRemoteEngine(
                 "sendText" -> sendControlText(arguments["text"] as? String ?: "")
                 "sendKey" -> sendRemoteKey(arguments["key"] as? String ?: "")
                 "selectMonitor" -> selectMonitor((arguments["index"] as? Number)?.toInt() ?: -1)
+                "probeSTUN" -> probeSTUN(arguments["server"] as? String ?: relayUrl)
+                "startUdpPunch" -> startUdpPunch()
                 "getClipboardText" -> send(JSONObject().put("type", "clipboard_get"))
                 "setClipboardText" -> sendClipboardSet(arguments["text"] as? String ?: "")
                 else -> throw IllegalArgumentException("未知 Android 原生桥接命令：$method")
