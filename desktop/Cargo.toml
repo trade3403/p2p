@@ -5,6 +5,11 @@ edition = "2021"
 license = "Proprietary"
 description = "Personal remote desktop Windows host - private source"
 
+[lib]
+name = "p2p_remote"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 iced = { version = "0.13.1", features = ["tokio", "image"] }
 tokio = { version = "1.43", features = ["full"] }
