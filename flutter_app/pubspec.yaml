@@ -1,7 +1,7 @@
 name: p2p_remote_ui
-description: P2P Remote V0.17 cross-platform Flutter UI prototype.
+description: P2P Remote V0.18 Flutter client with native Windows remote core.
 publish_to: none
-version: 0.17.0+1
+version: 0.18.0+1
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
