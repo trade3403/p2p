@@ -594,7 +594,7 @@ impl Engine {
                     }
                     ViewerEvent::Monitors(value) => {
                         state.snapshot.monitors = serde_json::from_str(&value).unwrap_or(json!({"count":1,"selected":0}));
-                        state.emit(json!({"type":"monitors","value":state.snapshot.monitors}));
+                        state.emit(json!({"type":"monitors","value":state.snapshot.monitors.clone()}));
                     }
                     ViewerEvent::Clipboard(value) => {
                         state.snapshot.clipboard_text = value.clone();
