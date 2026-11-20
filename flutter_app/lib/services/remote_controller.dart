@@ -5,6 +5,7 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 typedef _InitNative = Int32 Function();
 typedef _InitDart = int Function();
@@ -37,6 +38,9 @@ typedef _CopyFrameDart = int Function(
 /// Secrets are passed only into the Rust process boundary and persisted there
 /// with DPAPI; the UI receives display-safe snapshots and JPEG frames.
 class P2PRemoteController extends ChangeNotifier {
+  static const MethodChannel _androidBridge = MethodChannel('com.p2p.remote/bridge');
+  static const EventChannel _androidEvents = EventChannel('com.p2p.remote/events');
+
   P2PRemoteController._();
 
   static final P2PRemoteController instance = P2PRemoteController._();
@@ -52,6 +56,9 @@ class P2PRemoteController extends ChangeNotifier {
   _CopyFrameDart? _copyFrame;
   Timer? _eventTimer;
   Timer? _frameTimer;
+  StreamSubscription<dynamic>? _androidEventSubscription;
+  int? videoTextureId;
+  bool h264Active = false;
   bool _initialized = false;
   bool _initializing = false;
   bool bridgeAvailable = false;
@@ -97,10 +104,25 @@ class P2PRemoteController extends ChangeNotifier {
     if (_initialized || _initializing) return;
     _initializing = true;
     try {
+      if (Platform.isAndroid) {
+        _androidEventSubscription = _androidEvents.receiveBroadcastStream().listen(
+          _handleAndroidEvent,
+          onError: (Object error) {
+            bridgeError = 'Android 原生事件通道异常：$error';
+            notifyListeners();
+          },
+        );
+        final response = await _androidBridge.invokeMapMethod<String, dynamic>('snapshot');
+        if (response == null) throw StateError('Android 原生桥接没有返回状态');
+        _applyResponse(response);
+        bridgeAvailable = true;
+        bridgeError = '';
+        _initialized = true;
+        notifyListeners();
+        return;
+      }
       if (!Platform.isWindows) {
-        bridgeError = Platform.isAndroid
-            ? 'Android 原生会话桥接正在接入；当前保留原生 Android 远控客户端。'
-            : '当前平台尚未提供原生远控桥接。';
+        bridgeError = '当前平台尚未提供原生远控桥接。';
         bridgeAvailable = false;
         _initialized = true;
         notifyListeners();
@@ -133,6 +155,22 @@ class P2PRemoteController extends ChangeNotifier {
   }
 
   Future<Map<String, dynamic>> _invoke(Map<String, Object?> command) async {
+    if (Platform.isAndroid) {
+      try {
+        final method = command['method'] as String;
+        final arguments = Map<String, Object?>.from(command)..remove('method');
+        final decoded = await _androidBridge.invokeMapMethod<String, dynamic>(method, arguments);
+        if (decoded == null) {
+          return <String, dynamic>{'ok': false, 'error': 'Android bridge returned a null response'};
+        }
+        _applyResponse(decoded);
+        return decoded;
+      } catch (error) {
+        lastEvent = 'Android 原生桥接调用失败：$error';
+        notifyListeners();
+        return <String, dynamic>{'ok': false, 'error': lastEvent};
+      }
+    }
     if (!bridgeAvailable || _command == null || _freeString == null) {
       return <String, dynamic>{'ok': false, 'error': bridgeError};
     }
@@ -145,26 +183,70 @@ class P2PRemoteController extends ChangeNotifier {
         if (decoded is! Map<String, dynamic>) {
           return <String, dynamic>{'ok': false, 'error': 'Invalid native response'};
         }
-        final snapshot = decoded['snapshot'];
-        if (snapshot is Map<String, dynamic>) {
-          _snapshot = snapshot;
-          if (_snapshot['viewer_connected'] != true) {
-            frame = null;
-            frameWidth = 0;
-            frameHeight = 0;
-            _lastFrameVersion = 0;
-          }
-        }
-        if (decoded['ok'] != true) {
-          lastEvent = (decoded['error'] as String?) ?? 'Native command failed';
-        }
-        notifyListeners();
+        _applyResponse(decoded);
         return decoded;
       } finally {
         _freeString!(output);
       }
     } finally {
       malloc.free(input);
+    }
+  }
+
+  void _applyResponse(Map<String, dynamic> decoded) {
+    final snapshot = decoded['snapshot'];
+    if (snapshot is Map) {
+      _snapshot = Map<String, dynamic>.from(snapshot);
+      final texture = _snapshot['texture_id'];
+      videoTextureId = texture is num ? texture.toInt() : null;
+      h264Active = _snapshot['h264_active'] == true;
+      if (_snapshot['viewer_connected'] != true) {
+        frame = null;
+        frameWidth = 0;
+        frameHeight = 0;
+        _lastFrameVersion = 0;
+      } else {
+        frameWidth = (_snapshot['frame_width'] as num?)?.toInt() ?? frameWidth;
+        frameHeight = (_snapshot['frame_height'] as num?)?.toInt() ?? frameHeight;
+      }
+    }
+    if (decoded['ok'] != true) {
+      lastEvent = (decoded['error'] as String?) ?? 'Native command failed';
+    }
+    notifyListeners();
+  }
+
+  void _handleAndroidEvent(dynamic raw) {
+    if (raw is! Map) return;
+    final type = raw['type'];
+    if (type == 'snapshot') {
+      final snapshot = raw['snapshot'];
+      if (snapshot is Map) {
+        _snapshot = Map<String, dynamic>.from(snapshot);
+        final texture = raw['texture_id'] ?? _snapshot['texture_id'];
+        videoTextureId = texture is num ? texture.toInt() : null;
+        h264Active = _snapshot['h264_active'] == true;
+        if (_snapshot['viewer_connected'] != true) {
+          frame = null;
+          frameWidth = 0;
+          frameHeight = 0;
+        } else {
+          frameWidth = (_snapshot['frame_width'] as num?)?.toInt() ?? frameWidth;
+          frameHeight = (_snapshot['frame_height'] as num?)?.toInt() ?? frameHeight;
+        }
+      }
+      notifyListeners();
+    } else if (type == 'frame') {
+      final data = raw['frame'];
+      if (data is Uint8List) {
+        frame = data;
+      } else if (data is List<int>) {
+        frame = Uint8List.fromList(data);
+      }
+      frameWidth = (raw['width'] as num?)?.toInt() ?? frameWidth;
+      frameHeight = (raw['height'] as num?)?.toInt() ?? frameHeight;
+      h264Active = false;
+      notifyListeners();
     }
   }
 
@@ -320,6 +402,7 @@ class P2PRemoteController extends ChangeNotifier {
   void dispose() {
     _eventTimer?.cancel();
     _frameTimer?.cancel();
+    _androidEventSubscription?.cancel();
     super.dispose();
   }
 }
