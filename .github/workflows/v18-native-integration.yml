@@ -231,13 +231,32 @@ jobs:
 
   android:
     name: Flutter Android + Kotlin remote bridge
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+    needs: windows
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 120
     defaults:
       run:
-        shell: bash
+        shell: powershell
     steps:
-      - uses: actions/checkout@v4
+      - name: Retrieve exact source archive for the Android build
+        shell: powershell
+        env:
+          GH_SOURCE_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-v019-android-' + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+          $zip = Join-Path $archiveRoot 'source.zip'
+          $uri = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/zipball/' + $env:GITHUB_SHA
+          $headers = @{ Authorization = ('Bearer ' + $env:GH_SOURCE_TOKEN); 'User-Agent' = 'p2p-v019-android-ci'; Accept = 'application/vnd.github+json' }
+          Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $zip -UseBasicParsing -TimeoutSec 180
+          $unpack = Join-Path $archiveRoot 'extracted'
+          Expand-Archive -Path $zip -DestinationPath $unpack -Force
+          $root = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
+          if (-not $root) { throw 'Android source archive is missing its repository directory.' }
+          Get-ChildItem -LiteralPath $root.FullName -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force
+          }
 
       - uses: actions/setup-java@v4
         with:
@@ -248,26 +267,60 @@ jobs:
         with:
           python-version: '3.12'
 
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
+      - name: Prepare Flutter and Android SDK
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
+          $flutterRoot = Join-Path $cacheRoot 'flutter-stable'
+          $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
+          if (-not (Test-Path $flutterExe)) {
+            git clone --depth 1 --branch stable https://github.com/flutter/flutter.git $flutterRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install Flutter stable SDK for Android.' }
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $flutterRoot 'bin')
+          $env:PATH = (Join-Path $flutterRoot 'bin') + ';' + $env:PATH
+
+          $sdk = $env:ANDROID_SDK_ROOT
+          if (-not $sdk) { $sdk = $env:ANDROID_HOME }
+          if (-not $sdk) {
+            $candidate = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
+            if (Test-Path $candidate) { $sdk = $candidate }
+          }
+          if (-not $sdk -or -not (Test-Path $sdk)) {
+            throw 'Android SDK is not installed on the Windows Runner. Install Android SDK command-line tools and set ANDROID_SDK_ROOT.'
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value ('ANDROID_SDK_ROOT=' + $sdk)
+          Add-Content -Path $env:GITHUB_ENV -Value ('ANDROID_HOME=' + $sdk)
+          flutter --version
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter SDK is unavailable.' }
+          flutter doctor -v
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android toolchain check failed.' }
 
       - name: Generate Flutter Android platform and link Kotlin remote engine
         working-directory: flutter_app
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
+          $androidPlatform = Join-Path $env:GITHUB_WORKSPACE 'flutter_app\android'
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE 'flutter_app\build'
+          if (Test-Path $androidPlatform) { Remove-Item -LiteralPath $androidPlatform -Recurse -Force }
+          if (Test-Path $buildDir) { Remove-Item -LiteralPath $buildDir -Recurse -Force }
           flutter create --platforms=android --org com.p2p.remote --project-name p2p_remote_ui .
-          python ../scripts/prepare-flutter-android.py
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android runner generation failed.' }
+          python ..\scripts\prepare-flutter-android.py
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android native bridge preparation failed.' }
 
       - name: Analyze, test and build Android release APK
         working-directory: flutter_app
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
           flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw 'Android flutter pub get failed.' }
           flutter analyze
+          if ($LASTEXITCODE -ne 0) { throw 'Android flutter analyze failed.' }
           flutter test
+          if ($LASTEXITCODE -ne 0) { throw 'Android flutter tests failed.' }
           flutter build apk --release
+          if ($LASTEXITCODE -ne 0) { throw 'Android release APK build failed.' }
 
       - uses: actions/upload-artifact@v4
         with:
