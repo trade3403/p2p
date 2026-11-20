@@ -150,7 +150,9 @@ class P2PRemoteController extends ChangeNotifier {
       _frameTimer = Timer.periodic(const Duration(milliseconds: 33), (_) => _readLatestFrame());
     } catch (error) {
       bridgeAvailable = false;
-      bridgeError = '无法加载 Windows Rust 远控核心：$error';
+      bridgeError = Platform.isAndroid
+          ? '无法初始化 Android Kotlin 远控桥接：$error'
+          : '无法加载 Windows Rust 远控核心：$error';
       _initialized = true;
     } finally {
       _initializing = false;
