@@ -74,17 +74,22 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           rustc --version
+          if ($LASTEXITCODE -ne 0) { throw 'rustc --version failed' }
           cargo --version
+          if ($LASTEXITCODE -ne 0) { throw 'cargo --version failed' }
           if (-not (Test-Path 'desktop/src/flutter_bridge.rs')) {
             throw 'Missing Rust Flutter bridge source.'
           }
 
       - name: Test existing Rust core and native bridge
-        run: cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features
+        run: |
+          cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features
+          if ($LASTEXITCODE -ne 0) { throw 'Rust native core tests failed' }
 
       - name: Build Rust native shared library
         run: |
           cargo build --manifest-path desktop/Cargo.toml --lib --no-default-features --release
+          if ($LASTEXITCODE -ne 0) { throw 'Rust native DLL build failed' }
           $dll = 'desktop/target/release/p2p_remote.dll'
           if (-not (Test-Path $dll) -or (Get-Item $dll).Length -lt 100000) {
             throw "Rust native DLL missing or unexpectedly small: $dll"
@@ -105,8 +110,11 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value $flutterBin
           $env:PATH = $flutterBin + ';' + $env:PATH
           flutter --version
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter SDK invocation failed' }
           flutter config --enable-windows-desktop
+          if ($LASTEXITCODE -ne 0) { throw 'Could not enable Flutter Windows desktop' }
           flutter precache --windows
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows precache failed' }
 
       - name: Generate Windows platform runner and link Rust DLL
         working-directory: flutter_app
@@ -117,6 +125,7 @@ jobs:
             if (Test-Path $path) { Remove-Item -LiteralPath $path -Recurse -Force }
           }
           flutter create --platforms=windows,android --project-name p2p_remote_ui .
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows/Android runner generation failed' }
           $rustDll = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop\target\release\p2p_remote.dll')).Path.Replace('\','/')
           $runnerCmake = Join-Path $env:GITHUB_WORKSPACE 'flutter_app\windows\runner\CMakeLists.txt'
           if (-not (Test-Path $runnerCmake)) { throw 'Flutter Windows runner CMakeLists.txt was not generated.' }
@@ -133,10 +142,15 @@ jobs:
       - name: Analyze, test and build Flutter Windows
         working-directory: flutter_app
         run: |
+          $ErrorActionPreference = 'Stop'
           flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw 'flutter pub get failed' }
           flutter analyze
+          if ($LASTEXITCODE -ne 0) { throw 'flutter analyze failed' }
           flutter test
+          if ($LASTEXITCODE -ne 0) { throw 'flutter test failed' }
           flutter build windows --release
+          if ($LASTEXITCODE -ne 0) { throw 'flutter build windows --release failed' }
 
       - name: Verify linked native DLL and package Windows build
         run: |
