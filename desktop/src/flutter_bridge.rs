@@ -238,9 +238,11 @@ impl Engine {
         let Some(server) = value.get("server").and_then(Value::as_str).map(str::trim) else {
             return self.fail("中转地址不能为空");
         };
-        let Some(token) = value.get("token").and_then(Value::as_str).map(str::trim) else {
-            return self.fail("中转访问口令不能为空");
-        };
+        let supplied_token = value.get("token").and_then(Value::as_str).map(str::trim).unwrap_or("");
+        let token = if supplied_token.is_empty() { self.relay_token.as_str() } else { supplied_token };
+        if token.is_empty() {
+            return self.fail("请填写中转服务器访问口令");
+        }
         if !local_settings::is_safe_address(server) {
             return self.fail("中转地址必须是 HTTPS/WSS，且不能包含账号、参数或片段");
         }
