@@ -35,7 +35,7 @@ Section "P2P Remote" SEC_MAIN
   SetOutPath "$INSTDIR"
   File /r "${APP_SOURCE_DIR}\*.*"
 
-  IfFileExists "$INSTDIR\${APP_EXE}" +2 0
+  IfFileExists "$INSTDIR\${APP_EXE}" +1 0
     Abort "安装包中缺少主程序 ${APP_EXE}。请重新下载完整安装包。"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
