@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../app_shell.dart';
+import '../app_page.dart';
 import '../app_theme.dart';
 import '../widgets/p2p_widgets.dart';
 
