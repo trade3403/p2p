@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 
 import 'package:material_ui/material_ui.dart';
 
@@ -59,7 +60,9 @@ class _NetworkScreenState extends State<NetworkScreen> {
                   const Text('中转服务器', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                   const SizedBox(height: 6),
                   const Text(
-                    '使用 HTTPS/WSS 地址。访问口令会保存在 Windows DPAPI 加密凭据库中，不会返回 Flutter 页面。',
+                    defaultTargetPlatform == TargetPlatform.android
+                        ? '使用 HTTPS/WSS 地址。访问口令由 Android Keystore 加密保存，不会返回 Flutter 页面。'
+                        : '使用 HTTPS/WSS 地址。访问口令会保存在 Windows DPAPI 加密凭据库中，不会返回 Flutter 页面.',
                     style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.5),
                   ),
                   const SizedBox(height: 18),
@@ -107,14 +110,16 @@ class _NetworkScreenState extends State<NetworkScreen> {
                   _NetworkStatusRow(
                     icon: Icons.key_rounded,
                     title: '访问口令',
-                    value: controller.tokenConfigured ? '已通过 DPAPI 加密保存' : '尚未配置',
+                    value: controller.tokenConfigured
+                        ? (defaultTargetPlatform == TargetPlatform.android ? '已通过 Android Keystore 加密保存' : '已通过 DPAPI 加密保存')
+                        : '尚未配置',
                   ),
                   _NetworkStatusRow(
                     icon: Icons.lock_rounded,
                     title: '本机凭据库',
                     value: controller.snapshot['vault_error'] is String
                         ? '读取失败，已拒绝覆盖'
-                        : 'Windows 当前用户 DPAPI',
+                        : defaultTargetPlatform == TargetPlatform.android ? 'Android Keystore' : 'Windows 当前用户 DPAPI',
                   ),
                   if (controller.snapshot['vault_error'] is String)
                     Padding(
@@ -166,7 +171,9 @@ class _NetworkScreenState extends State<NetworkScreen> {
     setState(() => _saving = false);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(ok ? '中转配置已通过 DPAPI 保存' : P2PRemoteController.instance.lastEvent),
+        content: Text(ok
+            ? (defaultTargetPlatform == TargetPlatform.android ? '中转配置已通过 Android Keystore 保存' : '中转配置已通过 DPAPI 保存')
+            : P2PRemoteController.instance.lastEvent),
       ),
     );
     if (ok) _token.clear();
