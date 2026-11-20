@@ -4,11 +4,11 @@ publish_to: none
 version: 0.17.0+1
 
 environment:
-  sdk: ">=3.14.0 <4.0.0"
-  flutter: ">=3.50.0"
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.10.0"
 
 dependencies:
-  window_manager: ^0.7.0
+  window_manager: ^0.5.2
   material_ui: ^1.0.0
   flutter:
     sdk: flutter
