@@ -20,7 +20,7 @@ class SettingsScreen extends StatelessWidget {
           trailing: PrototypePill(),
         ),
         const SizedBox(height: 24),
-        PanelCard(
+        const PanelCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
