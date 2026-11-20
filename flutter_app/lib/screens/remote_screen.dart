@@ -10,11 +10,11 @@ class RemoteScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListView(
       children: [
-        PageHeading(
+        const PageHeading(
           eyebrow: 'REMOTE SESSION',
           title: '远程控制',
           subtitle: '连接电脑后，在这里查看桌面并安全操作。',
-          trailing: const PrototypePill(),
+          trailing: PrototypePill(),
         ),
         const SizedBox(height: 22),
         PanelCard(
@@ -22,7 +22,7 @@ class RemoteScreen extends StatelessWidget {
           child: LayoutBuilder(
             builder: (context, constraints) {
               final compact = constraints.maxWidth < 700;
-              final device = const Row(
+              const device = Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(Icons.desktop_windows_rounded, color: P2PColors.mint, size: 20),
@@ -37,7 +37,7 @@ class RemoteScreen extends StatelessWidget {
                   ),
                 ],
               );
-              final actions = Wrap(
+              const actions = Wrap(
                 spacing: 7,
                 runSpacing: 7,
                 children: [
