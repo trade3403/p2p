@@ -216,14 +216,19 @@ class _RemoteScreenState extends State<RemoteScreen> {
                             height: height,
                             child: ColoredBox(
                               color: const Color(0xFF070D16),
-                              child: _controller.frame != null
-                                  ? Image.memory(
-                                      _controller.frame!,
-                                      fit: BoxFit.contain,
-                                      gaplessPlayback: true,
+                              child: _controller.h264Active && _controller.videoTextureId != null
+                                  ? Texture(
+                                      textureId: _controller.videoTextureId!,
                                       filterQuality: FilterQuality.low,
                                     )
-                                  : Center(
+                                  : _controller.frame != null
+                                      ? Image.memory(
+                                          _controller.frame!,
+                                          fit: BoxFit.contain,
+                                          gaplessPlayback: true,
+                                          filterQuality: FilterQuality.low,
+                                        )
+                                      : Center(
                                       child: Column(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
