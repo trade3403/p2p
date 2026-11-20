@@ -159,6 +159,11 @@ jobs:
           flutter build windows --release
           if ($LASTEXITCODE -ne 0) { throw 'flutter build windows --release failed' }
 
+      - name: Install NSIS (portable, no Chocolatey required)
+        uses: nsis-dev/setup-nsis@v1
+        with:
+          version: '3.11'
+
       - name: Verify linked native DLL and package Windows build
         run: |
           $ErrorActionPreference = 'Stop'
@@ -184,23 +189,10 @@ jobs:
           Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
           if ((Get-Item $zip).Length -lt 1000000) { throw 'Windows package is unexpectedly small.' }
 
-          $makensis = Get-Command makensis -ErrorAction SilentlyContinue
-          if (-not $makensis) {
-            $choco = Get-Command choco -ErrorAction SilentlyContinue
-            if (-not $choco) { throw 'NSIS (makensis) is missing and Chocolatey is unavailable on this runner.' }
-            choco install nsis --yes --no-progress
-            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed.' }
-            $makensis = Get-Command makensis -ErrorAction SilentlyContinue
-          }
-          if (-not $makensis) {
-            $candidate = 'C:\Program Files (x86)\NSIS\makensis.exe'
-            if (Test-Path $candidate) { $makensis = Get-Item $candidate }
-          }
-          if (-not $makensis) { throw 'NSIS makensis.exe could not be located.' }
+          $makensis = Get-Command makensis -ErrorAction Stop
           $makensisPath = $makensis.Source
           if (-not $makensisPath) { $makensisPath = $makensis.Path }
-          if (-not $makensisPath) { $makensisPath = $makensis.FullName }
-          if (-not $makensisPath) { throw 'NSIS executable path could not be resolved.' }
+          if (-not $makensisPath) { throw 'NSIS setup did not expose makensis.exe on PATH.' }
           Push-Location 'installer'
           try {
             & $makensisPath 'P2PRemote.nsi'
