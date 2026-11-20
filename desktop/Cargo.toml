@@ -1,17 +1,26 @@
 [package]
 name = "p2p-remote"
-version = "0.16.0"
+version = "0.18.0"
 edition = "2021"
 license = "Proprietary"
-description = "Personal remote desktop Windows host - private source"
+description = "P2P Remote native engine and Windows desktop client"
 
 [lib]
 name = "p2p_remote"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "p2p-remote"
+path = "src/main.rs"
+required-features = ["iced-ui"]
+
+[features]
+default = ["iced-ui"]
+iced-ui = ["dep:iced", "dep:tray-icon"]
+
 [dependencies]
-iced = { version = "0.13.1", features = ["tokio", "image"] }
+iced = { version = "0.13.1", features = ["tokio", "image"], optional = true }
 tokio = { version = "1.43", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # Explicit ring backend avoids rustls 0.23 auto-selection ambiguity when
@@ -44,7 +53,7 @@ screenshots = "0.8.10"
 enigo = { version = "0.6.1", default-features = false }
 arboard = { version = "3.6.1", default-features = false }
 openh264 = "0.9.9"
-tray-icon = "0.19.2"
+tray-icon = { version = "0.19.2", optional = true }
 
 [profile.release]
 lto = false
