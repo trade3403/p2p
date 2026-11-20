@@ -63,7 +63,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                     defaultTargetPlatform == TargetPlatform.android
                         ? '使用 HTTPS/WSS 地址。访问口令由 Android Keystore 加密保存，不会返回 Flutter 页面。'
                         : '使用 HTTPS/WSS 地址。访问口令会保存在 Windows DPAPI 加密凭据库中，不会返回 Flutter 页面.',
-                    style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.5),
+                    style: const TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.5),
                   ),
                   const SizedBox(height: 18),
                   TextField(
