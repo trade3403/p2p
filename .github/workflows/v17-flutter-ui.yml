@@ -23,19 +23,25 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - name: Install jq required by Flutter setup action
+      - name: Install Flutter SDK without elevated runner permissions
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y jq
+          if command -v flutter >/dev/null 2>&1; then
+            FLUTTER_BIN="$(command -v flutter)"
+            FLUTTER_ROOT="$(dirname "$(dirname "$FLUTTER_BIN")")"
+          else
+            CACHE_ROOT="${RUNNER_TOOL_CACHE:-$HOME/.cache}"
+            FLUTTER_ROOT="$CACHE_ROOT/flutter-stable"
+            if [ ! -x "$FLUTTER_ROOT/bin/flutter" ]; then
+              git clone --depth 1 --branch stable https://github.com/flutter/flutter.git "$FLUTTER_ROOT"
+            fi
+            FLUTTER_BIN="$FLUTTER_ROOT/bin/flutter"
           fi
-          jq --version
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
+          echo "$FLUTTER_ROOT/bin" >> "$GITHUB_PATH"
+          export PATH="$FLUTTER_ROOT/bin:$PATH"
+          flutter --version
+          flutter precache --android
       - name: Verify Android SDK
         shell: bash
         run: |
@@ -69,23 +75,28 @@ jobs:
         shell: powershell
     steps:
       - uses: actions/checkout@v4
-      - name: Install jq required by Flutter setup action
+      - name: Install Flutter SDK without elevated runner permissions
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not (Get-Command jq.exe -ErrorAction SilentlyContinue)) {
-            $jqDir = Join-Path $env:RUNNER_TEMP 'jq'
-            New-Item -ItemType Directory -Force -Path $jqDir | Out-Null
-            $jqPath = Join-Path $jqDir 'jq.exe'
-            Invoke-WebRequest -Uri 'https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-windows-amd64.exe' -OutFile $jqPath
-            Add-Content -Path $env:GITHUB_PATH -Value $jqDir
-            $env:PATH = $jqDir + ';' + $env:PATH
+          $flutterCommand = Get-Command flutter -ErrorAction SilentlyContinue
+          if ($flutterCommand) {
+            $flutterBin = Split-Path -Parent $flutterCommand.Source
+            $flutterRoot = Split-Path -Parent $flutterBin
+          } else {
+            $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
+            $flutterRoot = Join-Path $cacheRoot 'flutter-stable'
+            $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
+            if (-not (Test-Path $flutterExe)) {
+              git clone --depth 1 --branch stable https://github.com/flutter/flutter.git $flutterRoot
+              if ($LASTEXITCODE -ne 0) { throw 'Could not clone Flutter stable SDK.' }
+            }
+            $flutterBin = Join-Path $flutterRoot 'bin'
           }
-          jq --version
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
+          Add-Content -Path $env:GITHUB_PATH -Value $flutterBin
+          $env:PATH = $flutterBin + ';' + $env:PATH
+          flutter --version
+          flutter precache --windows
       - name: Enable Windows desktop and generate platform runners
         working-directory: flutter_app
         run: |
