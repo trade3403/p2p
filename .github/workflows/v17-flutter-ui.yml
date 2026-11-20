@@ -34,6 +34,7 @@ jobs:
             CACHE_ROOT="${RUNNER_TOOL_CACHE:-$HOME/.cache}"
             FLUTTER_ROOT="$CACHE_ROOT/flutter-stable"
             if [ ! -x "$FLUTTER_ROOT/bin/flutter" ]; then
+              rm -rf "$FLUTTER_ROOT"
               git clone --depth 1 --branch stable https://github.com/flutter/flutter.git "$FLUTTER_ROOT"
             fi
             FLUTTER_BIN="$FLUTTER_ROOT/bin/flutter"
@@ -88,6 +89,7 @@ jobs:
             $flutterRoot = Join-Path $cacheRoot 'flutter-stable'
             $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
             if (-not (Test-Path $flutterExe)) {
+              if (Test-Path $flutterRoot) { Remove-Item -LiteralPath $flutterRoot -Recurse -Force }
               git clone --depth 1 --branch stable https://github.com/flutter/flutter.git $flutterRoot
               if ($LASTEXITCODE -ne 0) { throw 'Could not clone Flutter stable SDK.' }
             }
