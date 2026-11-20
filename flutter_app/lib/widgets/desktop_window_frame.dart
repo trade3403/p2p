@@ -28,22 +28,44 @@ class _DesktopTitleBar extends StatefulWidget {
   State<_DesktopTitleBar> createState() => _DesktopTitleBarState();
 }
 
-class _DesktopTitleBarState extends State<_DesktopTitleBar> {
-  Window? get _window => WindowManager.instance.getCurrent();
+class _DesktopTitleBarState extends State<_DesktopTitleBar>
+    with WindowListener {
+  bool _isMaximized = false;
 
-  late bool _isMaximized = _window?.isMaximized ?? false;
+  @override
+  void initState() {
+    super.initState();
+    windowManager.addListener(this);
+    _refreshMaximizedState();
+  }
 
-  void _toggleMaximize() {
-    final window = _window;
-    if (window == null) return;
+  @override
+  void dispose() {
+    windowManager.removeListener(this);
+    super.dispose();
+  }
 
-    final shouldMaximize = !window.isMaximized;
-    if (shouldMaximize) {
-      window.maximize();
+  Future<void> _refreshMaximizedState() async {
+    final maximized = await windowManager.isMaximized();
+    if (mounted) setState(() => _isMaximized = maximized);
+  }
+
+  @override
+  void onWindowMaximize() {
+    if (mounted) setState(() => _isMaximized = true);
+  }
+
+  @override
+  void onWindowUnmaximize() {
+    if (mounted) setState(() => _isMaximized = false);
+  }
+
+  Future<void> _toggleMaximize() async {
+    if (_isMaximized) {
+      await windowManager.unmaximize();
     } else {
-      window.unmaximize();
+      await windowManager.maximize();
     }
-    setState(() => _isMaximized = shouldMaximize);
   }
 
   @override
@@ -60,50 +82,46 @@ class _DesktopTitleBarState extends State<_DesktopTitleBar> {
         children: [
           Expanded(
             child: DragToMoveArea(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onDoubleTap: _toggleMaximize,
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 16, right: 12),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 24,
-                        height: 24,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(7),
-                          gradient: const LinearGradient(
-                            colors: [P2PColors.mint, Color(0xFF3E91C7)],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          ),
-                        ),
-                        child: const Icon(
-                          Icons.bolt_rounded,
-                          color: Color(0xFF08211F),
-                          size: 16,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 16, right: 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 24,
+                      height: 24,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(7),
+                        gradient: const LinearGradient(
+                          colors: [P2PColors.mint, Color(0xFF3E91C7)],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
                         ),
                       ),
-                      const SizedBox(width: 9),
-                      const Text(
-                        'P2P Remote',
-                        style: TextStyle(
-                          color: P2PColors.text,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.2,
-                        ),
+                      child: const Icon(
+                        Icons.bolt_rounded,
+                        color: Color(0xFF08211F),
+                        size: 16,
                       ),
-                      const SizedBox(width: 10),
-                      const Text(
-                        'V0.17',
-                        style: TextStyle(
-                          color: P2PColors.muted,
-                          fontSize: 10,
-                        ),
+                    ),
+                    const SizedBox(width: 9),
+                    const Text(
+                      'P2P Remote',
+                      style: TextStyle(
+                        color: P2PColors.text,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.2,
                       ),
-                    ],
-                  ),
+                    ),
+                    const SizedBox(width: 10),
+                    const Text(
+                      'V0.17',
+                      style: TextStyle(
+                        color: P2PColors.muted,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -111,7 +129,7 @@ class _DesktopTitleBarState extends State<_DesktopTitleBar> {
           _WindowActionButton(
             tooltip: '最小化',
             icon: Icons.remove_rounded,
-            onPressed: () => _window?.minimize(),
+            onPressed: () => windowManager.minimize(),
           ),
           _WindowActionButton(
             tooltip: _isMaximized ? '还原' : '最大化',
@@ -124,7 +142,7 @@ class _DesktopTitleBarState extends State<_DesktopTitleBar> {
             tooltip: '关闭',
             icon: Icons.close_rounded,
             isClose: true,
-            onPressed: () => _window?.close(),
+            onPressed: () => windowManager.close(),
           ),
         ],
       ),
