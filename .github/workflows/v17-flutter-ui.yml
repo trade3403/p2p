@@ -64,7 +64,7 @@ jobs:
           sdk_status=${PIPESTATUS[1]}
           set -o pipefail
           if [ "$sdk_status" -ne 0 ]; then exit "$sdk_status"; fi
-          "$SDKMANAGER" --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-35" "platforms;android-36" "build-tools;35.0.0" "build-tools;36.0.0"
       - name: Generate Flutter platform runners
         working-directory: flutter_app
         run: flutter create --platforms=windows,android --project-name p2p_remote_ui .
@@ -95,21 +95,15 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $flutterCommand = Get-Command flutter -ErrorAction SilentlyContinue
-          if ($flutterCommand) {
-            $flutterBin = Split-Path -Parent $flutterCommand.Source
-            $flutterRoot = Split-Path -Parent $flutterBin
-          } else {
-            $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
-            $flutterRoot = Join-Path $cacheRoot 'flutter-stable'
-            $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
-            if (-not (Test-Path $flutterExe)) {
-              if (Test-Path $flutterRoot) { Remove-Item -LiteralPath $flutterRoot -Recurse -Force }
-              git clone --depth 1 --branch stable https://github.com/flutter/flutter.git $flutterRoot
-              if ($LASTEXITCODE -ne 0) { throw 'Could not clone Flutter stable SDK.' }
-            }
-            $flutterBin = Join-Path $flutterRoot 'bin'
+          $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
+          $flutterRoot = Join-Path $cacheRoot 'flutter-stable'
+          $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
+          if (-not (Test-Path $flutterExe)) {
+            if (Test-Path $flutterRoot) { Remove-Item -LiteralPath $flutterRoot -Recurse -Force }
+            git clone --depth 1 --branch stable https://github.com/flutter/flutter.git $flutterRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Could not clone Flutter stable SDK.' }
           }
+          $flutterBin = Join-Path $flutterRoot 'bin'
           Add-Content -Path $env:GITHUB_PATH -Value $flutterBin
           $env:PATH = $flutterBin + ';' + $env:PATH
           flutter --version
