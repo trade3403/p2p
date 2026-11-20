@@ -282,6 +282,16 @@ internal class AndroidRemoteEngine(
         sendControl(kind, x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))
     }
 
+    private fun emitFrame(bytes: ByteArray, width: Int, height: Int) {
+        if (bytes.isEmpty() || bytes.size > 3 * 1024 * 1024 || width <= 0 || height <= 0) return
+        onEvent(mapOf(
+            "type" to "frame",
+            "frame" to bytes.copyOf(),
+            "width" to width,
+            "height" to height,
+        ))
+    }
+
     private fun connect(server: String, relayToken: String, keyText: String, lanIp: String) {
         val key = try { decodeKey(keyText) } catch (_: Exception) {
             status = "会话密钥必须是 64 位十六进制字符串"
@@ -443,7 +453,6 @@ internal class AndroidRemoteEngine(
                                 if (socket === webSocket && requested) {
                                     if(h264Active) avcDecoder.reset()
                                     frame = decoded
-                                    emitFrame(jpeg, decoded.width, decoded.height)
                                     emitFrame(original.second, decoded.width, decoded.height)
                                     h264Active = false
                                     if(udpLastFrameAtMs != 0L) {
@@ -653,8 +662,7 @@ internal class AndroidRemoteEngine(
                     main.post {
                         if(requested && socket === ws && online) {
                             frame = decoded
-                                    emitFrame(jpeg, decoded.width, decoded.height)
-                                    emitFrame(original.second, decoded.width, decoded.height)
+                            emitFrame(jpeg, decoded.width, decoded.height)
                             if(h264Active) avcDecoder.reset()
                             h264Active = false
                             receivingFrames = true
@@ -790,16 +798,6 @@ internal class AndroidRemoteEngine(
         val ws=socket?:return
         if(!online)return
         try{ws.send(encryptPacket(s,2,data.toString().toByteArray()).toByteString())}catch(_:Exception){}
-    }
-    fun close() {
-        if (closed) return
-        closed = true
-        pairingCancelled.set(true)
-        main.removeCallbacks(statePump)
-        disconnect()
-        avcDecoder.close()
-        client.dispatcher.executorService.shutdown()
-        client.connectionPool.evictAll()
     }
     fun close() {
         if (closed) return
