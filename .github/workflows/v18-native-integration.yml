@@ -129,7 +129,7 @@ jobs:
           }
           flutter create --platforms=windows,android --org com.p2p.remote --project-name p2p_remote_ui .
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows/Android runner generation failed' }
-          python ..\scripts\prepare-flutter-android.py
+          & ..\scripts\prepare-flutter-android.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Android native bridge preparation failed' }
           & ..\scripts\prepare-flutter-windows-tray.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows tray preparation failed' }
@@ -298,7 +298,7 @@ jobs:
           if (Test-Path $buildDir) { Remove-Item -LiteralPath $buildDir -Recurse -Force }
           flutter create --platforms=android --org com.p2p.remote --project-name p2p_remote_ui .
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Android runner generation failed.' }
-          python ..\scripts\prepare-flutter-android.py
+          & ..\scripts\prepare-flutter-android.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Android native bridge preparation failed.' }
 
       - name: Analyze, test and build Android release APK
