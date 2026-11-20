@@ -207,29 +207,33 @@ class _SidebarItem extends StatelessWidget {
     return AnimatedContainer(
       duration: const Duration(milliseconds: 160),
       decoration: BoxDecoration(
-        color: selected ? const Color(0xFF193B49) : Colors.transparent,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: selected ? const Color(0xFF2C6E6A) : Colors.transparent,
         ),
       ),
-      child: ListTile(
-        dense: true,
-        visualDensity: const VisualDensity(vertical: -1),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-        leading: Icon(icon, size: 19, color: selected ? P2PColors.mint : P2PColors.muted),
-        title: Text(
-          label,
-          style: TextStyle(
-            color: selected ? P2PColors.text : P2PColors.muted,
-            fontSize: 13,
-            fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+      child: Material(
+        color: selected ? const Color(0xFF193B49) : Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: ListTile(
+          dense: true,
+          visualDensity: const VisualDensity(vertical: -1),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+          leading: Icon(icon, size: 19, color: selected ? P2PColors.mint : P2PColors.muted),
+          title: Text(
+            label,
+            style: TextStyle(
+              color: selected ? P2PColors.text : P2PColors.muted,
+              fontSize: 13,
+              fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+            ),
           ),
+          trailing: selected
+              ? const Icon(Icons.circle, size: 6, color: P2PColors.mint)
+              : null,
+          onTap: onTap,
         ),
-        trailing: selected
-            ? const Icon(Icons.circle, size: 6, color: P2PColors.mint)
-            : null,
-        onTap: onTap,
       ),
     );
   }
