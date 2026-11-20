@@ -17,7 +17,7 @@ class SettingsScreen extends StatelessWidget {
           eyebrow: 'PREFERENCES',
           title: '设置',
           subtitle: '管理应用外观、启动行为和本机信息。',
-          trailing: PrototypePill(),
+          trailing: StatusDot(color: P2PColors.mint, label: 'V0.19 原生桥接'),
         ),
         const SizedBox(height: 24),
         const PanelCard(
