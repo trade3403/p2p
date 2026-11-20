@@ -124,9 +124,9 @@ internal class AndroidRemoteEngine(
     fun snapshotResponse(): Map<String, Any?> =
         mapOf("ok" to true, "snapshot" to snapshotMap())
 
-    fun emitSnapshot() {
+    fun emitSnapshot(force: Boolean = false) {
         val snapshot = snapshotMap()
-        if (snapshot != lastEmittedSnapshot) {
+        if (force || snapshot != lastEmittedSnapshot) {
             lastEmittedSnapshot = snapshot
             onEvent(mapOf("type" to "snapshot", "snapshot" to snapshot))
         }
