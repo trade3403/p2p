@@ -1,0 +1,94 @@
+name: P2P Remote V0.17 Flutter UI Prototype
+
+on:
+  push:
+    branches: ['feature/v0.17-flutter-ui']
+    paths:
+      - 'flutter_app/**'
+      - 'docs/V0.17-FLUTTER-MIGRATION-AUDIT-PLAN.md'
+      - '.github/workflows/v17-flutter-ui.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2p-v17-flutter-ui
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Flutter analyze, widget tests and Android APK
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-$HOME/.android/sdk}"
+          test -d "$SDK_ROOT/platforms"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+      - name: Generate Flutter platform runners
+        working-directory: flutter_app
+        run: flutter create --platforms=windows,android --project-name p2p_remote_ui .
+      - name: Analyze, test and build Android
+        working-directory: flutter_app
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build apk --debug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-V0.17-Flutter-Android-UI-Prototype
+          path: flutter_app/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Flutter analyze, widget tests and Windows build
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Enable Windows desktop and generate platform runners
+        working-directory: flutter_app
+        run: |
+          flutter config --enable-windows-desktop
+          flutter create --platforms=windows,android --project-name p2p_remote_ui .
+      - name: Analyze, test and build Windows
+        working-directory: flutter_app
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build windows --release
+      - name: Package Windows UI prototype
+        working-directory: flutter_app
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem -Path 'build/windows' -Filter 'p2p_remote_ui.exe' -Recurse |
+            Select-Object -First 1
+          if (-not $exe) { throw 'Flutter Windows executable was not generated.' }
+          $package = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-V0.17-Flutter-Windows-UI-Prototype.zip'
+          Compress-Archive -Path (Join-Path $exe.Directory.FullName '*') -DestinationPath $package -Force
+          if ((Get-Item $package).Length -lt 100000) { throw 'Windows UI package is unexpectedly small.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-V0.17-Flutter-Windows-UI-Prototype
+          path: P2PRemote-V0.17-Flutter-Windows-UI-Prototype.zip
+          if-no-files-found: error
+          retention-days: 14
