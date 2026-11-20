@@ -99,7 +99,7 @@ class SettingsScreen extends StatelessWidget {
                       children: [
                         Text('P2P Remote', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
                         SizedBox(height: 3),
-                        Text('V0.18 Native Integration', style: TextStyle(color: P2PColors.muted, fontSize: 11)),
+                        Text('V0.19 Android Native Bridge', style: TextStyle(color: P2PColors.muted, fontSize: 11)),
                       ],
                     ),
                   ),
@@ -108,7 +108,7 @@ class SettingsScreen extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               const Text(
-                'Windows 端已开始接入现有 Rust Host/Viewer、数字配对、JPEG 画面和远程输入。Android Kotlin 会话桥接、多设备加密设备库及系统托盘迁移仍在后续阶段。',
+                'Windows 端使用 Rust Host/Viewer；Android Flutter 端通过 Kotlin MethodChannel/EventChannel 接入数字配对、AES-GCM、JPEG/H.264 画面和远程输入。Windows 系统托盘与正式安装程序正在接入。',
                 style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.55),
               ),
             ],
