@@ -30,7 +30,7 @@ internal class RelayCredentialStore(context: Context) {
             .put("token", relayToken)
             .toString().toByteArray(Charsets.UTF_8)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key(create = true))
+        cipher.init(Cipher.ENCRYPT_MODE, checkNotNull(key(create = true)))
         cipher.updateAAD("P2PRemoteRelayCredentialsV1".toByteArray(Charsets.UTF_8))
         val packet = cipher.iv + cipher.doFinal(plain)
         check(preferences.edit()
@@ -38,25 +38,27 @@ internal class RelayCredentialStore(context: Context) {
             .commit()) { "无法保存 Android Keystore 加密凭据" }
     }
 
-    fun load(): Credentials? = try {
-        val encoded = preferences.getString("encrypted_credentials", null) ?: return null
-        val packet = Base64.decode(encoded, Base64.DEFAULT)
-        if (packet.size !in 29..8192) return null
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(
-            Cipher.DECRYPT_MODE,
-            key(create = false) ?: return null,
-            GCMParameterSpec(128, packet.copyOfRange(0, 12))
-        )
-        cipher.updateAAD("P2PRemoteRelayCredentialsV1".toByteArray(Charsets.UTF_8))
-        val json = JSONObject(cipher.doFinal(packet.copyOfRange(12, packet.size)).toString(Charsets.UTF_8))
-        if (json.optInt("v") != 1) return null
-        val url = normalize(json.getString("relay"))
-        val token = json.getString("token")
-        if (token.length !in 32..512) return null
-        Credentials(url, token)
-    } catch (_: Exception) {
-        null
+    fun load(): Credentials? {
+        return try {
+            val encoded = preferences.getString("encrypted_credentials", null) ?: return null
+            val packet = Base64.decode(encoded, Base64.DEFAULT)
+            if (packet.size !in 29..8192) return null
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                key(create = false) ?: return null,
+                GCMParameterSpec(128, packet.copyOfRange(0, 12))
+            )
+            cipher.updateAAD("P2PRemoteRelayCredentialsV1".toByteArray(Charsets.UTF_8))
+            val json = JSONObject(cipher.doFinal(packet.copyOfRange(12, packet.size)).toString(Charsets.UTF_8))
+            if (json.optInt("v") != 1) return null
+            val url = normalize(json.getString("relay"))
+            val token = json.getString("token")
+            if (token.length !in 32..512) return null
+            Credentials(url, token)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     fun clear() {
