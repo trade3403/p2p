@@ -241,7 +241,6 @@ class _NumberBlock extends StatelessWidget {
             fontSize: 31,
             fontWeight: FontWeight.w900,
             letterSpacing: 2.3,
-            fontFeatures: const [FontFeature.tabularFigures()],
           ),
         ),
         const SizedBox(height: 5),
