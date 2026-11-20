@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:p2p_remote_ui/app_shell.dart';
 import 'package:p2p_remote_ui/app_theme.dart';
