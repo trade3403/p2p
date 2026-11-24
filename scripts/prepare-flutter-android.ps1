@@ -115,11 +115,15 @@ $gradleText = Get-Content -LiteralPath $gradle -Raw
 # until all native Android code and plugins can migrate to built-in Kotlin.
 $settings = Join-Path $flutterAndroid 'settings.gradle.kts'
 $settingsText = Get-Content -LiteralPath $settings -Raw
-$settingsText = $settingsText -replace '(id\("com\.android\.application"\)\s+version\s+")[^"]+(")', '19.3.12'
+$settingsText = $settingsText -replace '(id\("com\.android\.application"\)\s+version\s+")[^"]+(")', 'id("com.android.application") version "9.3.1"'
 if ($settingsText -notmatch 'id\("org\.jetbrains\.kotlin\.android"\)') {
     $settingsText = $settingsText -replace '(id\("com\.android\.application"\)[^\r\n]+)', ('$1' + [Environment]::NewLine + '    id("org.jetbrains.kotlin.android") version "2.4.20" apply false')
 } else {
-    $settingsText = $settingsText -replace '(id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+")[^"]+(")', '12.4.202'
+    $settingsText = $settingsText -replace '(id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+")[^"]+(")', 'id("org.jetbrains.kotlin.android") version "2.4.20"'
+}
+if ($settingsText -notmatch 'id\("com\.android\.application"\)\s+version\s+"9\.3\.1"' -or
+    $settingsText -notmatch 'id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+"2\.4\.20"') {
+    throw 'Generated plugin declarations do not match pinned Android toolchain.'
 }
 Set-Content -LiteralPath $settings -Value $settingsText -Encoding UTF8
 
@@ -139,7 +143,7 @@ if ($gradleText -notmatch 'id\("(kotlin-android|org\.jetbrains\.kotlin\.android)
 }
 $gradleText = $gradleText -replace 'JavaVersion\.VERSION_(11|21)', 'JavaVersion.VERSION_17'
 $gradleText = $gradleText -replace 'JvmTarget\.JVM_(11|21)', 'JvmTarget.JVM_17'
-$gradleText = $gradleText -replace '(jvmTarget\s*=\s*)"(11|21)"', '1"17"'
+$gradleText = $gradleText -replace '(jvmTarget\s*=\s*)"(11|21)"', 'jvmTarget = "17"'
 if ($gradleText -notmatch 'id\("(kotlin-android|org\.jetbrains\.kotlin\.android)"\)') {
     throw 'Generated Android app is missing the Kotlin plugin.'
 }
