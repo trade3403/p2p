@@ -172,6 +172,23 @@ def android_foreground():
     return any(PACKAGE in line and ("ResumedActivity" in line or "topResumedActivity" in line)
                for line in raw.splitlines())
 
+def android_prepare_launcher():
+    # The previous run's real screenshot shows Pixel Launcher ANR covering
+    # the Flutter app. Only recover that specific emulator system process;
+    # never dismiss an ANR from the application under test.
+    launcher="com.google.android.apps.nexuslauncher"
+    for attempt in range(3):
+        adb("shell","am","force-stop",launcher)
+        adb("shell","am","start","-W","-n",PACKAGE+"/.MainActivity")
+        time.sleep(8)
+        raw=adb("shell","dumpsys","window","windows",check=False).stdout.decode(errors="replace")
+        focus=[line for line in raw.splitlines() if "mCurrentFocus=" in line]
+        if any(PACKAGE in line and "Application Not Responding" not in line for line in focus) and android_foreground():
+            REPORT["launcher_recovery_attempts"]=attempt+1
+            return
+    snapshot(android_capture,"00-launcher-recovery-failed")
+    raise AssertionError("Release app did not obtain input focus after bounded Pixel Launcher recovery")
+
 def android_nav(index,step):
     # Identical real touch positions to the successful release APK smoke test.
     # The page transition must be visible; no internal navigation call.
@@ -251,8 +268,7 @@ def android():
         STAGE="install_release_apk"
         apk=next(Path("apk").rglob("app-release.apk"))
         adb("install","-r",str(apk))
-        adb("shell","am","start","-W","-n",PACKAGE+"/.MainActivity")
-        time.sleep(8)
+        android_prepare_launcher()
         wait("Release Flutter activity resumed",android_foreground,30)
         snapshot(android_capture,"00-home-before-credential")
         # Register the coordinator first so a later UI failure reaches Windows.
