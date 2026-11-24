@@ -96,6 +96,28 @@ def await_message(kind,seconds=90,repeat=None):
             last=time.monotonic()
     raise AssertionError("Timed out waiting for "+kind)
 
+# Low-resolution fingerprints of actual OS screenshots. These are only used
+# in the disposable test desktop, and are never treated as a video frame.
+SIGNATURE_SIZE=(40,24)
+
+def visual_signature(image,bounds=None):
+    if bounds is not None:
+        x1,y1,x2,y2=bounds
+        if not (0<=x1<x2<=image.width and 0<=y1<y2<=image.height):
+            return None
+        image=image.crop(bounds)
+    return list(image.convert("L").resize(SIGNATURE_SIZE,Image.Resampling.BOX).getdata())
+
+def mean_distance(a,b,indices):
+    return sum(abs(a[i]-b[i]) for i in indices)/len(indices)
+
+def changed_cells(before,after):
+    n=SIGNATURE_SIZE[0]*SIGNATURE_SIZE[1]
+    require(len(before)==len(after)==n,"Invalid visual reference dimensions")
+    cells=[i for i in range(n) if abs(before[i]-after[i])>=40]
+    require(len(cells)>=12,"Actual Windows state change lacks visual contrast")
+    return cells
+
 class Recording:
     """Actual OS screen captures at a fixed sampling rate; no remote-frame fabrication."""
     def __init__(self,capture,name):
@@ -105,6 +127,17 @@ class Recording:
         self.error=None
         self.frames=0
         self.worker=None
+        self.observation_lock=threading.Lock()
+        self.observation=None
+    def observe(self,bounds):
+        with self.observation_lock:
+            self.observation=(tuple(bounds),[])
+    def samples(self):
+        with self.observation_lock:
+            return list(self.observation[1]) if self.observation else []
+    def stop_observing(self):
+        with self.observation_lock:
+            self.observation=None
     def start(self):
         self.worker=threading.Thread(target=self.run,daemon=True)
         self.worker.start()
@@ -122,6 +155,16 @@ class Recording:
             while not self.stop.is_set():
                 start=time.monotonic()
                 img=self.capture().convert("RGB")
+                captured=time.monotonic()
+                # Reuse the real recording capture rather than running another
+                # screenshot loop concurrently with the remote interaction.
+                with self.observation_lock:
+                    if self.observation is not None:
+                        bounds,samples=self.observation
+                        if len(samples)<120:
+                            sig=visual_signature(img,bounds)
+                            if sig is not None:
+                                samples.append((start,captured,sig))
                 # Keep original screen proportions across real portrait/landscape changes.
                 img.thumbnail((w,h))
                 canvas=Image.new("RGB",(w,h))
@@ -250,6 +293,62 @@ def remote_point(bounds,xy):
     return [str(round(bounds[0]+xy[0]*(bounds[2]-bounds[0]))),
             str(round(bounds[1]+xy[1]*(bounds[3]-bounds[1])))]
 
+def visual_click_trials(rec):
+    results=[]
+    for trial in ("maximize","restore"):
+        target=await_message("visual_target",seconds=35)
+        require(target["trial"]==trial,"Unexpected visual trial")
+        b=find_android("p2p_remote_video",enabled=False)
+        before=target["before"]
+        def baseline():
+            img=android_capture()
+            sig=visual_signature(img,b)
+            if sig is not None and len(sig)==len(before) and mean_distance(sig,before,range(len(before)))<=24:
+                return sig
+            return None
+        visible_before=wait("Actual before-state visible on Android: "+trial,baseline,15)
+        rec.observe(b)
+        try:
+            t0=time.monotonic()
+            adb("shell","input","tap",*remote_point(b,target["click"]))
+            returned=time.monotonic()
+            send("visual_tap_sent",trial=trial)
+            verified=await_message("visual_verified",seconds=30)
+            require(verified["trial"]==trial,"Unexpected host verification")
+            after=verified["after"]
+            cells=changed_cells(before,after)
+            contrast=mean_distance(before,after,cells)
+            require(mean_distance(visible_before,before,cells)<=max(28,contrast*.45)
+                    and mean_distance(visible_before,after,cells)>=contrast*.55,
+                    "Android baseline did not match actual pre-click window")
+            def first_visible():
+                samples=rec.samples()
+                for i,(began,ended,sig) in enumerate(samples):
+                    if ended<t0: continue
+                    old=mean_distance(sig,before,cells)
+                    new=mean_distance(sig,after,cells)
+                    if new<=max(25,contrast*.42) and old>=contrast*.58 and old-new>=contrast*.25:
+                        previous=samples[i-1][1] if i>0 else None
+                        return {"trial":trial,
+                            "tap_to_verified_sample_end_ms":round((ended-t0)*1000,1),
+                            "adb_command_ms":round((returned-t0)*1000,1),
+                            "sample_capture_ms":round((ended-began)*1000,1),
+                            "sample_gap_ms":round((ended-previous)*1000,1) if previous is not None else None,
+                            "changed_cells":len(cells),
+                            "distance_to_before":round(old,2),
+                            "distance_to_after":round(new,2),
+                            "verified_host_rect":verified["rect"]}
+                return None
+            result=wait("Actual new window state in Android recording: "+trial,first_visible,15)
+            results.append(result)
+            REPORT["visual_feedback_trials"]=results
+            snapshot(android_capture,"04b-visual-"+trial)
+            send("visual_observed",trial=trial)
+        finally:
+            rec.stop_observing()
+    REPORT["visual_feedback_scope"]="Android monotonic tap dispatch to completion of first matched real OS screenshot; includes ADB and sampling overhead; not precise glass-to-glass or input-to-photon"
+    passed("Real Notepad maximize and restore verified in Android screenshot samples")
+
 def read_avc_metrics():
     android_tap("视频性能")
     def extract():
@@ -358,6 +457,8 @@ def android():
         time.sleep(2)
         snapshot(android_capture,"04-notepad-remote-text")
         passed("Remote text verified by Windows independently")
+        STAGE="visual_feedback"
+        visual_click_trials(rec)
         STAGE="actual_avc_performance"
         # Read only user-visible diagnostics backed by actual decoder callbacks.
         # Existing functional assertions and videos remain mandatory.
@@ -587,6 +688,59 @@ def windows():
         snapshot(capture,"07-real-notepad-text")
         send("text_ok")
         passed("Exact remote text read back from actual Notepad")
+        STAGE="visual_feedback"
+        def caption_button():
+            # Read the actual accessibility bounds, not a guessed x-coordinate.
+            try:
+                buttons=desktop.window(handle=note._hWnd).descendants(control_type="Button")
+                names=("maximize","restore","restore down")
+                for button in buttons:
+                    label=(button.element_info.name or "").strip().lower()
+                    r=button.rectangle()
+                    if label in names and button.is_visible() and button.is_enabled() and r.width()>4 and r.height()>4:
+                        x,y=(r.left+r.right)//2,(r.top+r.bottom)//2
+                        if 0<=x<w and 0<=y<h and note.top<=y<note.top+100:
+                            return normal(x,y)
+            except Exception:
+                pass
+            # Native title-bar accessibility geometry supports classic Notepad.
+            # WM_GETTITLEBARINFOEX is read-only; it never activates a button.
+            class TitleBarInfoEx(ctypes.Structure):
+                _fields_=[("cbSize",wintypes.DWORD),("rcTitleBar",wintypes.RECT),
+                          ("rgstate",wintypes.DWORD*6),("rgrect",wintypes.RECT*6)]
+            info=TitleBarInfoEx()
+            info.cbSize=ctypes.sizeof(info)
+            query=ctypes.windll.user32.SendMessageTimeoutW
+            query.argtypes=[wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM,
+                            wintypes.UINT,wintypes.UINT,ctypes.POINTER(ctypes.c_size_t)]
+            query.restype=wintypes.LPARAM
+            response=ctypes.c_size_t()
+            ok=query(note._hWnd,0x033f,0,ctypes.addressof(info),2,1000,ctypes.byref(response))
+            r=info.rgrect[3]
+            require(ok and not (info.rgstate[3]&0x18001) and r.right>r.left and r.bottom>r.top,
+                    "Actual Notepad maximize/restore button not available")
+            return normal((r.left+r.right)//2,(r.top+r.bottom)//2)
+        REPORT["visual_clicks"]=[]
+        for trial,expected in (("maximize",True),("restore",False)):
+            require(bool(ctypes.windll.user32.IsZoomed(note._hWnd))!=expected,
+                    "Unexpected initial Notepad window state")
+            before_rect=rect(note)
+            target=caption_button()
+            before=visual_signature(capture())
+            send("visual_target",trial=trial,before=before,click=target)
+            tapped=await_message("visual_tap_sent",seconds=45)
+            require(tapped["trial"]==trial,"Unexpected Android visual click")
+            wait("Actual Notepad "+trial,lambda: bool(ctypes.windll.user32.IsZoomed(note._hWnd))==expected,15)
+            time.sleep(.5)
+            after_rect=rect(note)
+            require(before_rect!=after_rect,"Native window geometry did not change")
+            after=visual_signature(snapshot(capture,"08-visual-"+trial))
+            changed_cells(before,after)
+            send("visual_verified",trial=trial,after=after,rect=after_rect)
+            observed=await_message("visual_observed",seconds=45)
+            require(observed["trial"]==trial,"Android did not verify actual window state")
+            REPORT["visual_clicks"].append({"trial":trial,"before":before_rect,"after":after_rect})
+        passed("Remote maximize and restore independently verified by native window state")
         STAGE="host_confirmation"
         await_message("done",seconds=150)
         # Recording must be valid before the peer receives final success.
