@@ -100,7 +100,20 @@ internal class H264SurfaceDecoder(
                     candidate.start()
                     codec=candidate
                     codecName=info.name
-                    hardware=if(Build.VERSION.SDK_INT>=29) info.isHardwareAccelerated else null
+                    // Emulator virtual codecs may advertise hardware acceleration even
+                    // when no physical hardware decoder is used by the guest.
+                    val virtualCodec = info.name.contains("goldfish", ignoreCase = true) ||
+                        info.name.contains("ranchu", ignoreCase = true)
+                    val emulator = Build.HARDWARE.contains("goldfish", ignoreCase = true) ||
+                        Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
+                        Build.FINGERPRINT.startsWith("generic") ||
+                        Build.FINGERPRINT.contains("sdk_gphone", ignoreCase = true)
+                    hardware = when {
+                        virtualCodec -> false
+                        emulator -> if (Build.VERSION.SDK_INT >= 29 && info.isSoftwareOnly) false else null
+                        Build.VERSION.SDK_INT >= 29 -> info.isHardwareAccelerated
+                        else -> null
+                    }
                     width=w
                     height=h
                     needsIdr.set(false)
