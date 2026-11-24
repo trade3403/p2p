@@ -379,31 +379,25 @@ def read_avc_metrics():
     return data
 
 def weak_network_step(baseline):
-    """Real emulator network shaping, not injected controller feedback."""
-    def console(*args):
-        result=adb("emu",*args)
-        response=result.stdout.decode(errors="replace")
-        require("OK" in response.splitlines() and "KO" not in response,
-                "Emulator rejected network shaping command")
+    """Impair real public-session packets on the Linux emulator host."""
+    from network_shape import shape_relay_egress
+    evidence={"baseline":baseline,
+              "scope":"Actual host egress shaping of Relay TCP traffic; not physical network, downstream bitrate cap, or input-to-photon"}
+    REPORT["weak_network_step"]=evidence
     def samples():
         result=[]
         for _ in range(2):
             time.sleep(8)
             result.append(read_avc_metrics())
+            # Maintain the independent test coordinator while the app runs.
+            send("weak_progress",frames=result[-1]["frames"])
         return result
-    evidence={"baseline":baseline,"profile":{"delay_ms":"250:250",
-              "speed_kbps":"1000:1000"},"scope":"Actual emulator network shaping of release AVC session; not physical network or input-to-photon"}
-    REPORT["weak_network_step"]=evidence
-    try:
-        console("network","delay","250:250")
-        console("network","speed","1000:1000")
+    # Capture the actual coordinator source port to exclude it from impairment.
+    coordinator_port=WS.sock.getsockname()[1]
+    with shape_relay_egress(HOST,coordinator_port,evidence):
         evidence["shaped"]=samples()
-    finally:
-        # Restore both independently even when a command or assertion fails.
-        try:
-            console("network","speed","full")
-        finally:
-            console("network","delay","none")
+    require(sum(x.get("netem_packets",0) for x in evidence["interfaces"])>0,
+            "No actual Relay packets matched kernel shaping")
     evidence["restored"]=samples()
     shaped=evidence["shaped"]
     restored=evidence["restored"]
@@ -413,8 +407,6 @@ def weak_network_step(baseline):
             "No actual AVC render progress after restoring network")
     require(all(m["fps"]>0 and m["bps"]>0 for m in shaped+restored),
             "No measured live video throughput in network step")
-    # Prove the impairment affected the actual authenticated session, not
-    # merely that the emulator accepted a console command.
     require(min(m["rtt"] for m in shaped)>baseline["rtt"]+100,
             "Shaped network did not measurably increase authenticated RTT")
     require(max(m["rtt"] for m in restored)<min(m["rtt"] for m in shaped),
@@ -422,7 +414,7 @@ def weak_network_step(baseline):
     require(shaped[-1]["target_bps"]<=baseline["target_bps"] and
             shaped[-1]["target_fps"]<=baseline["target_fps"],
             "Congestion increased video target")
-    passed("Actual emulator network delay/rate step and restored AVC rendering")
+    passed("Actual Relay egress impairment and restored AVC rendering")
 
 def android():
     global STAGE
