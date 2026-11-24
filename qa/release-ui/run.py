@@ -162,7 +162,10 @@ def find_android(label,enabled=True,seconds=35,scroll=False):
             a=node.attrib
             if enabled and a.get("enabled")!="true": continue
             fields=[a.get("text",""),a.get("content-desc",""),a.get("resource-id","")]
-            if any(label==v or label in v.splitlines() or (label=="p2p_remote_video" and v.endswith(label)) for v in fields):
+            exact=any(label==v or label in v.splitlines() or (label=="p2p_remote_video" and v.endswith(label)) for v in fields)
+            # Flutter EditText accessibility names may combine label and hint.
+            edit_match=a.get("class","").endswith("EditText") and any(label in v for v in fields)
+            if exact or edit_match:
                 nums=list(map(int,re.findall(r"\d+",a.get("bounds",""))))
                 if len(nums)==4 and nums[2]>nums[0] and nums[3]>nums[1]: return nums
         if scroll:
@@ -186,8 +189,8 @@ def android_type(text):
     cmd="input text "+shlex.quote(escaped)+"\nexit\n"
     adb("shell","-T",data=cmd.encode())
 
-def android_field(label,value):
-    android_tap(label)
+def android_field(label,value,scroll=False):
+    android_tap(label,scroll=scroll)
     android_type(value)
 
 def remote_point(bounds,xy):
@@ -206,10 +209,10 @@ def android():
         STAGE="configure_via_flutter_ui"
         android_tap("我的")
         android_tap("网络连接")
-        android_field("Relay Access Token",TOKEN)
+        android_field("Relay Access Token",TOKEN,scroll=True)
         adb("shell","input","keyevent","4")
         android_tap("保存中转配置",scroll=True)
-        find_android("已通过 Android Keystore 加密保存",enabled=False)
+        find_android("已通过 Android Keystore 加密保存",enabled=False,scroll=True)
         android_tap("远控")
         passed("Installed release Flutter APK and configured public relay through actual UI")
         STAGE="pairing"
@@ -359,9 +362,11 @@ def windows():
         click("Relay Access Token")
         pyperclip.copy(TOKEN)
         gui.hotkey("ctrl","v")
+        # Allow the Flutter clipboard read to finish before clearing the secret.
+        time.sleep(1.5)
         pyperclip.copy("")
-        click("保存中转配置")
-        find_control("已通过 DPAPI 加密保存",enabled=False)
+        click("保存中转配置",scroll=True)
+        find_control("已通过 DPAPI 加密保存",enabled=False,scroll=True,seconds=45)
         click("首页")
         passed("Installed release Windows EXE and configured public relay through actual UI")
         STAGE="pairing"
