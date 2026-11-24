@@ -7,6 +7,9 @@
 #include <mfidl.h>
 #include <mferror.h>
 #include <mftransform.h>
+// ICodecAPI is declared by the SDK's DirectShow interface header;
+// codecapi.h supplies the codec property GUIDs, not the COM interface.
+#include <dshow.h>
 #include <codecapi.h>
 #include <wrl/client.h>
 #include <algorithm>
