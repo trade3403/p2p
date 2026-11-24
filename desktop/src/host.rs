@@ -371,7 +371,7 @@ struct Control {
 fn adapt_video(bps:u32,fps:u32,rtt:u64,rendered:f64,drops:u64,good:&mut u32)->(u32,u32) {
     if rtt > 450 || drops > 3 || rendered < (fps as f64)*0.45 {
         *good=0;
-        ((bps*3/4).max(400_000),(fps.saturating_sub(3)).max(10))
+        ((bps*3/4).max(400_000),(fps.saturating_sub(3)).max(10.min(fps)))
     } else if rtt < 180 && drops==0 && rendered >= (fps as f64)*0.80 {
         *good+=1;
         if *good>=3 {
@@ -387,6 +387,36 @@ fn adapt_video(bps:u32,fps:u32,rtt:u64,rendered:f64,drops:u64,good:&mut u32)->(u
 #[cfg(test)]
 mod adaptive_tests {
     use super::adapt_video;
+    // Deterministic controller input replay, not a network or video benchmark.
+    #[test] fn weak_network_step_and_recovery() {
+        let (mut bps, mut fps, mut good) = (1_800_000, 30, 0);
+        for _ in 0..12 {
+            let next = adapt_video(bps, fps, 600, 4.0, 5, &mut good);
+            assert!(next.0 <= bps && next.1 <= fps);
+            (bps, fps) = next;
+        }
+        assert_eq!((bps, fps), (400_000, 10));
+        for _ in 0..2 {
+            assert_eq!(adapt_video(bps, fps, 90, 10.0, 0, &mut good), (bps, fps));
+        }
+        // A neutral sample breaks the consecutive recovery streak.
+        assert_eq!(adapt_video(bps, fps, 300, 10.0, 0, &mut good), (bps, fps));
+        assert_eq!(good, 0);
+        for _ in 0..60 {
+            let next = adapt_video(bps, fps, 90, fps as f64, 0, &mut good);
+            assert!(next.0 >= bps && next.1 >= fps);
+            assert!(next.0 <= 4_000_000 && next.1 <= 30);
+            (bps, fps) = next;
+        }
+        assert_eq!((bps, fps), (4_000_000, 30));
+    }
+    #[test] fn congestion_never_raises_low_configured_fps() {
+        for fps in 6..10 {
+            let mut good = 2;
+            assert_eq!(adapt_video(800_000, fps, 600, 1.0, 5, &mut good), (600_000, fps));
+            assert_eq!(good, 0);
+        }
+    }
     #[test] fn downshift_and_bounded_recovery() {
         let mut good=0;
         assert_eq!(adapt_video(1_800_000,24,600,12.0,5,&mut good),(1_350_000,21));
