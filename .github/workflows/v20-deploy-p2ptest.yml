@@ -1,0 +1,65 @@
+name: V0.20 Deploy p2ptest Relay on ubuntu-linux-relay
+
+on:
+  push:
+    branches: ['feature/v0.20-public-remote']
+    paths:
+      - 'relay/**'
+      - 'deploy/compose.test.yml'
+      - 'deploy/update-p2ptest-runner.sh'
+      - '.github/workflows/v20-deploy-p2ptest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2ptest-relay-deployment
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'trade3403/p2p' && github.ref == 'refs/heads/feature/v0.20-public-remote'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - name: Test relay source
+        working-directory: relay
+        run: |
+          go test -race -count=1 ./...
+          go vet ./...
+      - name: Verify deployment script and image
+        run: |
+          bash -n deploy/update-p2ptest-runner.sh
+          docker build -t p2p-relay:verify ./relay
+
+  deploy:
+    name: Update existing p2ptest service only
+    needs: verify
+    if: github.repository == 'trade3403/p2p' && github.ref == 'refs/heads/feature/v0.20-public-remote'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - name: Verify dedicated runner identity
+        env:
+          EXPECTED_RUNNER: ${{ runner.name }}
+        run: |
+          if [ "$EXPECTED_RUNNER" != ubuntu-linux-relay ]; then
+            echo "::error::Wrong runner selected; no checkout or deployment"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Preserve existing token, registry and rollback image
+        env:
+          RUNNER_NAME: ${{ runner.name }}
+        shell: bash
+        run: bash deploy/update-p2ptest-runner.sh
