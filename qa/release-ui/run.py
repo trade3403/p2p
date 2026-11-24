@@ -156,8 +156,12 @@ def android_tree():
     try: return list(ET.fromstring(raw.stdout).iter("node"))
     except ET.ParseError: return []
 
-def find_android(label,enabled=True,seconds=35,scroll=False):
+def find_android(label,enabled=True,seconds=35,scroll=False,identifier=None):
+    attempts=0
     def find():
+        nonlocal attempts
+        attempts+=1
+        candidates=[]
         for node in android_tree():
             a=node.attrib
             if enabled and a.get("enabled")!="true": continue
@@ -165,12 +169,19 @@ def find_android(label,enabled=True,seconds=35,scroll=False):
             exact=any(label==v or label in v.splitlines() or (label=="p2p_remote_video" and v.endswith(label)) for v in fields)
             # Flutter EditText accessibility names may combine label and hint.
             edit_match=a.get("class","").endswith("EditText") and any(label in v for v in fields)
-            if exact or edit_match:
+            resource=a.get("resource-id","")
+            id_match=bool(identifier and (resource==identifier or resource.endswith("/"+identifier)))
+            if exact or edit_match or id_match:
                 nums=list(map(int,re.findall(r"\d+",a.get("bounds",""))))
-                if len(nums)==4 and nums[2]>nums[0] and nums[3]>nums[1]: return nums
+                if len(nums)==4 and nums[2]>nums[0] and nums[3]>nums[1]:
+                    candidates.append((0 if id_match else 1 if edit_match else 2, nums))
+        if candidates:
+            return min(candidates,key=lambda item:item[0])[1]
         if scroll:
             w,h=android_capture().size
-            adb("shell","input","swipe",str(w//2),str(int(h*.77)),str(w//2),str(int(h*.36)),"450")
+            # Reset to the top initially, then scan in modest increments.
+            y1,y2=(.34,.79) if attempts in (1,2) else (.77,.46)
+            adb("shell","input","swipe",str(int(w*.85)),str(int(h*y1)),str(int(w*.85)),str(int(h*y2)),"450")
         return None
     return wait("Android visible UI: "+label,find,seconds)
 
@@ -189,8 +200,8 @@ def android_type(text):
     cmd="input text "+shlex.quote(escaped)+"\nexit\n"
     adb("shell","-T",data=cmd.encode())
 
-def android_field(label,value,scroll=False):
-    android_tap(label,scroll=scroll)
+def android_field(label,value,scroll=False,identifier=None):
+    android_tap(label,scroll=scroll,identifier=identifier)
     android_type(value)
 
 def remote_point(bounds,xy):
@@ -209,10 +220,13 @@ def android():
         STAGE="configure_via_flutter_ui"
         android_tap("我的")
         android_tap("网络连接")
-        android_field("Relay Access Token",TOKEN,scroll=True)
+        # Safe pre-credential evidence; do not record the secret entry.
+        snapshot(android_capture,"00-network-before-credential")
+        android_field("Relay Access Token",TOKEN,scroll=True,identifier="p2p_relay_token")
         adb("shell","input","keyevent","4")
         android_tap("保存中转配置",scroll=True)
-        find_android("已通过 Android Keystore 加密保存",enabled=False,scroll=True)
+        find_android("已通过 Android Keystore 加密保存",enabled=False,scroll=True,
+                     identifier="p2p_relay_token_saved",seconds=55)
         android_tap("远控")
         passed("Installed release Flutter APK and configured public relay through actual UI")
         STAGE="pairing"
@@ -302,20 +316,27 @@ def windows():
     def find_window(title):
         matches=[w for w in gui.getAllWindows() if title in w.title and w.width>200]
         return matches[0] if matches else None
-    def find_control(label,seconds=30,scroll=False,enabled=True):
+    def find_control(label,seconds=30,scroll=False,enabled=True,identifier=None,prefer_edit=False):
         def lookup():
             try:
                 parent=desktop.window(handle=window._hWnd)
                 candidates=[]
                 for obj in parent.descendants():
                     name=obj.element_info.name or ""
-                    if label==name or label in name.splitlines():
+                    automation_id=obj.element_info.automation_id or ""
+                    id_match=bool(identifier and automation_id==identifier)
+                    edit_match=obj.element_info.control_type=="Edit" and label in name
+                    if id_match or edit_match or label==name or label in name.splitlines():
                         r=obj.rectangle()
                         if r.width()>2 and r.height()>2 and obj.is_visible() and (not enabled or obj.is_enabled()):
-                            candidates.append(obj)
+                            candidates.append((obj,id_match))
                 if candidates:
-                    candidates.sort(key=lambda a: (a.element_info.control_type not in ("Button","Edit","CheckBox"),a.rectangle().width()*a.rectangle().height()))
-                    return candidates[0]
+                    candidates.sort(key=lambda a: (
+                        (a[0].element_info.control_type!="Edit") if prefer_edit else not a[1],
+                        not a[1],
+                        a[0].element_info.control_type not in ("Button","Edit","CheckBox"),
+                        a[0].rectangle().width()*a[0].rectangle().height()))
+                    return candidates[0][0]
             except Exception:
                 pass
             if scroll:
@@ -359,14 +380,21 @@ def windows():
         time.sleep(3)
         STAGE="configure_via_flutter_ui"
         click("网络连接")
-        click("Relay Access Token")
-        pyperclip.copy(TOKEN)
-        gui.hotkey("ctrl","v")
-        # Allow the Flutter clipboard read to finish before clearing the secret.
-        time.sleep(1.5)
-        pyperclip.copy("")
+        snapshot(capture,"00-network-before-credential")
+        click("Relay Access Token",identifier="p2p_relay_token",prefer_edit=True)
+        gui.hotkey("ctrl","a")
+        # ASCII hex/alphanumeric secrets can be typed without clipboard timing issues.
+        # For other printable credentials, retain the clipboard until native save completes.
+        if re.fullmatch(r"[A-Za-z0-9]+",TOKEN):
+            gui.write(TOKEN,interval=.018)
+        else:
+            pyperclip.copy(TOKEN)
+            gui.hotkey("ctrl","v")
+            time.sleep(2)
         click("保存中转配置",scroll=True)
-        find_control("已通过 DPAPI 加密保存",enabled=False,scroll=True,seconds=45)
+        find_control("已通过 DPAPI 加密保存",enabled=False,scroll=True,seconds=55,
+                     identifier="p2p_relay_token_saved")
+        pyperclip.copy("")
         click("首页")
         passed("Installed release Windows EXE and configured public relay through actual UI")
         STAGE="pairing"

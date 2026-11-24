@@ -66,7 +66,9 @@ class _NetworkScreenState extends State<NetworkScreen> {
                     style: const TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.5),
                   ),
                   const SizedBox(height: 18),
-                  TextField(
+                  Semantics(
+                    identifier: 'p2p_relay_server',
+                    child: TextField(
                     controller: _server,
                     enabled: controller.bridgeAvailable && !_saving && !controller.hostRunning && !controller.viewerRequested && !controller.pairingActive,
                     keyboardType: TextInputType.url,
@@ -74,15 +76,19 @@ class _NetworkScreenState extends State<NetworkScreen> {
                       labelText: 'Relay HTTPS / WSS 地址',
                       hintText: 'wss://relay.example.com',
                     ),
+                    ),
                   ),
                   const SizedBox(height: 12),
-                  TextField(
+                  Semantics(
+                    identifier: 'p2p_relay_token',
+                    child: TextField(
                     controller: _token,
                     enabled: controller.bridgeAvailable && !_saving && !controller.hostRunning && !controller.viewerRequested && !controller.pairingActive,
                     obscureText: true,
                     decoration: InputDecoration(
                       labelText: 'Relay Access Token',
                       hintText: controller.tokenConfigured ? '已加密保存；留空可保留现有口令' : '输入中转访问口令',
+                    ),
                     ),
                   ),
                   const SizedBox(height: 14),
@@ -107,12 +113,16 @@ class _NetworkScreenState extends State<NetworkScreen> {
                     title: 'Relay 地址',
                     value: controller.relayUrl,
                   ),
-                  _NetworkStatusRow(
-                    icon: Icons.key_rounded,
-                    title: '访问口令',
-                    value: controller.tokenConfigured
-                        ? (defaultTargetPlatform == TargetPlatform.android ? '已通过 Android Keystore 加密保存' : '已通过 DPAPI 加密保存')
-                        : '尚未配置',
+                  Semantics(
+                    identifier: controller.tokenConfigured
+                        ? 'p2p_relay_token_saved' : 'p2p_relay_token_missing',
+                    child: _NetworkStatusRow(
+                      icon: Icons.key_rounded,
+                      title: '访问口令',
+                      value: controller.tokenConfigured
+                          ? (defaultTargetPlatform == TargetPlatform.android ? '已通过 Android Keystore 加密保存' : '已通过 DPAPI 加密保存')
+                          : '尚未配置',
+                    ),
                   ),
                   _NetworkStatusRow(
                     icon: Icons.lock_rounded,
