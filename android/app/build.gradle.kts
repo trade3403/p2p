@@ -10,8 +10,9 @@ android {
         applicationId = "com.p2p.remote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
-        versionName = "0.16.0"
+        versionCode = 20
+        versionName = "0.20.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes { release { isMinifyEnabled = false } }
     buildFeatures { compose = true }
@@ -27,4 +28,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.bouncycastle:bcprov-jdk18on:1.80")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
