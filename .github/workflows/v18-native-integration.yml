@@ -16,8 +16,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: p2p-v19-native-integration
-  cancel-in-progress: false
+  group: p2p-v19-cloud-ci
+  cancel-in-progress: true
 
 jobs:
   windows:
