@@ -35,8 +35,15 @@ Section "P2P Remote" SEC_MAIN
   SetOutPath "$INSTDIR"
   File /r "${APP_SOURCE_DIR}\*.*"
 
-  IfFileExists "$INSTDIR\${APP_EXE}" +1 0
+  ; Named labels avoid the NSIS +1 (next instruction) trap.
+  IfFileExists "$INSTDIR\${APP_EXE}" executable_ok
+    SetErrorLevel 10
     Abort "安装包中缺少主程序 ${APP_EXE}。请重新下载完整安装包。"
+  executable_ok:
+  IfFileExists "$INSTDIR\p2p_remote.dll" native_bridge_ok
+    SetErrorLevel 11
+    Abort "安装包中缺少原生远控组件 p2p_remote.dll。请重新下载完整安装包。"
+  native_bridge_ok:
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\P2P Remote"

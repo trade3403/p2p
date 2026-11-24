@@ -340,9 +340,15 @@ def windows():
     try:
         STAGE="install_release_exe"
         setup=next(Path("windows-package").rglob("P2PRemote-Setup-v0.20.0.exe"))
-        subprocess.run([str(setup.resolve()),"/S"],check=True,timeout=120)
+        installer=subprocess.run([str(setup.resolve()),"/S"],timeout=120)
+        REPORT["installer_exit_code"]=installer.returncode
+        print("Release NSIS installer exit code:",installer.returncode,flush=True)
+        require(installer.returncode==0,"Release NSIS installer failed with exit code "+str(installer.returncode))
         exe=Path(os.environ["LOCALAPPDATA"])/"Programs"/"P2P Remote"/"p2p_remote_ui.exe"
         require(exe.is_file(),"Installed release executable missing")
+        require((exe.parent/"p2p_remote.dll").is_file(),"Installed native remote bridge missing")
+        require((exe.parent/"Uninstall.exe").is_file(),"Installed uninstaller missing")
+        passed("Real NSIS installer exited successfully and installed application, native bridge and uninstaller")
         proc=subprocess.Popen([str(exe)],cwd=exe.parent)
         window=wait("Actual installed P2P window",lambda:find_window("P2P Remote"),40)
         window.maximize()
