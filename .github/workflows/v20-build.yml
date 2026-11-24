@@ -1,0 +1,415 @@
+name: P2P Remote V0.20 Native Build and UI Tests
+
+on:
+  push:
+    branches: ['feature/v0.20-public-remote']
+    paths:
+      - 'desktop/**'
+      - 'android/**'
+      - 'installer/**'
+      - 'scripts/**'
+      - 'flutter_app/**'
+      - '.github/workflows/v20-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2p-v20-build
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Rust native core + Flutter Windows integration
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Windows Rust toolchain
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc --version
+          if ($LASTEXITCODE -ne 0) { throw 'rustc --version failed' }
+          cargo --version
+          if ($LASTEXITCODE -ne 0) { throw 'cargo --version failed' }
+          if (-not (Test-Path 'desktop/src/flutter_bridge.rs')) {
+            throw 'Missing Rust Flutter bridge source.'
+          }
+
+      - name: Test existing Rust core and native bridge
+        run: |
+          cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features
+          if ($LASTEXITCODE -ne 0) { throw 'Rust native core tests failed' }
+
+      - name: Build Rust native shared library
+        run: |
+          cargo build --manifest-path desktop/Cargo.toml --lib --no-default-features --release
+          if ($LASTEXITCODE -ne 0) { throw 'Rust native DLL build failed' }
+          $dll = 'desktop/target/release/p2p_remote.dll'
+          if (-not (Test-Path $dll) -or (Get-Item $dll).Length -lt 100000) {
+            throw "Rust native DLL missing or unexpectedly small: $dll"
+          }
+
+      - name: Install pinned Flutter 3.50.1 SDK
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
+          $flutterRoot = Join-Path $cacheRoot 'flutter-3.50.1'
+          $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
+          if (-not (Test-Path $flutterExe)) {
+            if (Test-Path $flutterRoot) { Remove-Item -LiteralPath $flutterRoot -Recurse -Force }
+            git clone --depth 1 --branch 3.50.1 https://github.com/flutter/flutter.git $flutterRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Could not clone Flutter stable SDK.' }
+          }
+          $flutterBin = Join-Path $flutterRoot 'bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $flutterBin
+          $env:PATH = $flutterBin + ';' + $env:PATH
+          flutter --version
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter SDK invocation failed' }
+          flutter config --enable-windows-desktop
+          if ($LASTEXITCODE -ne 0) { throw 'Could not enable Flutter Windows desktop' }
+          flutter precache --windows
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows precache failed' }
+
+      - name: Generate Windows platform runner and link Rust DLL
+        working-directory: flutter_app
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($generated in @('windows', 'android', 'build')) {
+            $path = Join-Path $env:GITHUB_WORKSPACE ('flutter_app\' + $generated)
+            if (Test-Path $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+          }
+          flutter create --platforms=windows --org com.p2p.remote --project-name p2p_remote_ui .
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows/Android runner generation failed' }
+          & ..\scripts\prepare-flutter-windows-tray.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows tray preparation failed' }
+          $rustDll = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop\target\release\p2p_remote.dll')).Path.Replace('\','/')
+          $runnerCmake = Join-Path $env:GITHUB_WORKSPACE 'flutter_app\windows\runner\CMakeLists.txt'
+          if (-not (Test-Path $runnerCmake)) { throw 'Flutter Windows runner CMakeLists.txt was not generated.' }
+          $lines = @(
+            'add_custom_command(TARGET ${BINARY_NAME} POST_BUILD',
+            '  COMMAND ${CMAKE_COMMAND} -E copy_if_different',
+            ('  "' + $rustDll + '"'),
+            '  "$<TARGET_FILE_DIR:${BINARY_NAME}>/p2p_remote.dll"',
+            ')'
+          )
+          Add-Content -Path $runnerCmake -Value ($lines -join [Environment]::NewLine)
+          Write-Host 'Configured post-build copy of p2p_remote.dll beside the Flutter executable.'
+
+      - name: Analyze, test and build Flutter Windows
+        working-directory: flutter_app
+        run: |
+          $ErrorActionPreference = 'Stop'
+          flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw 'flutter pub get failed' }
+          flutter analyze
+          if ($LASTEXITCODE -ne 0) { throw 'flutter analyze failed' }
+          flutter test
+          if ($LASTEXITCODE -ne 0) { throw 'flutter test failed' }
+          flutter build windows --release
+          if ($LASTEXITCODE -ne 0) { throw 'flutter build windows --release failed' }
+
+      - name: Install NSIS (portable, no Chocolatey required)
+        uses: nsis-dev/setup-nsis@v1
+        with:
+          version: '3.11'
+
+      - name: Verify linked native DLL and package Windows build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem -Path 'flutter_app\build\windows' -Filter 'p2p_remote_ui.exe' -Recurse |
+            Select-Object -First 1
+          if (-not $exe) { throw 'Flutter Windows executable was not generated.' }
+          $dll = Join-Path $exe.Directory.FullName 'p2p_remote.dll'
+          if (-not (Test-Path $dll)) { throw 'Rust native bridge DLL was not copied beside the Flutter executable.' }
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist\v0.20-windows'
+          if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item -Path (Join-Path $exe.Directory.FullName '*') -Destination $dist -Recurse -Force
+          @'
+          P2P Remote V0.20 Windows release build with Rust native bridge and system tray.
+          The Flutter UI calls the existing Rust Host/Viewer core through a narrow C ABI.
+          First-run setup: configure the WSS Relay URL and access token in Network Settings.
+          The access token and Windows trusted profile are protected by the current user's DPAPI.
+          Start local sharing from the Dashboard. Remote input and clipboard remain opt-in.
+          Android Flutter bridge is built in the parallel Android job. Multi-device vault migration is not included in this build.
+          '@ | Set-Content -Path (Join-Path $dist 'README.txt') -Encoding UTF8
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-V0.20-Windows-Release.zip'
+          if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $zip -Force
+          if ((Get-Item $zip).Length -lt 1000000) { throw 'Windows package is unexpectedly small.' }
+
+          $makensis = Get-Command makensis -ErrorAction Stop
+          $makensisPath = $makensis.Source
+          if (-not $makensisPath) { $makensisPath = $makensis.Path }
+          if (-not $makensisPath) { throw 'NSIS setup did not expose makensis.exe on PATH.' }
+          Push-Location 'installer'
+          try {
+            & $makensisPath 'P2PRemote.nsi'
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS installer compilation failed.' }
+          } finally {
+            Pop-Location
+          }
+          $setup = Join-Path $env:GITHUB_WORKSPACE 'P2PRemote-Setup-v0.20.0.exe'
+          if (-not (Test-Path $setup) -or (Get-Item $setup).Length -lt 1000000) {
+            throw 'Windows installer was not generated or is unexpectedly small.'
+          }
+          $artifactDir = Join-Path $env:GITHUB_WORKSPACE 'dist\v0.20-artifacts'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          Copy-Item $zip -Destination $artifactDir -Force
+          Copy-Item $setup -Destination $artifactDir -Force
+          Get-ChildItem $artifactDir -File | ForEach-Object {
+            (Get-FileHash $_.FullName -Algorithm SHA256).Hash | Set-Content ($_.FullName + '.sha256')
+          }
+          Write-Host ('Packaged Windows ZIP and NSIS installer in ' + $artifactDir)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-V0.20-Windows-Release
+          path: dist/v0.20-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Windows UI smoke test and recording
+        run: |
+          python -m pip install pyautogui pillow imageio-ffmpeg
+          python scripts/ci-ui-smoke.py windows
+          if ($LASTEXITCODE -ne 0) { throw 'Windows UI smoke test failed' }
+
+      - name: Windows evidence summary
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force evidence/windows | Out-Null
+          "Windows job status: ${{ job.status }}" | Set-Content evidence/windows/job-status.txt
+          "Windows job status: ${{ job.status }}" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Windows-test-evidence
+          path: evidence/windows/
+          retention-days: 14
+
+  android:
+    name: Flutter Android + Kotlin remote bridge
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Kotlin unit tests
+        working-directory: android
+        run: |
+          gradle --no-daemon :app:testDebugUnitTest
+          if ($LASTEXITCODE -ne 0) { throw 'Kotlin unit tests failed' }
+
+      - name: Prepare Flutter and Android SDK
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
+          $flutterRoot = Join-Path $cacheRoot 'flutter-3.50.1'
+          $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
+          if (-not (Test-Path $flutterExe)) {
+            git clone --depth 1 --branch 3.50.1 https://github.com/flutter/flutter.git $flutterRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install Flutter stable SDK for Android.' }
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $flutterRoot 'bin')
+          $env:PATH = (Join-Path $flutterRoot 'bin') + ';' + $env:PATH
+
+          $sdk = $env:ANDROID_SDK_ROOT
+          if (-not $sdk) { $sdk = $env:ANDROID_HOME }
+          if (-not $sdk) {
+            $candidate = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
+            if (Test-Path $candidate) { $sdk = $candidate }
+          }
+          if (-not $sdk -or -not (Test-Path $sdk)) {
+            throw 'Android SDK is not installed on the Windows Runner. Install Android SDK command-line tools and set ANDROID_SDK_ROOT.'
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value ('ANDROID_SDK_ROOT=' + $sdk)
+          Add-Content -Path $env:GITHUB_ENV -Value ('ANDROID_HOME=' + $sdk)
+          flutter --version
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter SDK is unavailable.' }
+          # flutter doctor --android-licenses is interactive and may block unattended
+          # self-hosted runners indefinitely. Check availability without prompting.
+          $sdkmanager = Join-Path $sdk 'cmdline-tools\latest\bin\sdkmanager.bat'
+          if (-not (Test-Path $sdkmanager)) {
+            $sdkmanager = (Get-ChildItem (Join-Path $sdk 'cmdline-tools') -Filter sdkmanager.bat -Recurse | Select-Object -First 1).FullName
+          }
+          if (-not $sdkmanager) { throw 'sdkmanager unavailable' }
+          & $sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+          if ($LASTEXITCODE -ne 0) { throw 'Android SDK install failed' }
+          flutter precache --android
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android engine artifacts could not be precached.' }
+          flutter config --jdk-dir="$env:JAVA_HOME"
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to configure JDK 17' }
+          flutter doctor -v
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning 'Flutter doctor reports missing optional components; Android build will verify required SDK packages.'
+          }
+
+      - name: Generate Flutter Android platform and link Kotlin remote engine
+        working-directory: flutter_app
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $androidPlatform = Join-Path $env:GITHUB_WORKSPACE 'flutter_app\android'
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE 'flutter_app\build'
+          if (Test-Path $androidPlatform) { Remove-Item -LiteralPath $androidPlatform -Recurse -Force }
+          if (Test-Path $buildDir) { Remove-Item -LiteralPath $buildDir -Recurse -Force }
+          flutter create --platforms=android --org com.p2p.remote --project-name p2p_remote_ui .
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android runner generation failed.' }
+          & ..\scripts\prepare-flutter-android.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android native bridge preparation failed.' }
+
+      - name: Precache Flutter Android engine artifacts
+        working-directory: flutter_app
+        run: |
+          flutter precache --android
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android artifact precache failed.' }
+
+      - name: Resolve Flutter packages
+        working-directory: flutter_app
+        run: |
+          flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw 'Android flutter pub get failed.' }
+
+      - name: Analyze Flutter Android client
+        working-directory: flutter_app
+        run: |
+          flutter analyze
+          if ($LASTEXITCODE -ne 0) { throw 'Android flutter analyze failed.' }
+
+      - name: Run Flutter widget tests
+        working-directory: flutter_app
+        run: |
+          flutter test
+          if ($LASTEXITCODE -ne 0) { throw 'Android flutter tests failed.' }
+
+      - name: Verify generated Android Gradle configuration
+        working-directory: flutter_app/android
+        run: |
+          .\gradlew.bat --version
+          if ($LASTEXITCODE -ne 0) { throw 'Gradle version check failed' }
+          .\gradlew.bat --no-daemon :app:tasks --all
+          if ($LASTEXITCODE -ne 0) { throw 'Generated Android Gradle configuration failed' }
+
+      - name: Build Android release APK
+        working-directory: flutter_app
+        timeout-minutes: 30
+        run: |
+          flutter build apk --release --verbose
+          if ($LASTEXITCODE -ne 0) { throw 'Android release APK build failed.' }
+
+      - name: Android checksum
+        run: |
+          $apk = 'flutter_app/build/app/outputs/flutter-apk/app-release.apk'
+          (Get-FileHash $apk -Algorithm SHA256).Hash | Set-Content ($apk + '.sha256')
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2PRemote-V0.20-Android-Release
+          path: |
+            flutter_app/build/app/outputs/flutter-apk/app-release.apk
+            flutter_app/build/app/outputs/flutter-apk/app-release.apk.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Android build and test summary
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force evidence/android-build | Out-Null
+          "Android build status: ${{ job.status }}" | Set-Content evidence/android-build/job-status.txt
+          "Android build status: ${{ job.status }}" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-build-test-evidence
+          path: |
+            evidence/android-build/
+            android/app/build/test-results/
+            android/app/build/reports/tests/
+          retention-days: 14
+
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: Relay tests
+        shell: bash
+        run: |
+          mkdir -p evidence/relay
+          cd relay
+          go test -race -count=1 -json ./... | tee ../evidence/relay/go-test.jsonl
+      - name: Container build
+        run: docker build -t p2p-relay:ci ./relay
+      - name: Relay summary
+        if: always()
+        run: |
+          mkdir -p evidence/relay
+          echo 'Relay status: ${{ job.status }}' | tee evidence/relay/job-status.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Relay-test-evidence
+          path: evidence/relay/
+          retention-days: 14
+
+  android-ui:
+    needs: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: P2PRemote-V0.20-Android-Release
+          path: apk
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install image tools
+        run: python -m pip install pillow
+      - name: Android emulator UI smoke test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          script: python scripts/ci-ui-smoke.py android
+      - name: Android UI summary
+        if: always()
+        run: |
+          mkdir -p evidence/android
+          echo 'Android UI status: ${{ job.status }}' | tee evidence/android/job-status.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-UI-test-evidence
+          path: evidence/android/
+          retention-days: 14

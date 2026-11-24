@@ -123,6 +123,7 @@ class PublicRelayE2eTest {
             await("host input and clipboard authorization") {
                 val s=snap(); s["viewer_allow_input"]==true && s["viewer_allow_clipboard"]==true
             }
+            phase("input")
             success("Default-deny controls and explicit host permission")
             stage="input"
             var start = SystemClock.elapsedRealtime()

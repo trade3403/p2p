@@ -6,7 +6,8 @@ on:
     paths:
       - '.github/workflows/v20-public-e2e.yml'
       - 'qa/public-relay/**'
-      - 'android/app/src/androidTest/**'
+      - 'android/**'
+      - 'desktop/**'
   workflow_dispatch:
 
 permissions:
@@ -14,7 +15,7 @@ permissions:
 
 concurrency:
   group: p2p-v20-public-e2e
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   windows-host:

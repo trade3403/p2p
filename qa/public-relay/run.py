@@ -149,7 +149,7 @@ def host():
                     approved=True
                     STAGE="waiting_for_android"
                 last=now
-            if message and message.get("type")=="enable" and approved:
+            if message and message.get("type")=="enable" and approved and not enabled:
                 require(counts["clicks"]==0 and counts["keys"]==0,"Input occurred before permission")
                 require(hwnd and ctypes.windll.user32.GetForegroundWindow()==hwnd,
                         "No interactive test desktop")
