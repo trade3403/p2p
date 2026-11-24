@@ -399,8 +399,12 @@ jobs:
         with:
           api-level: 35
           arch: x86_64
-          target: google_apis
+          # AOSP avoids the Google Pixel Launcher ANR seen in CI screenshots.
+          target: default
           profile: pixel_6
+          cores: 4
+          ram-size: 4096M
+          emulator-boot-timeout: 600
           disable-animations: true
           script: python scripts/ci-ui-smoke.py android
       - name: Android UI summary
@@ -473,8 +477,12 @@ jobs:
         with:
           api-level: 35
           arch: x86_64
-          target: google_apis
+          # AOSP avoids the Google Pixel Launcher ANR seen in CI screenshots.
+          target: default
           profile: pixel_6
+          cores: 4
+          ram-size: 4096M
+          emulator-boot-timeout: 600
           disable-animations: true
           script: python qa/release-ui/run.py android
       - uses: actions/upload-artifact@v4

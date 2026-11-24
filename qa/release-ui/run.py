@@ -23,6 +23,8 @@ import xml.etree.ElementTree as ET
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import imageio_ffmpeg
 from PIL import Image, ImageChops, ImageStat
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"scripts"))
+from android_ui_ready import foreground_state, start_release_app
 import websocket
 
 HOST="p2ptest.aikissgo.com"
@@ -168,26 +170,9 @@ def android_tree():
         return []
 
 def android_foreground():
-    raw=adb("shell","dumpsys","activity","activities",check=False).stdout.decode(errors="replace")
-    return any(PACKAGE in line and ("ResumedActivity" in line or "topResumedActivity" in line)
-               for line in raw.splitlines())
-
-def android_prepare_launcher():
-    # The previous run's real screenshot shows Pixel Launcher ANR covering
-    # the Flutter app. Only recover that specific emulator system process;
-    # never dismiss an ANR from the application under test.
-    launcher="com.google.android.apps.nexuslauncher"
-    for attempt in range(3):
-        adb("shell","am","force-stop",launcher)
-        adb("shell","am","start","-W","-n",PACKAGE+"/.MainActivity")
-        time.sleep(8)
-        raw=adb("shell","dumpsys","window","windows",check=False).stdout.decode(errors="replace")
-        focus=[line for line in raw.splitlines() if "mCurrentFocus=" in line]
-        if any(PACKAGE in line and "Application Not Responding" not in line for line in focus) and android_foreground():
-            REPORT["launcher_recovery_attempts"]=attempt+1
-            return
-    snapshot(android_capture,"00-launcher-recovery-failed")
-    raise AssertionError("Release app did not obtain input focus after bounded Pixel Launcher recovery")
+    ok,state=foreground_state(PACKAGE)
+    REPORT["last_focus"]=state
+    return ok
 
 def android_nav(index,step):
     # Identical real touch positions to the successful release APK smoke test.
@@ -268,11 +253,14 @@ def android():
         STAGE="install_release_apk"
         apk=next(Path("apk").rglob("app-release.apk"))
         adb("install","-r",str(apk))
-        android_prepare_launcher()
-        wait("Release Flutter activity resumed",android_foreground,30)
-        snapshot(android_capture,"00-home-before-credential")
-        # Register the coordinator first so a later UI failure reaches Windows.
+        # Open the coordinator before startup so peer receives explicit failures.
         rendezvous("viewer")
+        try:
+            start_release_app(PACKAGE,REPORT)
+        except Exception:
+            snapshot(android_capture,"00-startup-focus-failed")
+            raise
+        snapshot(android_capture,"00-home-before-credential")
         STAGE="configure_via_flutter_ui"
         android_nav(3,"00-settings-before-credential")
         android_tap("网络连接",identifier="p2p_settings_network",scroll=True)

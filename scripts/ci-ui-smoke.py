@@ -7,6 +7,7 @@ import sys
 import time
 import traceback
 from PIL import Image, ImageChops, ImageStat
+from android_ui_ready import foreground_state, start_release_app
 
 platform = sys.argv[1]
 out = pathlib.Path("evidence") / platform
@@ -37,19 +38,25 @@ def android():
     package = "com.p2p.remote.p2p_remote_ui"
     recording = subprocess.Popen(["adb", "shell", "screenrecord", "--time-limit", "90", "/sdcard/p2p-ci.mp4"])
     try:
-        adb("shell", "am", "start", "-W", "-n", package + "/.MainActivity")
-        time.sleep(8)
         def capture():
             return Image.open(io.BytesIO(adb("exec-out", "screencap", "-p", stdout=subprocess.PIPE).stdout)).convert("RGB")
+        try:
+            start_release_app(package,report)
+        except Exception:
+            capture().save(out/"00-startup-focus-failed.png")
+            raise
         image = capture()
         check("01-home", image)
         for name, fraction in [("02-devices", .375), ("03-remote", .625), ("04-settings", .875), ("05-home", .125)]:
             adb("shell", "input", "tap", str(int(image.width * fraction)), str(int(image.height * .925)))
             time.sleep(3)
-            check(name, capture())
-        focused = adb("shell", "dumpsys", "activity", "activities", stdout=subprocess.PIPE, text=True).stdout
-        if not any(package in line and ("ResumedActivity" in line or "topResumedActivity" in line) for line in focused.splitlines()):
-            raise AssertionError("App is not the resumed activity")
+            current=capture()
+            current.save(out/(name+".png"))
+            ok,state=foreground_state(package)
+            report["last_focus"]=state
+            if not ok:
+                raise AssertionError("App lost foreground input focus at "+name)
+            check(name,current)
     finally:
         subprocess.run(["adb", "shell", "pkill", "-2", "screenrecord"], check=False)
         try:
