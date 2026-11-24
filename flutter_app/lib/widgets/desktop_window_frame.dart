@@ -115,7 +115,7 @@ class _DesktopTitleBarState extends State<_DesktopTitleBar>
                     ),
                     const SizedBox(width: 10),
                     const Text(
-                      'V0.17',
+                      'V0.20',
                       style: TextStyle(
                         color: P2PColors.muted,
                         fontSize: 10,

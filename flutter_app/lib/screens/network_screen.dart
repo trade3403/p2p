@@ -68,7 +68,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                   const SizedBox(height: 18),
                   TextField(
                     controller: _server,
-                    enabled: controller.bridgeAvailable && !_saving,
+                    enabled: controller.bridgeAvailable && !_saving && !controller.hostRunning && !controller.viewerRequested && !controller.pairingActive,
                     keyboardType: TextInputType.url,
                     decoration: const InputDecoration(
                       labelText: 'Relay HTTPS / WSS 地址',
@@ -78,7 +78,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                   const SizedBox(height: 12),
                   TextField(
                     controller: _token,
-                    enabled: controller.bridgeAvailable && !_saving,
+                    enabled: controller.bridgeAvailable && !_saving && !controller.hostRunning && !controller.viewerRequested && !controller.pairingActive,
                     obscureText: true,
                     decoration: InputDecoration(
                       labelText: 'Relay Access Token',
@@ -90,7 +90,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                     children: [
                       Expanded(
                         child: FilledButton.icon(
-                          onPressed: controller.bridgeAvailable && !_saving
+                          onPressed: controller.bridgeAvailable && !_saving && !controller.hostRunning && !controller.viewerRequested && !controller.pairingActive
                               ? _saveConfiguration
                               : null,
                           icon: _saving
@@ -152,7 +152,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                   Text('当前连接策略', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                   SizedBox(height: 10),
                   Text(
-                    'V0.19 Android 原生桥接阶段沿用现有 WSS Relay、AES-256-GCM 会话协议和数字配对。LAN / UDP 路径将在保持原协议的前提下逐项接入。',
+                    '当前正式连接路径使用 WSS Relay、AES-256-GCM 和数字配对。新版 Flutter Host 尚未开放 LAN / UDP 直连，STUN 仅用于诊断。',
                     style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.55),
                   ),
                 ],

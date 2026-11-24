@@ -18,7 +18,7 @@ void main() {
     );
 
     expect(find.text('设备概览'), findsOneWidget);
-    expect(find.text('P2P REMOTE  /  V0.19'), findsOneWidget);
+    expect(find.text('P2P REMOTE  /  V0.20'), findsOneWidget);
 
     await tester.tap(find.text('设备').last);
     await tester.pumpAndSettle();

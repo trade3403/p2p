@@ -41,11 +41,11 @@ class DevicesScreen extends StatelessWidget {
                       const SizedBox(width: 12),
                       Expanded(
                         child: Text(
-                          controller.viewerConnected ? controller.viewerStatus : '当前没有活动的远程会话',
+                          controller.viewerConnected || controller.viewerRequested || controller.pairingActive ? controller.viewerStatus : '当前没有活动的远程会话',
                           style: const TextStyle(color: P2PColors.muted, fontSize: 12),
                         ),
                       ),
-                      if (controller.viewerConnected)
+                      if (controller.viewerConnected || controller.viewerRequested || controller.pairingActive)
                         OutlinedButton(
                           onPressed: () => controller.disconnectViewer(),
                           child: const Text('断开'),
@@ -69,7 +69,7 @@ class DevicesScreen extends StatelessWidget {
                   Text('设备库迁移说明', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
                   SizedBox(height: 10),
                   Text(
-                    '旧版 Windows 和 Android 客户端各自保存单设备凭据。V0.18 会先保持现有 DPAPI / Android Keystore 存储不变，再迁移为带稳定本地 ID 的多设备加密集合。完成迁移前，不展示演示设备，也不会自动覆盖旧凭据。',
+                    '旧版 Windows 和 Android 客户端各自保存单设备凭据。目前保持现有 DPAPI / Android Keystore 存储不变，再迁移为带稳定本地 ID 的多设备加密集合。完成迁移前，不展示演示设备，也不会自动覆盖旧凭据。',
                     style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.55),
                   ),
                 ],

@@ -16,8 +16,8 @@ class SettingsScreen extends StatelessWidget {
         const PageHeading(
           eyebrow: 'PREFERENCES',
           title: '设置',
-          subtitle: '管理应用外观、启动行为和本机信息。',
-          trailing: StatusDot(color: P2PColors.mint, label: 'V0.19 原生桥接'),
+          subtitle: '查看当前应用配置与本机信息。',
+          trailing: StatusDot(color: P2PColors.mint, label: 'V0.20 原生桥接'),
         ),
         const SizedBox(height: 24),
         const PanelCard(
@@ -29,22 +29,22 @@ class SettingsScreen extends StatelessWidget {
               _SettingRow(
                 icon: Icons.dark_mode_rounded,
                 title: '外观',
-                subtitle: '深色主题 · P2P Remote 专属配色',
+                subtitle: '当前固定深色主题',
                 value: '深色',
               ),
               Divider(color: P2PColors.outline),
               _SettingRow(
                 icon: Icons.language_rounded,
                 title: '语言',
-                subtitle: '应用界面语言',
+                subtitle: '当前固定界面语言',
                 value: '简体中文',
               ),
               Divider(color: P2PColors.outline),
               _SettingRow(
                 icon: Icons.notifications_active_outlined,
                 title: '连接通知',
-                subtitle: '连接请求、断开和安全提醒',
-                value: '默认',
+                subtitle: '通知设置暂未接入',
+                value: '未提供设置',
               ),
             ],
           ),
@@ -99,7 +99,7 @@ class SettingsScreen extends StatelessWidget {
                       children: [
                         Text('P2P Remote', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
                         SizedBox(height: 3),
-                        Text('V0.19 Android Native Bridge', style: TextStyle(color: P2PColors.muted, fontSize: 11)),
+                        Text('V0.20 Android Native Bridge', style: TextStyle(color: P2PColors.muted, fontSize: 11)),
                       ],
                     ),
                   ),
@@ -108,7 +108,7 @@ class SettingsScreen extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               const Text(
-                'Windows 端使用 Rust Host/Viewer；Android Flutter 端通过 Kotlin MethodChannel/EventChannel 接入数字配对、AES-GCM、JPEG/H.264 画面和远程输入。Windows 系统托盘与正式安装程序正在接入。',
+                'Windows 端使用 Rust Host/Viewer；Android Flutter 端通过 Kotlin MethodChannel/EventChannel 接入数字配对、AES-GCM、JPEG/H.264 画面和远程输入。Windows 托盘及安装程序已构建；公网远控仍需实测验收。',
                 style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.55),
               ),
             ],

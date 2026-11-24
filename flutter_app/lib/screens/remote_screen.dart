@@ -51,7 +51,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
         return ListView(
           children: [
             PageHeading(
-              eyebrow: 'REMOTE SESSION  /  V0.19',
+              eyebrow: 'REMOTE SESSION  /  V0.20',
               title: '远程控制',
               subtitle: '通过端到端加密会话查看桌面，并发送鼠标、键盘和剪贴板操作。',
               trailing: StatusDot(

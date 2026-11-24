@@ -21,7 +21,7 @@ class DashboardScreen extends StatelessWidget {
         return ListView(
           children: [
             PageHeading(
-              eyebrow: 'P2P REMOTE  /  V0.19',
+              eyebrow: 'P2P REMOTE  /  V0.20',
               title: '设备概览',
               subtitle: '管理本机共享服务，或连接已授权的远程电脑。',
               trailing: StatusDot(
