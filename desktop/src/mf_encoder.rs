@@ -4,6 +4,12 @@ extern "C" {
     fn p2p_mf_create(w:u32,h:u32,fps:u32,bitrate:u32)->*mut c_void;
     fn p2p_mf_encode(handle:*mut c_void,nv12:*const u8,n:usize,out:*mut u8,cap:usize,written:*mut usize)->i32;
     fn p2p_mf_destroy(handle:*mut c_void);
+    fn p2p_dxgi_create(x:i32,y:i32,w:u32,h:u32)->*mut c_void;
+    fn p2p_dxgi_destroy(handle:*mut c_void);
+    fn p2p_dxgi_gpu_device(handle:*mut c_void,w:u32,h:u32,fps:u32)->*mut c_void;
+    fn p2p_dxgi_gpu_read(handle:*mut c_void,texture:*mut *mut c_void)->i32;
+    fn p2p_mf_create_gpu(w:u32,h:u32,fps:u32,bitrate:u32,device:*mut c_void)->*mut c_void;
+    fn p2p_mf_encode_gpu(handle:*mut c_void,texture:*mut c_void,out:*mut u8,cap:usize,written:*mut usize)->i32;
 }
 pub struct HardwareEncoder {
     handle: NonNull<c_void>,
@@ -67,4 +73,39 @@ mod tests {
         assert_eq!(out,[235,235,235,235,128,128]);
         assert_eq!(rgba_to_nv12(&[0;15],2,2,&mut out),None);
     }
+}
+
+pub enum GpuRead {Frame{bytes:Vec<u8>,fresh:bool,capture_us:u64,encode_us:u64},Idle,Failed,Blocked}
+pub struct GpuEncoder {
+    capture:NonNull<c_void>,encoder:NonNull<c_void>,out:Vec<u8>,
+    geometry:(i32,i32,u32,u32),profile:(u32,u32),pub size:(u32,u32),
+}
+impl GpuEncoder {
+    pub fn new(geometry:(i32,i32,u32,u32),profile:(u32,u32),size:(u32,u32))->Option<Self> {
+        let (x,y,rw,rh)=geometry;let (w,h)=size;
+        let capture=NonNull::new(unsafe{p2p_dxgi_create(x,y,rw,rh)})?;
+        let device=unsafe{p2p_dxgi_gpu_device(capture.as_ptr(),w,h,profile.1)};
+        let encoder=NonNull::new(unsafe{p2p_mf_create_gpu(w,h,profile.1,profile.0,device)});
+        match encoder {
+            Some(encoder)=>Some(Self{capture,encoder,out:vec![0;2*1024*1024-4],geometry,profile,size}),
+            None=>{unsafe{p2p_dxgi_destroy(capture.as_ptr())};None}
+        }
+    }
+    pub fn matches(&self,g:(i32,i32,u32,u32),p:(u32,u32))->bool {self.geometry==g&&self.profile==p}
+    pub fn read(&mut self)->GpuRead {
+        let start=std::time::Instant::now();let mut texture=std::ptr::null_mut();
+        let code=unsafe{p2p_dxgi_gpu_read(self.capture.as_ptr(),&mut texture)};
+        if code==2{return GpuRead::Idle;}
+        if code == -2{return GpuRead::Blocked;}
+        if code<0 || texture.is_null(){return GpuRead::Failed;}
+        let capture_us=start.elapsed().as_micros() as u64;
+        let start=std::time::Instant::now();let mut n=0;
+        let result=unsafe{p2p_mf_encode_gpu(self.encoder.as_ptr(),texture,self.out.as_mut_ptr(),self.out.len(),&mut n)};
+        if !crate::dxgi_capture::desktop_allowed(){return GpuRead::Blocked;}
+        if result!=0||n==0||n>self.out.len(){return GpuRead::Failed;}
+        GpuRead::Frame{bytes:self.out[..n].to_vec(),fresh:code==1,capture_us,encode_us:start.elapsed().as_micros() as u64}
+    }
+}
+impl Drop for GpuEncoder {
+    fn drop(&mut self){unsafe{p2p_mf_destroy(self.encoder.as_ptr());p2p_dxgi_destroy(self.capture.as_ptr());}}
 }

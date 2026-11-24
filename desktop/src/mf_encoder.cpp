@@ -4,6 +4,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <mfapi.h>
+#include <d3d11.h>
 #include <mfidl.h>
 #include <mferror.h>
 #include <mftransform.h>
@@ -24,6 +25,7 @@ struct Session {
     ComPtr<IMFTransform> transform;
     ComPtr<IMFMediaEventGenerator> events;
     ComPtr<ICodecAPI> codec;
+    ComPtr<IMFDXGIDeviceManager> manager;
     DWORD in=0,out=0;
     UINT32 w=0,h=0,fps=0;
     LONGLONG pts=0;
@@ -35,7 +37,7 @@ struct Session {
             transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH,0);
             transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING,0);
         }
-        codec.Reset(); events.Reset(); transform.Reset();
+        codec.Reset(); events.Reset(); transform.Reset(); manager.Reset();
         if(mf) MFShutdown();
         if(com) CoUninitialize();
     }
@@ -66,6 +68,12 @@ bool start(Session& s,IMFActivate* activation,UINT32 bitrate) {
     if(FAILED(attrs->GetUINT32(MF_TRANSFORM_ASYNC,&asynchronous)) || !asynchronous
        || FAILED(attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK,TRUE))) return false;
     attrs->SetUINT32(MF_LOW_LATENCY,TRUE);
+    if(s.manager) {
+        UINT32 aware=0;
+        if(FAILED(attrs->GetUINT32(MF_SA_D3D11_AWARE,&aware)) || !aware ||
+           FAILED(s.transform->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+               reinterpret_cast<ULONG_PTR>(s.manager.Get())))) return false;
+    }
     if(FAILED(s.transform.As(&s.events))) return false;
     DWORD ni=0,no=0;
     if(FAILED(s.transform->GetStreamCount(&ni,&no)) || ni!=1 || no!=1) return false;
@@ -161,12 +169,17 @@ bool event(Session& s,MediaEventType& type) {
     }
     return false;
 }
-bool input(Session& s,const uint8_t* nv12,DWORD n) {
+bool input(Session& s,const uint8_t* nv12,DWORD n,ID3D11Texture2D* texture) {
     ComPtr<IMFSample> sample; ComPtr<IMFMediaBuffer> buffer;
-    if(FAILED(MFCreateMemoryBuffer(n,&buffer)) || FAILED(MFCreateSample(&sample))) return false;
-    BYTE* dst=nullptr;
-    if(FAILED(buffer->Lock(&dst,nullptr,nullptr))) return false;
-    memcpy(dst,nv12,n); buffer->Unlock();
+    if(FAILED(MFCreateSample(&sample))) return false;
+    if(texture) {
+        if(!s.manager || FAILED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D),texture,0,FALSE,&buffer))) return false;
+    } else {
+        if(s.manager || !nv12 || FAILED(MFCreateMemoryBuffer(n,&buffer))) return false;
+        BYTE* dst=nullptr;
+        if(FAILED(buffer->Lock(&dst,nullptr,nullptr))) return false;
+        memcpy(dst,nv12,n);buffer->Unlock();
+    }
     LONGLONG duration=10000000/s.fps;
     if(FAILED(buffer->SetCurrentLength(n)) || FAILED(sample->AddBuffer(buffer.Get()))
        || FAILED(sample->SetSampleTime(s.pts)) || FAILED(sample->SetSampleDuration(duration))) return false;
@@ -175,7 +188,7 @@ bool input(Session& s,const uint8_t* nv12,DWORD n) {
     s.pts+=duration; ++s.frame; return true;
 }
 }
-extern "C" void* p2p_mf_create(uint32_t w,uint32_t h,uint32_t fps,uint32_t bitrate) noexcept {
+static void* create_encoder(uint32_t w,uint32_t h,uint32_t fps,uint32_t bitrate,ID3D11Device* device) noexcept {
     try {
         if(w<2 || h<2 || w>1280 || h>720 || (w&1) || (h&1) || fps<5 || fps>30) return nullptr;
         auto s=std::make_unique<Session>();
@@ -184,6 +197,11 @@ extern "C" void* p2p_mf_create(uint32_t w,uint32_t h,uint32_t fps,uint32_t bitra
         s->com=true;
         if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))) return nullptr;
         s->mf=true; s->w=w; s->h=h; s->fps=fps;
+        if(device) {
+            UINT reset=0;
+            if(FAILED(MFCreateDXGIDeviceManager(&reset,&s->manager)) ||
+               FAILED(s->manager->ResetDevice(device,reset))) return nullptr;
+        }
         MFT_REGISTER_TYPE_INFO in{MFMediaType_Video,MFVideoFormat_NV12};
         MFT_REGISTER_TYPE_INFO out{MFMediaType_Video,MFVideoFormat_H264};
         IMFActivate** list=nullptr; UINT32 count=0;
@@ -204,16 +222,27 @@ extern "C" void* p2p_mf_create(uint32_t w,uint32_t h,uint32_t fps,uint32_t bitra
         return ok?s.release():nullptr;
     } catch(...) { return nullptr; }
 }
-extern "C" int p2p_mf_encode(void* handle,const uint8_t* nv12,size_t n,uint8_t* dst,size_t cap,size_t* written) noexcept {
+extern "C" void* p2p_mf_create(uint32_t w,uint32_t h,uint32_t fps,uint32_t bitrate) noexcept {
+    return create_encoder(w,h,fps,bitrate,nullptr);
+}
+extern "C" void* p2p_mf_create_gpu(uint32_t w,uint32_t h,uint32_t fps,uint32_t bitrate,void* device) noexcept {
+    return device?create_encoder(w,h,fps,bitrate,static_cast<ID3D11Device*>(device)):nullptr;
+}
+static int encode_frame(void* handle,const uint8_t* nv12,size_t n,ID3D11Texture2D* texture,uint8_t* dst,size_t cap,size_t* written) noexcept {
     try {
-        if(!handle || !nv12 || !dst || !written) return -1;
+        if(!handle || (!nv12 && !texture) || !dst || !written) return -1;
         *written=0;
         auto& s=*static_cast<Session*>(handle);
+        if(texture) {
+            D3D11_TEXTURE2D_DESC td{};texture->GetDesc(&td);
+            if(!s.manager || td.Width!=s.w || td.Height!=s.h || td.Format!=DXGI_FORMAT_NV12) return -1;
+            n=size_t(s.w)*s.h*3/2;
+        }
         if(n!=size_t(s.w)*s.h*3/2) return -1;
         bool fed=false;
         for(unsigned i=0;i<12;++i) {
             if(s.need && !fed) {
-                if(!input(s,nv12,static_cast<DWORD>(n))) return -1;
+                if(!input(s,nv12,static_cast<DWORD>(n),texture)) return -1;
                 s.need=false; fed=true;
             }
             MediaEventType type;
@@ -235,5 +264,11 @@ extern "C" int p2p_mf_encode(void* handle,const uint8_t* nv12,size_t n,uint8_t* 
         }
         return -1;
     } catch(...) { return -1; }
+}
+extern "C" int p2p_mf_encode(void* handle,const uint8_t* nv12,size_t n,uint8_t* dst,size_t cap,size_t* written) noexcept {
+    return encode_frame(handle,nv12,n,nullptr,dst,cap,written);
+}
+extern "C" int p2p_mf_encode_gpu(void* handle,void* texture,uint8_t* dst,size_t cap,size_t* written) noexcept {
+    return texture?encode_frame(handle,nullptr,0,static_cast<ID3D11Texture2D*>(texture),dst,cap,written):-1;
 }
 extern "C" void p2p_mf_destroy(void* handle) noexcept { delete static_cast<Session*>(handle); }

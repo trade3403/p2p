@@ -194,11 +194,12 @@ where
                         "video_target_bps": bitrate.load(Ordering::Relaxed),
                         "video_target_fps": session_fps.load(Ordering::Relaxed),
                         "video_encoder": match actual_encoder.load(Ordering::Relaxed) {
+                            3 => "Media Foundation D3D11 texture",
                             2 => "Media Foundation hardware",
                             1 => "OpenH264 software",
                             _ => "JPEG",
                         },
-                        "video_encoder_hardware": actual_encoder.load(Ordering::Relaxed)==2,
+                        "video_encoder_hardware": actual_encoder.load(Ordering::Relaxed)>=2,
                         "capture_backend": match video_stats.capture_backend.load(Ordering::Relaxed) {
                             2=>"DXGI", 1=>"screenshots compatibility", _=>"unknown"
                         },

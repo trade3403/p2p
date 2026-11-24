@@ -81,6 +81,8 @@ pub fn spawn_frames(
         let mut hardware: Option<crate::mf_encoder::HardwareEncoder> = None;
         // No repeated expensive hardware probing on a host without a usable MFT.
         let mut hardware_failed = false;
+        let mut gpu:Option<crate::mf_encoder::GpuEncoder>=None;
+        let mut gpu_failed=false;
         let mut desktop_capture=crate::dxgi_capture::DesktopCapture::default();
         let mut pixels=PixelCache::default();
         let mut previous_h264 = false;
@@ -90,6 +92,7 @@ pub fn spawn_frames(
 
         while !tx.is_closed() {
             if udp_active.load(Ordering::Relaxed) {
+                gpu=None;
                 desktop_capture.clear();
                 pixels.clear();
                 // The encrypted UDP preview has its own low-res capture worker.
@@ -105,15 +108,17 @@ pub fn spawn_frames(
                            target_fps.load(Ordering::Relaxed).clamp(5,30));
             if active_h264 != previous_h264
                 || selected != previous_monitor
-                || (active_h264 && ((hardware.is_none() && frames_since_reset >= profile.1) || previous_profile != profile))
+                || (active_h264 && ((gpu.is_none() && hardware.is_none() && frames_since_reset >= profile.1) || previous_profile != profile))
             {
                 // New encoder emits fresh SPS/PPS and a decodable IDR. Repeated
                 // every 30 frames so a newly attached Android viewer can recover.
                 encoder = None;
                 hardware = None;
+                gpu=None;
                 if active_h264!=previous_h264 || selected!=previous_monitor {
                     desktop_capture.clear();
                     pixels.clear();
+                    gpu_failed=false;
                 }
                 frames_since_reset = 0;
                 previous_h264 = active_h264;
@@ -122,7 +127,7 @@ pub fn spawn_frames(
             }
 
             match capture(selected, active_h264, profile, &mut encoder, &mut hardware,
-                          &mut hardware_failed, &actual_encoder, &mut desktop_capture, &mut pixels, &stats) {
+                          &mut hardware_failed, &actual_encoder, &mut desktop_capture, &mut pixels, &mut gpu, &mut gpu_failed, &stats) {
                 Ok(Some(frame)) => {
                     frames_since_reset += 1;
                     match tx.try_send(frame) {
@@ -133,6 +138,7 @@ pub fn spawn_frames(
                             // the next video access unit contains SPS/PPS + IDR.
                             encoder = None;
                             hardware = None;
+                            gpu=None;
                             frames_since_reset = 0;
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => break,
@@ -142,6 +148,7 @@ pub fn spawn_frames(
                 Err(_) => {
                     encoder = None;
                     hardware = None;
+                    gpu=None;
                     desktop_capture.clear();
                     pixels.clear();
                     frames_since_reset = 0;
@@ -189,6 +196,8 @@ fn capture(
     actual_encoder: &AtomicU32,
     desktop_capture: &mut crate::dxgi_capture::DesktopCapture,
     cache: &mut PixelCache,
+    gpu: &mut Option<crate::mf_encoder::GpuEncoder>,
+    gpu_failed: &mut bool,
     stats: &VideoStats,
 ) -> anyhow::Result<Option<Frame>> {
     use anyhow::{anyhow, Context};
@@ -210,6 +219,39 @@ fn capture(
     let info=&screen.display_info;
     let geometry=(info.x,info.y,info.width,info.height);
     if cache.geometry!=Some(geometry) {cache.clear();}
+    use crate::mf_encoder::{GpuEncoder,GpuRead};
+    // Never hold two desktop duplications for the same output.
+    if h264 && !*gpu_failed {
+        if gpu.as_ref().is_some_and(|g|!g.matches(geometry,profile)){*gpu=None;}
+        if gpu.is_none() {
+            desktop_capture.clear();cache.clear();*hardware=None;*encoder=None;
+            *gpu=GpuEncoder::new(geometry,profile,dimensions(info.width,info.height));
+            if gpu.is_none(){*gpu_failed=true;}
+        }
+        if let Some(g)=gpu.as_mut() {
+            let (w,h)=g.size;
+            match g.read() {
+                GpuRead::Frame{bytes,fresh,capture_us,encode_us}=>{
+                    let mut packet=Vec::with_capacity(bytes.len()+4);
+                    packet.extend_from_slice(&(w as u16).to_be_bytes());
+                    packet.extend_from_slice(&(h as u16).to_be_bytes());packet.extend_from_slice(&bytes);
+                    stats.capture_backend.store(2,Ordering::Relaxed);
+                    if fresh{stats.fresh_frames.fetch_add(1,Ordering::Relaxed);}
+                    else{stats.reused_frames.fetch_add(1,Ordering::Relaxed);}
+                    stats.capture_total_us.fetch_add(capture_us,Ordering::Relaxed);
+                    stats.capture_samples.fetch_add(1,Ordering::Relaxed);
+                    stats.encode_total_us.fetch_add(encode_us,Ordering::Relaxed);
+                    stats.encode_samples.fetch_add(1,Ordering::Relaxed);
+                    actual_encoder.store(3,Ordering::Relaxed);
+                    return Ok(Some((protocol::AVC,packet)));
+                }
+                GpuRead::Idle=>return Ok(None),
+                GpuRead::Blocked=>{*gpu=None;return Err(anyhow!("GPU desktop capture blocked"));}
+                GpuRead::Failed=>{*gpu=None;*gpu_failed=true;}
+            }
+        }
+    } else {*gpu=None;}
+
     // Legacy JPEG behavior is retained for protocol compatibility.
     let result=if h264 {desktop_capture.read(geometry)}
         else {desktop_capture.clear();Read::Fallback};

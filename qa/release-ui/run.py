@@ -368,7 +368,7 @@ def read_avc_metrics():
         data[key]=int(data[key])
     data["fps"]=float(data["fps"])
     require(data["codec"]=="H264" and data["frames"]>0,"Actual MediaCodec AVC playback not verified")
-    require(data["encoder"] in ("OpenH264 software","Media Foundation hardware") and data["decoder"] not in ("","unknown"),"Actual encoder and decoder not reported")
+    require(data["encoder"] in ("OpenH264 software","Media Foundation hardware","Media Foundation D3D11 texture") and data["decoder"] not in ("","unknown"),"Actual encoder and decoder not reported")
     require(data["decoder_mode"] in ("hardware","software","unknown"),"Invalid decoder classification")
     require(data["capture_backend"] in ("DXGI","screenshots compatibility"),"Actual host capture backend not reported")
     require(data["capture_avg_us"]>0 and data["encode_avg_us"]>0 and data["send_avg_us"]>0
@@ -468,7 +468,7 @@ def android():
         require(second["frames"]>first["frames"] and second["fps"]>0 and second["bps"]>0
                 and second["rtt"]>=0,"No measured live AVC progress")
         require(second["host_encoded_frames"]>first["host_encoded_frames"],"Host encoded frame count did not progress")
-        if second["capture_backend"]=="DXGI" and second["reused_frames"]>0:
+        if second["capture_backend"]=="DXGI" and second["encoder"]!="Media Foundation D3D11 texture" and second["reused_frames"]>0:
             require(second["resize_cache_hits"]>0,"Idle DXGI frames did not use scaled pixel cache")
         if second["encoder"]=="OpenH264 software" and second["resize_cache_hits"]>0:
             require(second["yuv_cache_hits"]>0,"Software encoder did not reuse unchanged YUV frames")
