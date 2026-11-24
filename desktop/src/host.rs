@@ -138,6 +138,7 @@ where
     let mut last_adaptation = std::time::Instant::now();
     let mut good_samples = 0u32;
     let actual_encoder=Arc::new(AtomicU32::new(0));
+    let video_stats=Arc::new(crate::video::VideoStats::default());
     let mut frames = crate::video::spawn_frames(
         config.monitor_index.clone(),
         config.h264_enabled.clone(),
@@ -147,6 +148,7 @@ where
         config.udp_active.clone(),
         force_jpeg.clone(),
         actual_encoder.clone(),
+        video_stats.clone(),
     );
     let mut metadata_tick = tokio::time::interval(Duration::from_secs(2));
     let (udp_signal_tx, mut udp_signal_rx) =
@@ -173,9 +175,11 @@ where
                 let Some((kind, bytes)) = frame else {
                     return Err(anyhow!("screen capture worker exited unexpectedly"));
                 };
+                let send_start=std::time::Instant::now();
                 let packet = protocol::encrypt(&config.secret, kind, &bytes)?;
                 tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
                     .await.context("video send timed out")??;
+                crate::video::VideoStats::record(&video_stats.send_total_us,&video_stats.send_samples,send_start);
                 config.sent_frames.fetch_add(1, Ordering::Relaxed);
             }
             _ = metadata_tick.tick() => {
@@ -194,7 +198,16 @@ where
                             1 => "OpenH264 software",
                             _ => "JPEG",
                         },
-                        "video_encoder_hardware": actual_encoder.load(Ordering::Relaxed)==2
+                        "video_encoder_hardware": actual_encoder.load(Ordering::Relaxed)==2,
+                        "capture_backend": match video_stats.capture_backend.load(Ordering::Relaxed) {
+                            2=>"DXGI", 1=>"screenshots compatibility", _=>"unknown"
+                        },
+                        "capture_avg_us": crate::video::VideoStats::average(&video_stats.capture_total_us,&video_stats.capture_samples),
+                        "encode_avg_us": crate::video::VideoStats::average(&video_stats.encode_total_us,&video_stats.encode_samples),
+                        "send_avg_us": crate::video::VideoStats::average(&video_stats.send_total_us,&video_stats.send_samples),
+                        "fresh_frames": video_stats.fresh_frames.load(Ordering::Relaxed),
+                        "reused_frames": video_stats.reused_frames.load(Ordering::Relaxed),
+                        "host_encoded_frames": video_stats.encode_samples.load(Ordering::Relaxed)
                     }).to_string();
                     let packet = protocol::encrypt(&config.secret, protocol::MONITORS, info.as_bytes())?;
                     outgoing.send(Message::Binary(packet)).await?;

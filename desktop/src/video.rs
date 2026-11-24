@@ -1,6 +1,5 @@
-//! V0.6 video capture/encoding on a dedicated thread.
-//! JPEG remains default; OpenH264 is opt-in software encoding. Frame queue
-//! capacity is small to favor current frames over stale frames on slow links.
+//! V0.21 bounded desktop capture and negotiated AVC encoding on one worker.
+//! DXGI is preferred for unrotated displays; compatibility capture is retained.
 use crate::protocol;
 use std::{
     sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc},
@@ -10,6 +9,28 @@ use std::{
 use tokio::sync::mpsc;
 
 pub type Frame = (u8, Vec<u8>);
+
+#[derive(Default)]
+pub struct VideoStats {
+    pub capture_backend: AtomicU32, // 0 unknown, 1 compatibility, 2 DXGI
+    pub fresh_frames: AtomicU64,
+    pub reused_frames: AtomicU64,
+    pub capture_total_us: AtomicU64,
+    pub capture_samples: AtomicU64,
+    pub encode_total_us: AtomicU64,
+    pub encode_samples: AtomicU64,
+    pub send_total_us: AtomicU64,
+    pub send_samples: AtomicU64,
+}
+impl VideoStats {
+    pub fn average(total:&AtomicU64,count:&AtomicU64)->u64 {
+        total.load(Ordering::Relaxed).checked_div(count.load(Ordering::Relaxed)).unwrap_or(0)
+    }
+    pub fn record(total:&AtomicU64,count:&AtomicU64,start:Instant) {
+        total.fetch_add(start.elapsed().as_micros().min(u64::MAX as u128) as u64,Ordering::Relaxed);
+        count.fetch_add(1,Ordering::Relaxed);
+    }
+}
 
 pub fn dimensions(source_w: u32, source_h: u32) -> (u32, u32) {
     if source_w < 2 || source_h < 2 { return (0, 0); }
@@ -31,6 +52,7 @@ pub fn spawn_frames(
     udp_active: Arc<AtomicBool>,
     force_jpeg: Arc<AtomicBool>,
     actual_encoder: Arc<AtomicU32>,
+    stats: Arc<VideoStats>,
 ) -> mpsc::Receiver<Frame> {
     let (tx, rx) = mpsc::channel(2);
     thread::spawn(move || {
@@ -38,6 +60,7 @@ pub fn spawn_frames(
         let mut hardware: Option<crate::mf_encoder::HardwareEncoder> = None;
         // No repeated expensive hardware probing on a host without a usable MFT.
         let mut hardware_failed = false;
+        let mut desktop_capture=crate::dxgi_capture::DesktopCapture::default();
         let mut previous_h264 = false;
         let mut previous_monitor = usize::MAX;
         let mut frames_since_reset = 0u32;
@@ -45,6 +68,7 @@ pub fn spawn_frames(
 
         while !tx.is_closed() {
             if udp_active.load(Ordering::Relaxed) {
+                desktop_capture.clear();
                 // The encrypted UDP preview has its own low-res capture worker.
                 thread::sleep(Duration::from_millis(120));
                 continue;
@@ -71,7 +95,7 @@ pub fn spawn_frames(
             }
 
             match capture(selected, active_h264, profile, &mut encoder, &mut hardware,
-                          &mut hardware_failed, &actual_encoder) {
+                          &mut hardware_failed, &actual_encoder, &mut desktop_capture, &stats) {
                 Ok(Some(frame)) => {
                     frames_since_reset += 1;
                     match tx.try_send(frame) {
@@ -119,6 +143,7 @@ pub fn spawn_frames(
     _udp_active: Arc<AtomicBool>,
     _force_jpeg: Arc<AtomicBool>,
     _actual_encoder: Arc<AtomicU32>,
+    _stats: Arc<VideoStats>,
 ) -> mpsc::Receiver<Frame> {
     let (_tx, rx) = mpsc::channel(1);
     rx
@@ -133,24 +158,52 @@ fn capture(
     hardware: &mut Option<crate::mf_encoder::HardwareEncoder>,
     hardware_failed: &mut bool,
     actual_encoder: &AtomicU32,
+    desktop_capture: &mut crate::dxgi_capture::DesktopCapture,
+    stats: &VideoStats,
 ) -> anyhow::Result<Option<Frame>> {
     use anyhow::{anyhow, Context};
-    use image::{imageops::FilterType, codecs::jpeg::JpegEncoder, DynamicImage, RgbaImage};
+    use image::{imageops::FilterType, codecs::jpeg::JpegEncoder, RgbaImage};
     use openh264::{
         encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode},
         formats::{RgbaSliceU8, YUVBuffer},
         OpenH264API,
     };
+    use crate::dxgi_capture::{desktop_allowed,Read};
+    let capture_start=Instant::now();
+    if !desktop_allowed() {
+        desktop_capture.clear();
+        return Err(anyhow!("interactive desktop unavailable"));
+    }
     let screen = screenshots::Screen::all()?.into_iter().nth(screen_index)
         .context("selected display not available")?;
-    let pixels = screen.capture()?;
-    let (raw_w, raw_h) = (pixels.width(), pixels.height());
-    let (w, h) = dimensions(raw_w, raw_h);
-    if w < 2 || h < 2 { return Err(anyhow!("display has invalid dimensions")); }
-    let rgba = RgbaImage::from_raw(raw_w, raw_h, pixels.into_raw())
-        .context("invalid capture buffer")?;
-    let image = if (raw_w,raw_h)==(w,h) { DynamicImage::ImageRgba8(rgba) }
-        else { DynamicImage::ImageRgba8(rgba).resize_exact(w,h,FilterType::Triangle) };
+    let info=&screen.display_info;
+    // Legacy JPEG behavior is retained for protocol compatibility.
+    let result=if h264 {desktop_capture.read((info.x,info.y,info.width,info.height))}
+        else {desktop_capture.clear();Read::Fallback};
+    let (rgba,backend,reused)=match result {
+        Read::Fresh(img)=>(img,2,false),
+        Read::Reused(img)=>(img,2,true),
+        Read::Blocked=>return Err(anyhow!("desktop capture blocked")),
+        Read::Fallback=>{
+            if !desktop_allowed(){return Err(anyhow!("interactive desktop unavailable"));}
+            let pixels=screen.capture()?;
+            let (rw,rh)=(pixels.width(),pixels.height());
+            (RgbaImage::from_raw(rw,rh,pixels.into_raw()).context("invalid capture buffer")?,1,false)
+        }
+    };
+    if !desktop_allowed(){
+        desktop_capture.clear();
+        return Err(anyhow!("desktop changed during capture"));
+    }
+    stats.capture_backend.store(backend,Ordering::Relaxed);
+    if reused {stats.reused_frames.fetch_add(1,Ordering::Relaxed);}
+    else {stats.fresh_frames.fetch_add(1,Ordering::Relaxed);}
+    VideoStats::record(&stats.capture_total_us,&stats.capture_samples,capture_start);
+    let encode_start=Instant::now();
+    let (raw_w,raw_h)=rgba.dimensions();
+    let (w,h)=dimensions(raw_w,raw_h);
+    if w<2||h<2 {return Err(anyhow!("display has invalid dimensions"));}
+    let image=if (raw_w,raw_h)==(w,h) {rgba} else {image::imageops::resize(&rgba,w,h,FilterType::Triangle)};
     if h264 {
         // Hardware is classified only after a successfully emitted, validated AVC unit.
         if hardware.as_ref().is_some_and(|e|e.dimensions()!=(w,h)) { *hardware=None; }
@@ -159,12 +212,13 @@ fn capture(
             if hardware.is_none() { *hardware_failed=true; }
         }
         if let Some(hw)=hardware.as_mut() {
-            if let Some(bytes)=hw.encode(image.as_rgba8().context("capture RGBA missing")?.as_raw()) {
+            if let Some(bytes)=hw.encode(image.as_raw()) {
                 let mut packet=Vec::with_capacity(bytes.len()+4);
                 packet.extend_from_slice(&(w as u16).to_be_bytes());
                 packet.extend_from_slice(&(h as u16).to_be_bytes());
                 packet.extend_from_slice(&bytes);
                 actual_encoder.store(2,Ordering::Relaxed);
+                VideoStats::record(&stats.encode_total_us,&stats.encode_samples,encode_start);
                 return Ok(Some((protocol::AVC,packet)));
             }
             // Fail closed to the validated software encoder with a fresh IDR.
@@ -181,8 +235,7 @@ fn capture(
                 .skip_frames(false);
             *encoder = Some(Encoder::with_api_config(OpenH264API::from_source(), options)?);
         }
-        let rgba = image.to_rgba8();
-        let source = RgbaSliceU8::new(rgba.as_raw(), (w as usize, h as usize));
+        let source = RgbaSliceU8::new(image.as_raw(), (w as usize, h as usize));
         let yuv = YUVBuffer::from_rgb_source(source);
         let stream = encoder.as_mut().context("encoder unavailable")?.encode(&yuv)?;
         let bytes = stream.to_vec();
@@ -193,11 +246,13 @@ fn capture(
         output.extend_from_slice(&bytes); // one Annex-B H264 access unit
         if output.len() > 2 * 1024 * 1024 { return Err(anyhow!("encoded AVC frame too large")); }
         actual_encoder.store(1,Ordering::Relaxed);
+        VideoStats::record(&stats.encode_total_us,&stats.encode_samples,encode_start);
         Ok(Some((protocol::AVC, output)))
     } else {
         let mut bytes = Vec::new();
         JpegEncoder::new_with_quality(&mut bytes, 58).encode_image(&image)?;
         actual_encoder.store(0,Ordering::Relaxed);
+        VideoStats::record(&stats.encode_total_us,&stats.encode_samples,encode_start);
         Ok(Some((protocol::FRAME, bytes)))
     }
 }

@@ -74,6 +74,13 @@ internal class AndroidRemoteEngine(
     private var videoTargetBps = 0
     private var videoTargetFps = 0
     private var videoEncoder = ""
+    private var captureBackend = "unknown"
+    private var captureAvgUs = 0L
+    private var encodeAvgUs = 0L
+    private var sendAvgUs = 0L
+    private var freshFrames = 0L
+    private var reusedFrames = 0L
+    private var hostEncodedFrames = 0L
     private var sampleAt = 0L
     private var sampleFrames = 0L
     private var sampleDrops = 0L
@@ -197,6 +204,13 @@ internal class AndroidRemoteEngine(
         "video_target_bps" to videoTargetBps,
         "video_target_fps" to videoTargetFps,
         "video_encoder" to videoEncoder,
+        "capture_backend" to captureBackend,
+        "capture_avg_us" to captureAvgUs,
+        "encode_avg_us" to encodeAvgUs,
+        "send_avg_us" to sendAvgUs,
+        "fresh_frames" to freshFrames,
+        "reused_frames" to reusedFrames,
+        "host_encoded_frames" to hostEncodedFrames,
         "pairing_status" to if (pairingActive) status else "",
         "vault_error" to null,
     )
@@ -563,6 +577,13 @@ internal class AndroidRemoteEngine(
                                         videoTargetBps=metadata.optInt("video_target_bps",0)
                                         videoTargetFps=metadata.optInt("video_target_fps",0)
                                         videoEncoder=metadata.optString("video_encoder","")
+                                        captureBackend=metadata.optString("capture_backend","unknown")
+                                        captureAvgUs=metadata.optLong("capture_avg_us",0)
+                                        encodeAvgUs=metadata.optLong("encode_avg_us",0)
+                                        sendAvgUs=metadata.optLong("send_avg_us",0)
+                                        freshFrames=metadata.optLong("fresh_frames",0)
+                                        reusedFrames=metadata.optLong("reused_frames",0)
+                                        hostEncodedFrames=metadata.optLong("host_encoded_frames",0)
                                     }
                             }
                         }

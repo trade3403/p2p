@@ -259,17 +259,21 @@ def read_avc_metrics():
         for field in fields:
             if "codec=" in field and "decoder_mode=" in field:
                 items=dict(re.findall(r"(?m)^([a-z_]+)=([^\n]+)",field))
-                if len(items)>=10:
+                if all(k in items for k in ("codec","frames","fps","bps","rtt","target_bps","target_fps","drops","encoder","decoder","decoder_mode",
+                        "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","host_encoded_frames")):
                     return items
         return None
     data=wait("Actual release video diagnostic data",extract,25)
     android_tap("关闭性能数据")
-    for key in ("frames","bps","rtt","target_bps","target_fps","drops"):
+    for key in ("frames","bps","rtt","target_bps","target_fps","drops","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","host_encoded_frames"):
         data[key]=int(data[key])
     data["fps"]=float(data["fps"])
     require(data["codec"]=="H264" and data["frames"]>0,"Actual MediaCodec AVC playback not verified")
     require(data["encoder"] in ("OpenH264 software","Media Foundation hardware") and data["decoder"] not in ("","unknown"),"Actual encoder and decoder not reported")
     require(data["decoder_mode"] in ("hardware","software","unknown"),"Invalid decoder classification")
+    require(data["capture_backend"] in ("DXGI","screenshots compatibility"),"Actual host capture backend not reported")
+    require(data["capture_avg_us"]>0 and data["encode_avg_us"]>0 and data["send_avg_us"]>0
+            and data["fresh_frames"]>0 and data["host_encoded_frames"]>0,"No real host stage measurements")
     require(data["decoder_mode"]!="hardware","CI emulator must not claim physical hardware decoding")
     if any(name in data["decoder"].lower() for name in ("goldfish","ranchu")):
         require(data["decoder_mode"]=="software","Virtual emulator AVC decoder misclassified")
@@ -362,6 +366,7 @@ def android():
         second=read_avc_metrics()
         require(second["frames"]>first["frames"] and second["fps"]>0 and second["bps"]>0
                 and second["rtt"]>=0,"No measured live AVC progress")
+        require(second["host_encoded_frames"]>first["host_encoded_frames"],"Host encoded frame count did not progress")
         REPORT["actual_avc_metrics"]={"first":first,"second":second,
             "scope":"MediaCodec rendered output, received AVC payload bitrate, authenticated RTT; no synthetic data"}
         passed("Live AVC rendering, actual throughput and RTT measured in landscape release APK")

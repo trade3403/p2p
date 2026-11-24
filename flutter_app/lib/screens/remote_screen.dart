@@ -528,7 +528,14 @@ class _RemoteScreenState extends State<RemoteScreen> {
         'drops=${s['avc_decoder_drops'] ?? 0}\n'
         'encoder=${s['video_encoder'] ?? 'unknown'}\n'
         'decoder=${s['avc_decoder'] ?? 'unknown'}\n'
-        'decoder_mode=$hardware';
+        'decoder_mode=$hardware\n'
+        'capture_backend=${s['capture_backend'] ?? 'unknown'}\n'
+        'capture_avg_us=${s['capture_avg_us'] ?? 0}\n'
+        'encode_avg_us=${s['encode_avg_us'] ?? 0}\n'
+        'send_avg_us=${s['send_avg_us'] ?? 0}\n'
+        'fresh_frames=${s['fresh_frames'] ?? 0}\n'
+        'reused_frames=${s['reused_frames'] ?? 0}\n'
+        'host_encoded_frames=${s['host_encoded_frames'] ?? 0}';
     await showDialog<void>(
       context: routeContext,
       builder: (dialogContext) => AlertDialog(
@@ -536,7 +543,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
         content: SingleChildScrollView(
           child: Semantics(
             identifier: 'p2p_video_metrics',
-            child: Text(details),
+            child: Text(details, style: const TextStyle(fontSize: 11)),
           ),
         ),
         actions: [TextButton(onPressed: () => Navigator.of(dialogContext).pop(),

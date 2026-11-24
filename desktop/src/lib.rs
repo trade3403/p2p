@@ -13,6 +13,8 @@ mod trusted_profile;
 mod video;
 #[cfg(windows)]
 mod mf_encoder;
+#[cfg(windows)]
+mod dxgi_capture;
 mod lan;
 mod stun;
 mod udp_punch;
