@@ -546,38 +546,15 @@ class _RemoteScreenState extends State<RemoteScreen> {
   }
 
   Future<void> _fullscreenText(BuildContext routeContext) async {
-    final text = TextEditingController();
-    try {
-      await showDialog<void>(
-        context: routeContext,
-        builder: (dialogContext) => AlertDialog(
-          title: const Text('远程输入文字'),
-          content: Semantics(
-            identifier: 'p2p_remote_text',
-            child: TextField(
-              controller: text,
-              autofocus: true,
-              maxLength: 250,
-              decoration: const InputDecoration(labelText: '远程文字内容'),
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('取消')),
-            FilledButton(
-              onPressed: () async {
-                if (text.text.trim().isEmpty) return;
-                if (await _controller.sendText(text.text) && dialogContext.mounted) {
-                  Navigator.of(dialogContext).pop();
-                }
-              },
-              child: const Text('发送远程文字'),
-            ),
-          ],
-        ),
-      );
-    } finally {
-      text.dispose();
-    }
+    // Landscape keyboards can occupy most of the short dimension. A full
+    // route with a compact horizontal form keeps the input and send action
+    // above the IME, instead of shrinking the content of an AlertDialog.
+    await Navigator.of(routeContext).push<void>(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => _RemoteTextPage(controller: _controller),
+      ),
+    );
   }
 
   (double, double)? _normalized(Offset point, Size surface) {
@@ -632,4 +609,102 @@ class _RemoteScreenState extends State<RemoteScreen> {
     _activePointer = null;
     _controller.sendPointer('up', _lastX, _lastY);
   }
+}
+
+class _RemoteTextPage extends StatefulWidget {
+  const _RemoteTextPage({required this.controller});
+  final P2PRemoteController controller;
+
+  @override
+  State<_RemoteTextPage> createState() => _RemoteTextPageState();
+}
+
+class _RemoteTextPageState extends State<_RemoteTextPage> {
+  final _text = TextEditingController();
+  bool _sending = false;
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  Future<void> _send() async {
+    if (_sending || _text.text.trim().isEmpty ||
+        !widget.controller.viewerConnected || !widget.controller.viewerAllowsInput) return;
+    setState(() => _sending = true);
+    try {
+      final ok = await widget.controller.sendText(_text.text);
+      if (!mounted) return;
+      if (ok) {
+        FocusScope.of(context).unfocus();
+        Navigator.of(context).pop();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(widget.controller.lastEvent)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    resizeToAvoidBottomInset: true,
+    body: SafeArea(
+      child: AnimatedBuilder(
+        animation: widget.controller,
+        builder: (context, _) {
+          final allowed = widget.controller.viewerConnected && widget.controller.viewerAllowsInput;
+          return SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 960),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        TextButton(onPressed: _sending ? null : () => Navigator.of(context).pop(),
+                          child: const Text('取消')),
+                        const Expanded(child: Text('远程输入文字', style: TextStyle(fontWeight: FontWeight.w700))),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Semantics(
+                            identifier: 'p2p_remote_text',
+                            child: TextField(
+                              controller: _text,
+                              enabled: allowed && !_sending,
+                              maxLength: 250,
+                              textInputAction: TextInputAction.send,
+                              onSubmitted: (_) => _send(),
+                              decoration: const InputDecoration(
+                                labelText: '远程文字内容',
+                                counterText: '',
+                                isDense: true,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton(
+                          onPressed: allowed && !_sending ? _send : null,
+                          child: const Text('发送远程文字'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    ),
+  );
 }

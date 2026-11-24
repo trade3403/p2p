@@ -112,7 +112,9 @@ class Recording:
         writer=None
         try:
             img=self.capture().convert("RGB")
-            w,h=img.width//2*2,img.height//2*2
+            # Landscape canvas gives full-screen remote operation a readable recording.
+            # Portrait pairing remains visible, centered without cropping or stretching.
+            w,h=(1920,1080) if ROLE=="android" else (img.width//2*2,img.height//2*2)
             writer=imageio_ffmpeg.write_frames(str(OUT/self.name),(w,h),fps=4,
                 codec="libx264",pix_fmt_in="rgb24",pix_fmt_out="yuv420p",
                 output_params=["-movflags","+faststart","-crf","19"])
@@ -337,7 +339,9 @@ def android():
         b=find_android("p2p_remote_video",enabled=False)
         adb("shell","input","tap",*remote_point(b,moved["edit"]))
         android_tap("远程输入文字")
+        snapshot(android_capture,"03a-landscape-text-form")
         android_field("远程文字内容",MARKER,identifier="p2p_remote_text")
+        snapshot(android_capture,"03b-landscape-text-entered")
         text_started=time.monotonic()
         android_tap("发送远程文字")
         send("text_sent")
@@ -572,7 +576,7 @@ def windows():
         send("text_ok")
         passed("Exact remote text read back from actual Notepad")
         STAGE="host_confirmation"
-        await_message("done",seconds=90)
+        await_message("done",seconds=150)
         # Recording must be valid before the peer receives final success.
         rec.finish(True)
         rec=None
