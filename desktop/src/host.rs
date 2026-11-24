@@ -137,6 +137,7 @@ where
     let session_fps = Arc::new(AtomicU32::new(config.target_fps.load(Ordering::Relaxed).clamp(6,30)));
     let mut last_adaptation = std::time::Instant::now();
     let mut good_samples = 0u32;
+    let actual_encoder=Arc::new(AtomicU32::new(0));
     let mut frames = crate::video::spawn_frames(
         config.monitor_index.clone(),
         config.h264_enabled.clone(),
@@ -145,6 +146,7 @@ where
         config.dropped_frames.clone(),
         config.udp_active.clone(),
         force_jpeg.clone(),
+        actual_encoder.clone(),
     );
     let mut metadata_tick = tokio::time::interval(Duration::from_secs(2));
     let (udp_signal_tx, mut udp_signal_rx) =
@@ -187,8 +189,12 @@ where
                         "allow_clipboard": config.allow_clipboard.load(Ordering::SeqCst),
                         "video_target_bps": bitrate.load(Ordering::Relaxed),
                         "video_target_fps": session_fps.load(Ordering::Relaxed),
-                        "video_encoder": if config.h264_enabled.load(Ordering::Relaxed) && !force_jpeg.load(Ordering::Relaxed) {"OpenH264 software"} else {"JPEG"},
-                        "video_encoder_hardware": false
+                        "video_encoder": match actual_encoder.load(Ordering::Relaxed) {
+                            2 => "Media Foundation hardware",
+                            1 => "OpenH264 software",
+                            _ => "JPEG",
+                        },
+                        "video_encoder_hardware": actual_encoder.load(Ordering::Relaxed)==2
                     }).to_string();
                     let packet = protocol::encrypt(&config.secret, protocol::MONITORS, info.as_bytes())?;
                     outgoing.send(Message::Binary(packet)).await?;

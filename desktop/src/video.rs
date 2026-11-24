@@ -30,10 +30,14 @@ pub fn spawn_frames(
     drops: Arc<AtomicU64>,
     udp_active: Arc<AtomicBool>,
     force_jpeg: Arc<AtomicBool>,
+    actual_encoder: Arc<AtomicU32>,
 ) -> mpsc::Receiver<Frame> {
     let (tx, rx) = mpsc::channel(2);
     thread::spawn(move || {
         let mut encoder: Option<openh264::encoder::Encoder> = None;
+        let mut hardware: Option<crate::mf_encoder::HardwareEncoder> = None;
+        // No repeated expensive hardware probing on a host without a usable MFT.
+        let mut hardware_failed = false;
         let mut previous_h264 = false;
         let mut previous_monitor = usize::MAX;
         let mut frames_since_reset = 0u32;
@@ -54,18 +58,20 @@ pub fn spawn_frames(
                            target_fps.load(Ordering::Relaxed).clamp(5,30));
             if active_h264 != previous_h264
                 || selected != previous_monitor
-                || (active_h264 && (frames_since_reset >= profile.1 || previous_profile != profile))
+                || (active_h264 && ((hardware.is_none() && frames_since_reset >= profile.1) || previous_profile != profile))
             {
                 // New encoder emits fresh SPS/PPS and a decodable IDR. Repeated
                 // every 30 frames so a newly attached Android viewer can recover.
                 encoder = None;
+                hardware = None;
                 frames_since_reset = 0;
                 previous_h264 = active_h264;
                 previous_monitor = selected;
                 previous_profile = profile;
             }
 
-            match capture(selected, active_h264, profile, &mut encoder) {
+            match capture(selected, active_h264, profile, &mut encoder, &mut hardware,
+                          &mut hardware_failed, &actual_encoder) {
                 Ok(Some(frame)) => {
                     frames_since_reset += 1;
                     match tx.try_send(frame) {
@@ -75,6 +81,7 @@ pub fn spawn_frames(
                             // Never keep a GOP with missing P frames. Restart so
                             // the next video access unit contains SPS/PPS + IDR.
                             encoder = None;
+                            hardware = None;
                             frames_since_reset = 0;
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => break,
@@ -83,6 +90,7 @@ pub fn spawn_frames(
                 Ok(None) => (),
                 Err(_) => {
                     encoder = None;
+                    hardware = None;
                     frames_since_reset = 0;
                     thread::sleep(Duration::from_millis(200));
                 }
@@ -110,6 +118,7 @@ pub fn spawn_frames(
     _drops: Arc<AtomicU64>,
     _udp_active: Arc<AtomicBool>,
     _force_jpeg: Arc<AtomicBool>,
+    _actual_encoder: Arc<AtomicU32>,
 ) -> mpsc::Receiver<Frame> {
     let (_tx, rx) = mpsc::channel(1);
     rx
@@ -121,6 +130,9 @@ fn capture(
     h264: bool,
     profile: (u32,u32),
     encoder: &mut Option<openh264::encoder::Encoder>,
+    hardware: &mut Option<crate::mf_encoder::HardwareEncoder>,
+    hardware_failed: &mut bool,
+    actual_encoder: &AtomicU32,
 ) -> anyhow::Result<Option<Frame>> {
     use anyhow::{anyhow, Context};
     use image::{imageops::FilterType, codecs::jpeg::JpegEncoder, DynamicImage, RgbaImage};
@@ -137,8 +149,29 @@ fn capture(
     if w < 2 || h < 2 { return Err(anyhow!("display has invalid dimensions")); }
     let rgba = RgbaImage::from_raw(raw_w, raw_h, pixels.into_raw())
         .context("invalid capture buffer")?;
-    let image = DynamicImage::ImageRgba8(rgba).resize_exact(w, h, FilterType::Triangle);
+    let image = if (raw_w,raw_h)==(w,h) { DynamicImage::ImageRgba8(rgba) }
+        else { DynamicImage::ImageRgba8(rgba).resize_exact(w,h,FilterType::Triangle) };
     if h264 {
+        // Hardware is classified only after a successfully emitted, validated AVC unit.
+        if hardware.as_ref().is_some_and(|e|e.dimensions()!=(w,h)) { *hardware=None; }
+        if hardware.is_none() && !*hardware_failed {
+            *hardware=crate::mf_encoder::HardwareEncoder::new(w,h,profile.1,profile.0);
+            if hardware.is_none() { *hardware_failed=true; }
+        }
+        if let Some(hw)=hardware.as_mut() {
+            if let Some(bytes)=hw.encode(image.as_rgba8().context("capture RGBA missing")?.as_raw()) {
+                let mut packet=Vec::with_capacity(bytes.len()+4);
+                packet.extend_from_slice(&(w as u16).to_be_bytes());
+                packet.extend_from_slice(&(h as u16).to_be_bytes());
+                packet.extend_from_slice(&bytes);
+                actual_encoder.store(2,Ordering::Relaxed);
+                return Ok(Some((protocol::AVC,packet)));
+            }
+            // Fail closed to the validated software encoder with a fresh IDR.
+            *hardware=None;
+            *hardware_failed=true;
+            *encoder=None;
+        }
         if encoder.is_none() {
             let options = EncoderConfig::new()
                 .bitrate(BitRate::from_bps(profile.0))
@@ -159,10 +192,12 @@ fn capture(
         output.extend_from_slice(&(h as u16).to_be_bytes());
         output.extend_from_slice(&bytes); // one Annex-B H264 access unit
         if output.len() > 2 * 1024 * 1024 { return Err(anyhow!("encoded AVC frame too large")); }
+        actual_encoder.store(1,Ordering::Relaxed);
         Ok(Some((protocol::AVC, output)))
     } else {
         let mut bytes = Vec::new();
         JpegEncoder::new_with_quality(&mut bytes, 58).encode_image(&image)?;
+        actual_encoder.store(0,Ordering::Relaxed);
         Ok(Some((protocol::FRAME, bytes)))
     }
 }

@@ -268,7 +268,7 @@ def read_avc_metrics():
         data[key]=int(data[key])
     data["fps"]=float(data["fps"])
     require(data["codec"]=="H264" and data["frames"]>0,"Actual MediaCodec AVC playback not verified")
-    require(data["encoder"]=="OpenH264 software" and data["decoder"] not in ("","unknown"),"Actual encoder and decoder not reported")
+    require(data["encoder"] in ("OpenH264 software","Media Foundation hardware") and data["decoder"] not in ("","unknown"),"Actual encoder and decoder not reported")
     require(data["decoder_mode"] in ("hardware","software","unknown"),"Invalid decoder classification")
     require(data["decoder_mode"]!="hardware","CI emulator must not claim physical hardware decoding")
     if any(name in data["decoder"].lower() for name in ("goldfish","ranchu")):

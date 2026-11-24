@@ -11,6 +11,8 @@ mod local_settings;
 mod remote_ops;
 mod trusted_profile;
 mod video;
+#[cfg(windows)]
+mod mf_encoder;
 mod lan;
 mod stun;
 mod udp_punch;
