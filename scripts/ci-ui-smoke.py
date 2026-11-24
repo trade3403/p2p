@@ -123,24 +123,73 @@ def windows():
         def capture():
             return gui.screenshot(region=(point.x, point.y, rect.right, rect.bottom))
         check("01-home", capture())
-        # Sidebar starts below the custom title bar, with six navigation rows.
-        # Detect the selected Home row from its exact Flutter fill color
-        # (#193B49), then infer the navigation row pitch from its height
-        # and the six logical pixel inter-row gap.
-        home = capture().convert("RGB")
-        x = int(30 * scale)
-        selected = [y for y in range(int(140 * scale), min(home.height, int(260 * scale)))
-                    if home.getpixel((x, y)) == (25, 59, 73)]
-        if len(selected) < int(20 * scale):
-            raise AssertionError("Could not identify selected Home navigation row")
-        center = (min(selected) + max(selected)) / 2
-        pitch = (max(selected) - min(selected) + 1) + int(8 * scale)
-        for index, name in enumerate(["02-remote", "03-devices", "04-security", "05-network", "06-settings"], 1):
-            gui.click(point.x + int(120 * scale), point.y + round(center + index * pitch))
-            time.sleep(3)
-            check(name, capture())
-            if proc.poll() is not None:
-                raise AssertionError("Application exited during navigation")
+        # Use the actual Windows UI Automation tree, as in the release UI E2E.
+        # Pixel-pitch extrapolation missed Security on run 45425889014:
+        # both device/security screenshots were identical. Never mark a
+        # navigation successful merely because the click returned.
+        from pywinauto import Desktop
+        desktop = Desktop(backend="uia")
+        hwnd = window._hWnd
+        def visible_control(label, sidebar):
+            try:
+                candidates=[]
+                for obj in desktop.window(handle=hwnd).descendants():
+                    name=obj.element_info.name or ""
+                    if label not in name.splitlines():
+                        continue
+                    r=obj.rectangle()
+                    if not obj.is_visible() or r.width()<4 or r.height()<4:
+                        continue
+                    x=(r.left+r.right)//2
+                    y=(r.top+r.bottom)//2
+                    if not (point.x<=x<point.x+rect.right and point.y<=y<point.y+rect.bottom):
+                        continue
+                    if sidebar:
+                        if not (x<point.x+int(238*scale) and y>point.y+int(140*scale) and obj.is_enabled()):
+                            continue
+                    elif x<=point.x+int(238*scale):
+                        continue
+                    candidates.append((r.width()*r.height(),x,y))
+                return min(candidates) if candidates else None
+            except Exception:
+                return None
+        def until(predicate, seconds):
+            deadline=time.monotonic()+seconds
+            while time.monotonic()<deadline:
+                if proc.poll() is not None:
+                    raise AssertionError("Application exited during navigation")
+                value=predicate()
+                if value:
+                    return value
+                time.sleep(.35)
+            return None
+        for name,label,marker in [
+            ("02-remote","远程控制","REMOTE SESSION  /  V0.21"),
+            ("03-devices","设备管理","我的设备"),
+            ("04-security","安全与权限","允许远程鼠标和键盘"),
+            ("05-network","网络连接","保存中转配置"),
+            ("06-settings","设置","PREFERENCES"),
+        ]:
+            target=until(lambda: visible_control(label,True),15)
+            if target is None:
+                capture().save(out/(name+"-missing-nav.png"))
+                raise AssertionError("Could not locate actual navigation control: "+label)
+            _,x,y=target
+            # Retry only the real target if an input/focus event was lost;
+            # retain the original meaningful screenshot difference threshold.
+            observed=None
+            for attempt in range(3):
+                window.activate()
+                gui.click(x,y)
+                observed=until(lambda: visible_control(marker,False),6)
+                if observed:
+                    break
+            if not observed:
+                capture().save(out/(name+"-wrong-page.png"))
+                raise AssertionError("Expected visible page control not found: "+marker)
+            time.sleep(.6)
+            check(name,capture())
+            report.setdefault("verified_windows_pages",[]).append({"page":name,"label":label,"marker":marker})
     finally:
         stop.set()
         worker.join(20)

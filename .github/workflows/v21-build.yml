@@ -181,7 +181,7 @@ jobs:
 
       - name: Windows UI smoke test and recording
         run: |
-          python -m pip install pyautogui pillow imageio-ffmpeg
+          python -m pip install pyautogui pillow imageio-ffmpeg pywinauto
           python scripts/ci-ui-smoke.py windows
           if ($LASTEXITCODE -ne 0) { throw 'Windows UI smoke test failed' }
 
