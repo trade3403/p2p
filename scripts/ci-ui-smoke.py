@@ -102,16 +102,34 @@ def windows():
         window.maximize()
         window.activate()
         time.sleep(4)
-        # Sidebar layout uses logical pixels. Derive the scaling from Windows DPI.
+        # Sidebar layout uses logical pixels. Use the actual client origin, not the outer window border.
         import ctypes
+        from ctypes import wintypes
+        point = wintypes.POINT(0, 0)
+        if not ctypes.windll.user32.ClientToScreen(window._hWnd, ctypes.byref(point)):
+            raise AssertionError("Unable to locate Windows client area")
+        rect = wintypes.RECT()
+        if not ctypes.windll.user32.GetClientRect(window._hWnd, ctypes.byref(rect)):
+            raise AssertionError("Unable to measure Windows client area")
         dpi = ctypes.windll.user32.GetDpiForWindow(window._hWnd) or 96
         scale = dpi / 96
         def capture():
-            return gui.screenshot(region=(window.left + 8, window.top + 8, window.width - 16, window.height - 16))
+            return gui.screenshot(region=(point.x, point.y, rect.right, rect.bottom))
         check("01-home", capture())
         # Sidebar starts below the custom title bar, with six navigation rows.
-        for name, logical_y in [("02-remote", 220), ("03-devices", 270), ("04-security", 320), ("05-network", 370), ("06-settings", 420)]:
-            gui.click(window.left + int(120 * scale), window.top + int(logical_y * scale))
+        # Detect the selected Home row from its exact Flutter fill color
+        # (#193B49), then infer the navigation row pitch from its height
+        # and the six logical pixel inter-row gap.
+        home = capture().convert("RGB")
+        x = int(30 * scale)
+        selected = [y for y in range(int(140 * scale), min(home.height, int(260 * scale)))
+                    if home.getpixel((x, y)) == (25, 59, 73)]
+        if len(selected) < int(20 * scale):
+            raise AssertionError("Could not identify selected Home navigation row")
+        center = (min(selected) + max(selected)) / 2
+        pitch = (max(selected) - min(selected) + 1) + int(8 * scale)
+        for index, name in enumerate(["02-remote", "03-devices", "04-security", "05-network", "06-settings"], 1):
+            gui.click(point.x + int(120 * scale), point.y + round(center + index * pitch))
             time.sleep(3)
             check(name, capture())
             if proc.poll() is not None:

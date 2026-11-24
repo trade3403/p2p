@@ -58,15 +58,15 @@ jobs:
             throw "Rust native DLL missing or unexpectedly small: $dll"
           }
 
-      - name: Install Flutter stable SDK
+      - name: Install pinned Flutter 3.50.1 SDK
         run: |
           $ErrorActionPreference = 'Stop'
           $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
-          $flutterRoot = Join-Path $cacheRoot 'flutter-stable'
+          $flutterRoot = Join-Path $cacheRoot 'flutter-3.50.1'
           $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
           if (-not (Test-Path $flutterExe)) {
             if (Test-Path $flutterRoot) { Remove-Item -LiteralPath $flutterRoot -Recurse -Force }
-            git clone --depth 1 --branch stable https://github.com/flutter/flutter.git $flutterRoot
+            git clone --depth 1 --branch 3.50.1 https://github.com/flutter/flutter.git $flutterRoot
             if ($LASTEXITCODE -ne 0) { throw 'Could not clone Flutter stable SDK.' }
           }
           $flutterBin = Join-Path $flutterRoot 'bin'
@@ -225,10 +225,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
-          $flutterRoot = Join-Path $cacheRoot 'flutter-stable'
+          $flutterRoot = Join-Path $cacheRoot 'flutter-3.50.1'
           $flutterExe = Join-Path $flutterRoot 'bin\flutter.bat'
           if (-not (Test-Path $flutterExe)) {
-            git clone --depth 1 --branch stable https://github.com/flutter/flutter.git $flutterRoot
+            git clone --depth 1 --branch 3.50.1 https://github.com/flutter/flutter.git $flutterRoot
             if ($LASTEXITCODE -ne 0) { throw 'Could not install Flutter stable SDK for Android.' }
           }
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $flutterRoot 'bin')
@@ -258,6 +258,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Android SDK install failed' }
           flutter precache --android
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Android engine artifacts could not be precached.' }
+          flutter config --jdk-dir="$env:JAVA_HOME"
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to configure JDK 17' }
           flutter doctor -v
           if ($LASTEXITCODE -ne 0) {
             Write-Warning 'Flutter doctor reports missing optional components; Android build will verify required SDK packages.'
@@ -299,6 +301,14 @@ jobs:
         run: |
           flutter test
           if ($LASTEXITCODE -ne 0) { throw 'Android flutter tests failed.' }
+
+      - name: Verify generated Android Gradle configuration
+        working-directory: flutter_app/android
+        run: |
+          .\gradlew.bat --version
+          if ($LASTEXITCODE -ne 0) { throw 'Gradle version check failed' }
+          .\gradlew.bat --no-daemon :app:tasks --all
+          if ($LASTEXITCODE -ne 0) { throw 'Generated Android Gradle configuration failed' }
 
       - name: Build Android release APK
         working-directory: flutter_app
