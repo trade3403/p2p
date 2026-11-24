@@ -80,6 +80,8 @@ internal class AndroidRemoteEngine(
     private var sendAvgUs = 0L
     private var freshFrames = 0L
     private var reusedFrames = 0L
+    private var resizeCacheHits = 0L
+    private var yuvCacheHits = 0L
     private var hostEncodedFrames = 0L
     private var sampleAt = 0L
     private var sampleFrames = 0L
@@ -210,6 +212,8 @@ internal class AndroidRemoteEngine(
         "send_avg_us" to sendAvgUs,
         "fresh_frames" to freshFrames,
         "reused_frames" to reusedFrames,
+        "resize_cache_hits" to resizeCacheHits,
+        "yuv_cache_hits" to yuvCacheHits,
         "host_encoded_frames" to hostEncodedFrames,
         "pairing_status" to if (pairingActive) status else "",
         "vault_error" to null,
@@ -583,6 +587,8 @@ internal class AndroidRemoteEngine(
                                         sendAvgUs=metadata.optLong("send_avg_us",0)
                                         freshFrames=metadata.optLong("fresh_frames",0)
                                         reusedFrames=metadata.optLong("reused_frames",0)
+                                        resizeCacheHits=metadata.optLong("resize_cache_hits",0)
+                                        yuvCacheHits=metadata.optLong("yuv_cache_hits",0)
                                         hostEncodedFrames=metadata.optLong("host_encoded_frames",0)
                                     }
                             }

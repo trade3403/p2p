@@ -207,6 +207,8 @@ where
                         "send_avg_us": crate::video::VideoStats::average(&video_stats.send_total_us,&video_stats.send_samples),
                         "fresh_frames": video_stats.fresh_frames.load(Ordering::Relaxed),
                         "reused_frames": video_stats.reused_frames.load(Ordering::Relaxed),
+                        "resize_cache_hits": video_stats.resize_cache_hits.load(Ordering::Relaxed),
+                        "yuv_cache_hits": video_stats.yuv_cache_hits.load(Ordering::Relaxed),
                         "host_encoded_frames": video_stats.encode_samples.load(Ordering::Relaxed)
                     }).to_string();
                     let packet = protocol::encrypt(&config.secret, protocol::MONITORS, info.as_bytes())?;

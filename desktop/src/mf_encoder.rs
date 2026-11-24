@@ -11,16 +11,21 @@ pub struct HardwareEncoder {
     output: Vec<u8>,
     w: u32,
     h: u32,
+    nv12_valid: bool,
 }
 impl HardwareEncoder {
     pub fn new(w:u32,h:u32,fps:u32,bitrate:u32)->Option<Self> {
         let handle=NonNull::new(unsafe {p2p_mf_create(w,h,fps,bitrate)})?;
         Some(Self{handle,nv12:vec![0;w as usize*h as usize*3/2],
-            output:vec![0;2*1024*1024-4],w,h})
+            output:vec![0;2*1024*1024-4],w,h,nv12_valid:false})
     }
     pub fn dimensions(&self)->(u32,u32){(self.w,self.h)}
-    pub fn encode(&mut self,rgba:&[u8])->Option<Vec<u8>> {
-        rgba_to_nv12(rgba,self.w as usize,self.h as usize,&mut self.nv12)?;
+    pub fn encode(&mut self,rgba:&[u8],reuse:bool)->Option<Vec<u8>> {
+        if !reuse || !self.nv12_valid {
+            self.nv12_valid=false;
+            rgba_to_nv12(rgba,self.w as usize,self.h as usize,&mut self.nv12)?;
+            self.nv12_valid=true;
+        }
         let mut n=0;
         let result=unsafe {p2p_mf_encode(self.handle.as_ptr(),self.nv12.as_ptr(),self.nv12.len(),
             self.output.as_mut_ptr(),self.output.len(),&mut n)};

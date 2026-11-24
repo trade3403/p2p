@@ -24,7 +24,7 @@ impl Output {
 impl Drop for Output {
     fn drop(&mut self){unsafe{p2p_dxgi_destroy(self.handle.as_ptr())}}
 }
-pub enum Read { Fresh(RgbaImage), Reused(RgbaImage), Fallback, Blocked }
+pub enum Read { Fresh(RgbaImage), Reused, Fallback, Blocked }
 #[derive(Default)]
 pub struct DesktopCapture {
     geometry:Option<Geometry>,
@@ -46,10 +46,13 @@ impl DesktopCapture {
         }
         let output=self.output.as_mut().unwrap();
         let code=unsafe{p2p_dxgi_read(output.handle.as_ptr(),output.rgba.as_mut_ptr(),output.rgba.len())};
-        if code==1 || (code==0 && output.ready) {
+        // A timeout on the same valid duplication is not a new image.
+        // Do not clone the full-resolution CPU buffer on idle frames.
+        if code==0 && output.ready { return Read::Reused; }
+        if code==1 {
             output.ready=true;
             if let Some(image)=RgbaImage::from_raw(g.2,g.3,output.rgba.clone()){
-                return if code==1{Read::Fresh(image)}else{Read::Reused(image)};
+                return Read::Fresh(image);
             }
         }
         if code == -2 {self.clear();return Read::Blocked;}

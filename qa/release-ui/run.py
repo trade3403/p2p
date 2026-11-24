@@ -260,12 +260,12 @@ def read_avc_metrics():
             if "codec=" in field and "decoder_mode=" in field:
                 items=dict(re.findall(r"(?m)^([a-z_]+)=([^\n]+)",field))
                 if all(k in items for k in ("codec","frames","fps","bps","rtt","target_bps","target_fps","drops","encoder","decoder","decoder_mode",
-                        "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","host_encoded_frames")):
+                        "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames")):
                     return items
         return None
     data=wait("Actual release video diagnostic data",extract,25)
     android_tap("关闭性能数据")
-    for key in ("frames","bps","rtt","target_bps","target_fps","drops","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","host_encoded_frames"):
+    for key in ("frames","bps","rtt","target_bps","target_fps","drops","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames"):
         data[key]=int(data[key])
     data["fps"]=float(data["fps"])
     require(data["codec"]=="H264" and data["frames"]>0,"Actual MediaCodec AVC playback not verified")
@@ -367,6 +367,10 @@ def android():
         require(second["frames"]>first["frames"] and second["fps"]>0 and second["bps"]>0
                 and second["rtt"]>=0,"No measured live AVC progress")
         require(second["host_encoded_frames"]>first["host_encoded_frames"],"Host encoded frame count did not progress")
+        if second["capture_backend"]=="DXGI" and second["reused_frames"]>0:
+            require(second["resize_cache_hits"]>0,"Idle DXGI frames did not use scaled pixel cache")
+        if second["encoder"]=="OpenH264 software" and second["resize_cache_hits"]>0:
+            require(second["yuv_cache_hits"]>0,"Software encoder did not reuse unchanged YUV frames")
         REPORT["actual_avc_metrics"]={"first":first,"second":second,
             "scope":"MediaCodec rendered output, received AVC payload bitrate, authenticated RTT; no synthetic data"}
         passed("Live AVC rendering, actual throughput and RTT measured in landscape release APK")

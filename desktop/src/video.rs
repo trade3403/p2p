@@ -15,6 +15,8 @@ pub struct VideoStats {
     pub capture_backend: AtomicU32, // 0 unknown, 1 compatibility, 2 DXGI
     pub fresh_frames: AtomicU64,
     pub reused_frames: AtomicU64,
+    pub resize_cache_hits: AtomicU64,
+    pub yuv_cache_hits: AtomicU64,
     pub capture_total_us: AtomicU64,
     pub capture_samples: AtomicU64,
     pub encode_total_us: AtomicU64,
@@ -29,6 +31,25 @@ impl VideoStats {
     pub fn record(total:&AtomicU64,count:&AtomicU64,start:Instant) {
         total.fetch_add(start.elapsed().as_micros().min(u64::MAX as u128) as u64,Ordering::Relaxed);
         count.fetch_add(1,Ordering::Relaxed);
+    }
+}
+
+// Cached scaled pixels and software color conversion are only reusable when
+// the SAME DXGI duplication reports no update. All fallback/error/display
+// transitions invalidate the cache.
+#[cfg(windows)]
+#[derive(Default)]
+struct PixelCache {
+    geometry: Option<(i32,i32,u32,u32)>,
+    rgba: Option<image::RgbaImage>,
+    yuv: Option<openh264::formats::YUVBuffer>,
+}
+#[cfg(windows)]
+impl PixelCache {
+    fn clear(&mut self) {
+        self.geometry=None;
+        self.rgba=None;
+        self.yuv=None;
     }
 }
 
@@ -61,6 +82,7 @@ pub fn spawn_frames(
         // No repeated expensive hardware probing on a host without a usable MFT.
         let mut hardware_failed = false;
         let mut desktop_capture=crate::dxgi_capture::DesktopCapture::default();
+        let mut pixels=PixelCache::default();
         let mut previous_h264 = false;
         let mut previous_monitor = usize::MAX;
         let mut frames_since_reset = 0u32;
@@ -69,6 +91,7 @@ pub fn spawn_frames(
         while !tx.is_closed() {
             if udp_active.load(Ordering::Relaxed) {
                 desktop_capture.clear();
+                pixels.clear();
                 // The encrypted UDP preview has its own low-res capture worker.
                 thread::sleep(Duration::from_millis(120));
                 continue;
@@ -88,6 +111,10 @@ pub fn spawn_frames(
                 // every 30 frames so a newly attached Android viewer can recover.
                 encoder = None;
                 hardware = None;
+                if active_h264!=previous_h264 || selected!=previous_monitor {
+                    desktop_capture.clear();
+                    pixels.clear();
+                }
                 frames_since_reset = 0;
                 previous_h264 = active_h264;
                 previous_monitor = selected;
@@ -95,7 +122,7 @@ pub fn spawn_frames(
             }
 
             match capture(selected, active_h264, profile, &mut encoder, &mut hardware,
-                          &mut hardware_failed, &actual_encoder, &mut desktop_capture, &stats) {
+                          &mut hardware_failed, &actual_encoder, &mut desktop_capture, &mut pixels, &stats) {
                 Ok(Some(frame)) => {
                     frames_since_reset += 1;
                     match tx.try_send(frame) {
@@ -115,6 +142,8 @@ pub fn spawn_frames(
                 Err(_) => {
                     encoder = None;
                     hardware = None;
+                    desktop_capture.clear();
+                    pixels.clear();
                     frames_since_reset = 0;
                     thread::sleep(Duration::from_millis(200));
                 }
@@ -159,6 +188,7 @@ fn capture(
     hardware_failed: &mut bool,
     actual_encoder: &AtomicU32,
     desktop_capture: &mut crate::dxgi_capture::DesktopCapture,
+    cache: &mut PixelCache,
     stats: &VideoStats,
 ) -> anyhow::Result<Option<Frame>> {
     use anyhow::{anyhow, Context};
@@ -172,27 +202,34 @@ fn capture(
     let capture_start=Instant::now();
     if !desktop_allowed() {
         desktop_capture.clear();
+        cache.clear();
         return Err(anyhow!("interactive desktop unavailable"));
     }
     let screen = screenshots::Screen::all()?.into_iter().nth(screen_index)
         .context("selected display not available")?;
     let info=&screen.display_info;
+    let geometry=(info.x,info.y,info.width,info.height);
+    if cache.geometry!=Some(geometry) {cache.clear();}
     // Legacy JPEG behavior is retained for protocol compatibility.
-    let result=if h264 {desktop_capture.read((info.x,info.y,info.width,info.height))}
+    let result=if h264 {desktop_capture.read(geometry)}
         else {desktop_capture.clear();Read::Fallback};
-    let (rgba,backend,reused)=match result {
-        Read::Fresh(img)=>(img,2,false),
-        Read::Reused(img)=>(img,2,true),
-        Read::Blocked=>return Err(anyhow!("desktop capture blocked")),
+    let (fresh,backend,reused)=match result {
+        Read::Fresh(img)=>(Some(img),2,false),
+        Read::Reused if cache.geometry==Some(geometry) && cache.rgba.is_some()=>(None,2,true),
+        // Never reuse a stale cached image after losing its provenance.
+        Read::Reused=>{desktop_capture.clear();cache.clear();return Ok(None);}
+        Read::Blocked=>{cache.clear();return Err(anyhow!("desktop capture blocked"));}
         Read::Fallback=>{
+            cache.clear();
             if !desktop_allowed(){return Err(anyhow!("interactive desktop unavailable"));}
             let pixels=screen.capture()?;
             let (rw,rh)=(pixels.width(),pixels.height());
-            (RgbaImage::from_raw(rw,rh,pixels.into_raw()).context("invalid capture buffer")?,1,false)
+            (Some(RgbaImage::from_raw(rw,rh,pixels.into_raw()).context("invalid capture buffer")?),1,false)
         }
     };
     if !desktop_allowed(){
         desktop_capture.clear();
+        cache.clear();
         return Err(anyhow!("desktop changed during capture"));
     }
     stats.capture_backend.store(backend,Ordering::Relaxed);
@@ -200,10 +237,20 @@ fn capture(
     else {stats.fresh_frames.fetch_add(1,Ordering::Relaxed);}
     VideoStats::record(&stats.capture_total_us,&stats.capture_samples,capture_start);
     let encode_start=Instant::now();
-    let (raw_w,raw_h)=rgba.dimensions();
-    let (w,h)=dimensions(raw_w,raw_h);
-    if w<2||h<2 {return Err(anyhow!("display has invalid dimensions"));}
-    let image=if (raw_w,raw_h)==(w,h) {rgba} else {image::imageops::resize(&rgba,w,h,FilterType::Triangle)};
+    if let Some(rgba)=fresh {
+        let (raw_w,raw_h)=rgba.dimensions();
+        let (w,h)=dimensions(raw_w,raw_h);
+        if w<2||h<2 {return Err(anyhow!("display has invalid dimensions"));}
+        cache.rgba=Some(if (raw_w,raw_h)==(w,h) {rgba} else {
+            image::imageops::resize(&rgba,w,h,FilterType::Triangle)
+        });
+        cache.yuv=None;
+        cache.geometry=Some(geometry);
+    } else {
+        stats.resize_cache_hits.fetch_add(1,Ordering::Relaxed);
+    }
+    let image=cache.rgba.as_ref().context("scaled frame missing")?;
+    let (w,h)=image.dimensions();
     if h264 {
         // Hardware is classified only after a successfully emitted, validated AVC unit.
         if hardware.as_ref().is_some_and(|e|e.dimensions()!=(w,h)) { *hardware=None; }
@@ -212,7 +259,7 @@ fn capture(
             if hardware.is_none() { *hardware_failed=true; }
         }
         if let Some(hw)=hardware.as_mut() {
-            if let Some(bytes)=hw.encode(image.as_raw()) {
+            if let Some(bytes)=hw.encode(image.as_raw(),reused) {
                 let mut packet=Vec::with_capacity(bytes.len()+4);
                 packet.extend_from_slice(&(w as u16).to_be_bytes());
                 packet.extend_from_slice(&(h as u16).to_be_bytes());
@@ -235,9 +282,14 @@ fn capture(
                 .skip_frames(false);
             *encoder = Some(Encoder::with_api_config(OpenH264API::from_source(), options)?);
         }
-        let source = RgbaSliceU8::new(image.as_raw(), (w as usize, h as usize));
-        let yuv = YUVBuffer::from_rgb_source(source);
-        let stream = encoder.as_mut().context("encoder unavailable")?.encode(&yuv)?;
+        if reused && cache.yuv.is_some() {
+            stats.yuv_cache_hits.fetch_add(1,Ordering::Relaxed);
+        } else {
+            let source=RgbaSliceU8::new(image.as_raw(),(w as usize,h as usize));
+            cache.yuv=Some(YUVBuffer::from_rgb_source(source));
+        }
+        let yuv=cache.yuv.as_ref().context("YUV frame missing")?;
+        let stream = encoder.as_mut().context("encoder unavailable")?.encode(yuv)?;
         let bytes = stream.to_vec();
         if bytes.is_empty() { return Ok(None); }
         let mut output = Vec::with_capacity(bytes.len() + 4);
@@ -250,7 +302,7 @@ fn capture(
         Ok(Some((protocol::AVC, output)))
     } else {
         let mut bytes = Vec::new();
-        JpegEncoder::new_with_quality(&mut bytes, 58).encode_image(&image)?;
+        JpegEncoder::new_with_quality(&mut bytes, 58).encode_image(image)?;
         actual_encoder.store(0,Ordering::Relaxed);
         VideoStats::record(&stats.encode_total_us,&stats.encode_samples,encode_start);
         Ok(Some((protocol::FRAME, bytes)))

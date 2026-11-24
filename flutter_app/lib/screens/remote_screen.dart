@@ -535,6 +535,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
         'send_avg_us=${s['send_avg_us'] ?? 0}\n'
         'fresh_frames=${s['fresh_frames'] ?? 0}\n'
         'reused_frames=${s['reused_frames'] ?? 0}\n'
+        'resize_cache_hits=${s['resize_cache_hits'] ?? 0}\n'
+        'yuv_cache_hits=${s['yuv_cache_hits'] ?? 0}\n'
         'host_encoded_frames=${s['host_encoded_frames'] ?? 0}';
     await showDialog<void>(
       context: routeContext,
