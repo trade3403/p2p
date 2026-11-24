@@ -25,6 +25,18 @@ def foreground_state(package):
                "focus_line_count":len(focused),
                "system_error_window":any("Application Not Responding" in line or "Application Error" in line for line in focused)}
 
+def recover_launcher_anr(package):
+    # Only recover the known AOSP launcher, never an ANR of the tested app.
+    # Require the actual focused system error window to identify that package.
+    launcher="com.android.launcher3"
+    windows=query("dumpsys","window")
+    focus=[line for line in windows.splitlines() if "mCurrentFocus=" in line]
+    if not any("Application Not Responding" in line and launcher in line for line in focus):
+        return False
+    subprocess.run(["adb","shell","am","force-stop",launcher],check=True,timeout=15)
+    subprocess.run(["adb","shell","am","start","-W","-n",package+"/.MainActivity"],check=True,timeout=60)
+    return True
+
 def start_release_app(package,report):
     subprocess.run(["adb","shell","input","keyevent","KEYCODE_WAKEUP"],check=True,timeout=15)
     subprocess.run(["adb","shell","wm","dismiss-keyguard"],check=True,timeout=15)
@@ -36,10 +48,16 @@ def start_release_app(package,report):
         time.sleep(2)
     else: raise AssertionError("Emulator did not finish booting")
     subprocess.run(["adb","shell","am","start","-W","-n",package+"/.MainActivity"],check=True,timeout=60)
-    deadline=time.monotonic()+60
+    deadline=time.monotonic()+90
+    recoveries=0
     while time.monotonic()<deadline:
         ok,state=foreground_state(package)
         report["startup_focus"]=state
+        if state["system_error_window"] and recoveries<2 and recover_launcher_anr(package):
+            recoveries+=1
+            report["launcher_recoveries"]=recoveries
+            time.sleep(5)
+            continue
         if ok:
             time.sleep(3)
             ok,state=foreground_state(package)
