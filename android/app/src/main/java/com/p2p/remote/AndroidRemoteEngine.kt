@@ -136,7 +136,7 @@ internal class AndroidRemoteEngine(
         "host_running" to false,
         "viewer_connected" to online,
         "pairing_active" to pairingActive,
-        "token_configured" to relayToken.length >= 32,
+        "token_configured" to (relayToken.length >= 32),
         "allow_input" to (hostAllowsInput == true),
         "allow_clipboard" to (hostAllowsClipboard == true),
         "relay_url" to relayUrl,
