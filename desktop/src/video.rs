@@ -26,6 +26,7 @@ pub fn spawn_frames(
     monitor: Arc<AtomicUsize>,
     h264: Arc<AtomicBool>,
     target_fps: Arc<AtomicU32>,
+    bitrate: Arc<AtomicU32>,
     drops: Arc<AtomicU64>,
     udp_active: Arc<AtomicBool>,
     force_jpeg: Arc<AtomicBool>,
@@ -36,6 +37,7 @@ pub fn spawn_frames(
         let mut previous_h264 = false;
         let mut previous_monitor = usize::MAX;
         let mut frames_since_reset = 0u32;
+        let mut previous_profile = (0u32,0u32);
 
         while !tx.is_closed() {
             if udp_active.load(Ordering::Relaxed) {
@@ -48,9 +50,11 @@ pub fn spawn_frames(
             let active_h264 = h264.load(Ordering::Relaxed)
                 && !force_jpeg.load(Ordering::Relaxed);
             let selected = monitor.load(Ordering::Relaxed);
+            let profile = (bitrate.load(Ordering::Relaxed).clamp(400_000,4_000_000),
+                           target_fps.load(Ordering::Relaxed).clamp(5,30));
             if active_h264 != previous_h264
                 || selected != previous_monitor
-                || (active_h264 && frames_since_reset >= 30)
+                || (active_h264 && (frames_since_reset >= profile.1 || previous_profile != profile))
             {
                 // New encoder emits fresh SPS/PPS and a decodable IDR. Repeated
                 // every 30 frames so a newly attached Android viewer can recover.
@@ -58,9 +62,10 @@ pub fn spawn_frames(
                 frames_since_reset = 0;
                 previous_h264 = active_h264;
                 previous_monitor = selected;
+                previous_profile = profile;
             }
 
-            match capture(selected, active_h264, &mut encoder) {
+            match capture(selected, active_h264, profile, &mut encoder) {
                 Ok(Some(frame)) => {
                     frames_since_reset += 1;
                     match tx.try_send(frame) {
@@ -84,7 +89,7 @@ pub fn spawn_frames(
             }
 
             let fps = if active_h264 {
-                target_fps.load(Ordering::Relaxed).clamp(5, 20)
+                target_fps.load(Ordering::Relaxed).clamp(5, 30)
             } else {
                 6
             };
@@ -101,6 +106,7 @@ pub fn spawn_frames(
     _monitor: Arc<AtomicUsize>,
     _h264: Arc<AtomicBool>,
     _target_fps: Arc<AtomicU32>,
+    _bitrate: Arc<AtomicU32>,
     _drops: Arc<AtomicU64>,
     _udp_active: Arc<AtomicBool>,
     _force_jpeg: Arc<AtomicBool>,
@@ -113,6 +119,7 @@ pub fn spawn_frames(
 fn capture(
     screen_index: usize,
     h264: bool,
+    profile: (u32,u32),
     encoder: &mut Option<openh264::encoder::Encoder>,
 ) -> anyhow::Result<Option<Frame>> {
     use anyhow::{anyhow, Context};
@@ -134,9 +141,9 @@ fn capture(
     if h264 {
         if encoder.is_none() {
             let options = EncoderConfig::new()
-                .bitrate(BitRate::from_bps(2_000_000))
-                .max_frame_rate(FrameRate::from_hz(20.0))
-                .intra_frame_period(IntraFramePeriod::from_num_frames(30))
+                .bitrate(BitRate::from_bps(profile.0))
+                .max_frame_rate(FrameRate::from_hz(profile.1 as f32))
+                .intra_frame_period(IntraFramePeriod::from_num_frames(profile.1))
                 .rate_control_mode(RateControlMode::Bitrate)
                 .skip_frames(false);
             *encoder = Some(Encoder::with_api_config(OpenH264API::from_source(), options)?);

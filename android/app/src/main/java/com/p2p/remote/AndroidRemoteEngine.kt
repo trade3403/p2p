@@ -67,6 +67,19 @@ internal class AndroidRemoteEngine(
     private var lastPingTimeMs = 0L
     private var frame: Bitmap? = null
     private var h264Active = false
+    private var hasVideoSurface = false
+    private var avcRequested = false
+    private var renderedAvcFrames = 0L
+    private var receivedAvcBytes = 0L
+    private var videoTargetBps = 0
+    private var videoTargetFps = 0
+    private var videoEncoder = ""
+    private var sampleAt = 0L
+    private var sampleFrames = 0L
+    private var sampleDrops = 0L
+    private var renderedFps = 0.0
+    private var sampleBytes = 0L
+    private var measuredBps = 0L
     private var h264Width = 1280
     private var h264Height = 720
     private var clipboardResult = ""
@@ -91,6 +104,7 @@ internal class AndroidRemoteEngine(
                     if (requested && h264Active) {
                         receivingFrames = true
                         receivedFrames++
+                        renderedAvcFrames++
                         lastFrameAtMs = SystemClock.elapsedRealtime()
                         retryAttempt = 0
                         status = "已连接家庭电脑 · H.264 正在播放"
@@ -98,7 +112,16 @@ internal class AndroidRemoteEngine(
                 }
             },
             onDecoderError = { message ->
-                main.post { if (requested) status = message }
+                main.post {
+                    if (requested) {
+                        status = message
+                        // A codec that cannot start must not leave a black screen.
+                        if (avcRequested) {
+                            avcRequested = false
+                            sendVideoControl(JSONObject().put("type","video_codec").put("codec","jpeg"))
+                        }
+                    }
+                }
             },
         )
     }
@@ -120,6 +143,7 @@ internal class AndroidRemoteEngine(
     }
 
     fun attachVideoSurface(surface: Surface) {
+        hasVideoSurface = true
         avcDecoder.attachSurface(surface)
     }
 
@@ -162,7 +186,17 @@ internal class AndroidRemoteEngine(
         "udp_attempted" to udpAttempted,
         "frame_width" to if (h264Active) h264Width else (frame?.width ?: 0),
         "frame_height" to if (h264Active) h264Height else (frame?.height ?: 0),
-        "h264_active" to h264Active,
+        "h264_active" to (h264Active && receivingFrames),
+        "avc_rendered_frames" to renderedAvcFrames,
+        "avc_received_bytes" to receivedAvcBytes,
+        "avc_decoder" to if(h264Active) avcDecoder.codecName else "",
+        "avc_decoder_hardware" to if(h264Active) avcDecoder.hardware else null,
+        "avc_decoder_drops" to if(hasVideoSurface) avcDecoder.droppedFrames else 0L,
+        "rendered_fps" to renderedFps,
+        "measured_video_bps" to measuredBps,
+        "video_target_bps" to videoTargetBps,
+        "video_target_fps" to videoTargetFps,
+        "video_encoder" to videoEncoder,
         "pairing_status" to if (pairingActive) status else "",
         "vault_error" to null,
     )
@@ -486,16 +520,20 @@ internal class AndroidRemoteEngine(
                             if (udpLastFrameAtMs != 0L &&
                                 SystemClock.elapsedRealtime() - udpLastFrameAtMs < 1500L) return
                             val accessUnit = AvcPayload.parse(original.second)
-                            if(accessUnit != null) {
+                            if(accessUnit != null && hasVideoSurface) {
                                 main.post {
                                     if(socket===webSocket && requested){
                                         if(udpLastFrameAtMs != 0L) {
                                             udpLastFrameAtMs = 0L
                                             transport = "VPS WSS 中转"
                                         }
-                                        h264Width=accessUnit.width
-                                        h264Height=accessUnit.height
-                                        onVideoSize(h264Width, h264Height)
+                                        if (!h264Active) receivingFrames=false
+                                        if (!h264Active || h264Width!=accessUnit.width || h264Height!=accessUnit.height) {
+                                            h264Width=accessUnit.width
+                                            h264Height=accessUnit.height
+                                            onVideoSize(h264Width,h264Height)
+                                        }
+                                        receivedAvcBytes += original.second.size.toLong()
                                         h264Active=true
                                         frame=null
                                     }
@@ -522,6 +560,9 @@ internal class AndroidRemoteEngine(
                                         monitorCount=count;selectedMonitor=index
                                         hostAllowsInput=inputAllowed
                                         hostAllowsClipboard=clipboardAllowed
+                                        videoTargetBps=metadata.optInt("video_target_bps",0)
+                                        videoTargetFps=metadata.optInt("video_target_fps",0)
+                                        videoEncoder=metadata.optString("video_encoder","")
                                     }
                             }
                         }
@@ -629,9 +670,24 @@ internal class AndroidRemoteEngine(
         }.also { main.postDelayed(it, waitMs) }
     }
 
+    private fun sendVideoControl(message:JSONObject) {
+        val key=secret ?: return
+        val ws=socket ?: return
+        if(!requested || !online) return
+        ws.send(encryptPacket(key,2,message.toString().toByteArray()).toByteString())
+    }
+
     private fun startWatchdog() {
         stopWatchdog()
         lastFrameAtMs = SystemClock.elapsedRealtime()
+        sampleAt=lastFrameAtMs
+        sampleFrames=renderedAvcFrames
+        sampleBytes=receivedAvcBytes
+        sampleDrops=if(hasVideoSurface) avcDecoder.droppedFrames else 0
+        renderedFps=0.0
+        measuredBps=0
+        avcRequested=hasVideoSurface
+        if(avcRequested) sendVideoControl(JSONObject().put("type","video_codec").put("codec","h264"))
         watchdogTask = object : Runnable {
             override fun run() {
                 if (!requested || !online) return
@@ -639,6 +695,21 @@ internal class AndroidRemoteEngine(
                     status = "画面超过 20 秒未更新，正在恢复连接"
                     socket?.cancel()
                     return
+                }
+                if(avcRequested && hasVideoSurface) {
+                    val now=SystemClock.elapsedRealtime()
+                    val elapsed=(now-sampleAt).coerceAtLeast(1)
+                    val drops=avcDecoder.droppedFrames
+                    renderedFps=(renderedAvcFrames-sampleFrames)*1000.0/elapsed
+                    measuredBps=(receivedAvcBytes-sampleBytes)*8000L/elapsed
+                    val rtt=rttMs
+                    if(h264Active && rtt!=null) sendVideoControl(JSONObject()
+                        .put("type","video_feedback").put("rtt_ms",rtt)
+                        .put("rendered_fps",renderedFps).put("decoder_drops",(drops-sampleDrops).coerceAtLeast(0)))
+                    sampleAt=now
+                    sampleFrames=renderedAvcFrames
+                    sampleBytes=receivedAvcBytes
+                    sampleDrops=drops
                 }
                 sendPing()
                 main.postDelayed(this, 5_000L)

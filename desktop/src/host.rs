@@ -130,16 +130,23 @@ where
         config.allow_input.clone(), config.monitor_index.clone(),
         config.messages.clone()
     );
-    let force_jpeg = Arc::new(AtomicBool::new(false));
+    // Each connection begins in JPEG compatibility mode; AVC is negotiated
+    // only by an authenticated viewer with an attached decoding surface.
+    let force_jpeg = Arc::new(AtomicBool::new(true));
+    let bitrate = Arc::new(AtomicU32::new(1_800_000));
+    let session_fps = Arc::new(AtomicU32::new(config.target_fps.load(Ordering::Relaxed).clamp(6,30)));
+    let mut last_adaptation = std::time::Instant::now();
+    let mut good_samples = 0u32;
     let mut frames = crate::video::spawn_frames(
         config.monitor_index.clone(),
         config.h264_enabled.clone(),
-        config.target_fps.clone(),
+        session_fps.clone(),
+        bitrate.clone(),
         config.dropped_frames.clone(),
         config.udp_active.clone(),
         force_jpeg.clone(),
     );
-    let mut metadata_tick = tokio::time::interval(Duration::from_secs(5));
+    let mut metadata_tick = tokio::time::interval(Duration::from_secs(2));
     let (udp_signal_tx, mut udp_signal_rx) =
         tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let mut udp_probe: Option<crate::udp_punch::Probe> = None;
@@ -177,7 +184,11 @@ where
                     let info = serde_json::json!({
                         "count": count.min(16), "selected": selected,
                         "allow_input": config.allow_input.load(Ordering::SeqCst),
-                        "allow_clipboard": config.allow_clipboard.load(Ordering::SeqCst)
+                        "allow_clipboard": config.allow_clipboard.load(Ordering::SeqCst),
+                        "video_target_bps": bitrate.load(Ordering::Relaxed),
+                        "video_target_fps": session_fps.load(Ordering::Relaxed),
+                        "video_encoder": if config.h264_enabled.load(Ordering::Relaxed) && !force_jpeg.load(Ordering::Relaxed) {"OpenH264 software"} else {"JPEG"},
+                        "video_encoder_hardware": false
                     }).to_string();
                     let packet = protocol::encrypt(&config.secret, protocol::MONITORS, info.as_bytes())?;
                     outgoing.send(Message::Binary(packet)).await?;
@@ -234,8 +245,29 @@ where
                                             if command.codec.as_deref() == Some("jpeg") {
                                                 force_jpeg.store(true, Ordering::SeqCst);
                                                 let _ = config.messages.send(
-                                                    "已接收 Windows Viewer 兼容请求：本次连接切换 JPEG 画面".into()
+                                                    "已接收 Viewer 兼容请求：本次连接切换 JPEG 画面".into()
                                                 );
+                                            } else if command.codec.as_deref() == Some("h264")
+                                                && config.h264_enabled.load(Ordering::Relaxed) {
+                                                force_jpeg.store(false, Ordering::SeqCst);
+                                            }
+                                        }
+                                        "video_feedback" if !force_jpeg.load(Ordering::Relaxed)
+                                            && config.h264_enabled.load(Ordering::Relaxed) => {
+                                            // A bounded controller, not an untrusted requested bitrate.
+                                            // Authenticated feedback measures rendered frames and RTT.
+                                            if last_adaptation.elapsed() >= Duration::from_secs(4) {
+                                                if let (Some(rtt), Some(fps), Some(drops)) =
+                                                    (command.rtt_ms, command.rendered_fps, command.decoder_drops) {
+                                                    if rtt <= 20_000 && fps.is_finite() && (0.0..=120.0).contains(&fps) && drops <= 10_000 {
+                                                        let old = bitrate.load(Ordering::Relaxed);
+                                                        let old_fps = session_fps.load(Ordering::Relaxed);
+                                                        let (next, next_fps) = adapt_video(old,old_fps,rtt,fps,drops,&mut good_samples);
+                                                        bitrate.store(next,Ordering::Relaxed);
+                                                        session_fps.store(next_fps,Ordering::Relaxed);
+                                                        last_adaptation = std::time::Instant::now();
+                                                    }
+                                                }
                                             }
                                         }
                                         "monitor" => {
@@ -309,6 +341,37 @@ struct Control {
     delta: Option<i32>,
     key: Option<String>,
     codec: Option<String>,
+    rtt_ms: Option<u64>,
+    rendered_fps: Option<f64>,
+    decoder_drops: Option<u64>,
+}
+
+fn adapt_video(bps:u32,fps:u32,rtt:u64,rendered:f64,drops:u64,good:&mut u32)->(u32,u32) {
+    if rtt > 450 || drops > 3 || rendered < (fps as f64)*0.45 {
+        *good=0;
+        ((bps*3/4).max(400_000),(fps.saturating_sub(3)).max(10))
+    } else if rtt < 180 && drops==0 && rendered >= (fps as f64)*0.80 {
+        *good+=1;
+        if *good>=3 {
+            *good=0;
+            ((bps+200_000).min(4_000_000),(fps+2).min(30))
+        } else {(bps,fps)}
+    } else {
+        *good=0;
+        (bps,fps)
+    }
+}
+
+#[cfg(test)]
+mod adaptive_tests {
+    use super::adapt_video;
+    #[test] fn downshift_and_bounded_recovery() {
+        let mut good=0;
+        assert_eq!(adapt_video(1_800_000,24,600,12.0,5,&mut good),(1_350_000,21));
+        assert_eq!(adapt_video(400_000,10,900,1.0,9,&mut good),(400_000,10));
+        for _ in 0..2 { assert_eq!(adapt_video(1_800_000,24,90,24.0,0,&mut good),(1_800_000,24)); }
+        assert_eq!(adapt_video(1_800_000,24,90,24.0,0,&mut good),(2_000_000,26));
+    }
 }
 
 #[cfg(windows)]
