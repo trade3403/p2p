@@ -631,7 +631,9 @@ class _RemoteTextPageState extends State<_RemoteTextPage> {
 
   Future<void> _send() async {
     if (_sending || _text.text.trim().isEmpty ||
-        !widget.controller.viewerConnected || !widget.controller.viewerAllowsInput) return;
+        !widget.controller.viewerConnected || !widget.controller.viewerAllowsInput) {
+      return;
+    }
     setState(() => _sending = true);
     try {
       final ok = await widget.controller.sendText(_text.text);
