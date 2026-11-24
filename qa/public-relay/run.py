@@ -182,6 +182,7 @@ def adb(*args, data=None, check=True):
     return subprocess.run(["adb",*args],input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=check)
 
 def pull_evidence():
+    # Collect first, encode separately. Always retain original frames if encoding fails.
     listing=adb("shell","run-as","com.p2p.remote","ls","files/e2e",check=False)
     for name in listing.stdout.decode(errors="replace").splitlines():
         name=name.strip()
@@ -191,16 +192,32 @@ def pull_evidence():
         data=adb("exec-out","run-as","com.p2p.remote","cat","files/e2e/"+name,check=False)
         if data.returncode==0 and data.stdout:
             (OUT/name).write_bytes(data.stdout)
-    if (OUT/"frame-00000.jpg").exists():
-        result=subprocess.run(["ffmpeg","-hide_banner","-loglevel","error","-y","-framerate","5",
-            "-i",str(OUT/"frame-%05d.jpg"),"-c:v","libx264","-pix_fmt","yuv420p",
-            str(OUT/"Android-Received-Remote-Video.mp4")],capture_output=True)
-        require(result.returncode==0,"Could not encode received video MP4")
-    for frame in OUT.glob("frame-*.jpg"):
+def encode_evidence(expected_frames):
+    import imageio_ffmpeg
+    require(isinstance(expected_frames,int) and expected_frames>0,"No recorded frames in native report")
+    frames=sorted(OUT.glob("frame-*.jpg"))
+    require([f.name for f in frames]==[f"frame-{i:05d}.jpg" for i in range(expected_frames)],
+            "Missing or noncontiguous received video frames")
+    video=OUT/"Android-Received-Remote-Video.mp4"
+    result=subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),"-hide_banner","-loglevel","error","-y",
+        "-framerate","5","-i",str(OUT/"frame-%05d.jpg"),"-c:v","libx264","-pix_fmt","yuv420p",
+        str(video)],capture_output=True)
+    (OUT/"ffmpeg-log.txt").write_bytes(result.stderr)
+    require(result.returncode==0 and video.is_file() and video.stat().st_size>0,
+            "Could not encode received video MP4")
+    frame_count,duration=imageio_ffmpeg.count_frames_and_secs(str(video))
+    require(frame_count==expected_frames and duration>0,"MP4 decoded frame count differs from recorded evidence")
+    REPORT["video"]={"frames":frame_count,"duration_seconds":duration,"playback_fps":5}
+    for frame in frames:
         frame.unlink()
+
 
 def android():
     global STAGE,WS
+    STAGE="video_encoder_preflight"
+    import imageio_ffmpeg
+    encoder=subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),"-hide_banner","-encoders"],capture_output=True)
+    require(encoder.returncode==0 and b"libx264" in encoder.stdout,"Bundled FFmpeg lacks H.264 encoder")
     STAGE="install"
     adb("install","-r","android/app/build/outputs/apk/debug/app-debug.apk")
     adb("install","-r","android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk")
@@ -240,11 +257,21 @@ def android():
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=10)
+            STAGE="evidence_collection"
             pull_evidence()
+    STAGE="native_assertions"
+    require((OUT/"report.json").is_file(),"Native report missing; inspect instrumentation.txt")
     native=json.loads((OUT/"report.json").read_text())
-    require(process.returncode==0 and native.get("passed") is True,"Android native E2E assertions failed")
-    require((OUT/"Android-Received-Remote-Video.mp4").stat().st_size>0,"No recorded received video")
-    REPORT["metrics"]=native["metrics"]
+    REPORT["native_passed"]=native.get("passed") is True
+    REPORT["metrics"]=native.get("metrics",{})
+    if native.get("failed_stage"):
+        REPORT["native_failed_stage"]=native["failed_stage"]
+    instrumentation=(OUT/"instrumentation.txt").read_text(errors="replace")
+    require(process.returncode==0 and native.get("passed") is True
+            and "OK (1 test)" in instrumentation and "INSTRUMENTATION_CODE: -1" in instrumentation,
+            "Android native E2E assertions failed; inspect instrumentation.txt")
+    STAGE="video_encoding"
+    encode_evidence(native["metrics"]["recorded_frames"])
     STAGE="host_confirmation"
     end=time.monotonic()+15
     while time.monotonic()<end:
