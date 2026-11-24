@@ -378,6 +378,52 @@ def read_avc_metrics():
         require(data["decoder_mode"]=="software","Virtual emulator AVC decoder misclassified")
     return data
 
+def weak_network_step(baseline):
+    """Real emulator network shaping, not injected controller feedback."""
+    def console(*args):
+        result=adb("emu",*args)
+        response=result.stdout.decode(errors="replace")
+        require("OK" in response.splitlines() and "KO" not in response,
+                "Emulator rejected network shaping command")
+    def samples():
+        result=[]
+        for _ in range(2):
+            time.sleep(8)
+            result.append(read_avc_metrics())
+        return result
+    evidence={"baseline":baseline,"profile":{"delay_ms":"250:250",
+              "speed_kbps":"1000:1000"},"scope":"Actual emulator network shaping of release AVC session; not physical network or input-to-photon"}
+    REPORT["weak_network_step"]=evidence
+    try:
+        console("network","delay","250:250")
+        console("network","speed","1000:1000")
+        evidence["shaped"]=samples()
+    finally:
+        # Restore both independently even when a command or assertion fails.
+        try:
+            console("network","speed","full")
+        finally:
+            console("network","delay","none")
+    evidence["restored"]=samples()
+    shaped=evidence["shaped"]
+    restored=evidence["restored"]
+    require(shaped[-1]["frames"]>shaped[0]["frames"]>baseline["frames"],
+            "No actual AVC render progress during shaped network")
+    require(restored[-1]["frames"]>restored[0]["frames"]>shaped[-1]["frames"],
+            "No actual AVC render progress after restoring network")
+    require(all(m["fps"]>0 and m["bps"]>0 for m in shaped+restored),
+            "No measured live video throughput in network step")
+    # Prove the impairment affected the actual authenticated session, not
+    # merely that the emulator accepted a console command.
+    require(min(m["rtt"] for m in shaped)>baseline["rtt"]+100,
+            "Shaped network did not measurably increase authenticated RTT")
+    require(max(m["rtt"] for m in restored)<min(m["rtt"] for m in shaped),
+            "Authenticated RTT did not recover after network restoration")
+    require(shaped[-1]["target_bps"]<=baseline["target_bps"] and
+            shaped[-1]["target_fps"]<=baseline["target_fps"],
+            "Congestion increased video target")
+    passed("Actual emulator network delay/rate step and restored AVC rendering")
+
 def android():
     global STAGE
     rec=None
@@ -475,6 +521,8 @@ def android():
         REPORT["actual_avc_metrics"]={"first":first,"second":second,
             "scope":"MediaCodec rendered output, received AVC payload bitrate, authenticated RTT; no synthetic data"}
         passed("Live AVC rendering, actual throughput and RTT measured in landscape release APK")
+        STAGE="weak_network_step"
+        weak_network_step(second)
         STAGE="disconnect"
         android_tap("断开连接")
         find_android("请求连接",enabled=False,seconds=30,scroll=True)
@@ -742,7 +790,7 @@ def windows():
             REPORT["visual_clicks"].append({"trial":trial,"before":before_rect,"after":after_rect})
         passed("Remote maximize and restore independently verified by native window state")
         STAGE="host_confirmation"
-        await_message("done",seconds=150)
+        await_message("done",seconds=300)
         # Recording must be valid before the peer receives final success.
         rec.finish(True)
         rec=None
