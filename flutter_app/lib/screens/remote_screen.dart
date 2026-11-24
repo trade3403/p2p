@@ -23,6 +23,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
   final _legacyKey = TextEditingController();
   bool _showLegacy = false;
   bool _pressed = false;
+  int? _activePointer;
   double _lastX = 0.5;
   double _lastY = 0.5;
   DateTime _lastMoveSent = DateTime.fromMillisecondsSinceEpoch(0);
@@ -31,6 +32,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
 
   @override
   void dispose() {
+    _releasePointer();
     _deviceNumber.dispose();
     _pairingCode.dispose();
     _textToSend.dispose();
@@ -176,6 +178,12 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       const Expanded(
                         child: Text('远程桌面', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
                       ),
+                      if (connected)
+                        IconButton(
+                          tooltip: '全屏远控',
+                          onPressed: _openFullscreen,
+                          icon: const Icon(Icons.fullscreen_rounded),
+                        ),
                       if (connected && _controller.monitorCount > 1)
                         DropdownButton<int>(
                           value: _controller.selectedMonitor.clamp(0, _controller.monitorCount - 1).toInt(),
@@ -205,56 +213,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       final surfaceSize = Size(width, height);
                       return ClipRRect(
                         borderRadius: BorderRadius.circular(12),
-                        child: Listener(
-                          behavior: HitTestBehavior.opaque,
-                          onPointerHover: (event) => _movePointer(event.localPosition, surfaceSize),
-                          onPointerMove: (event) => _movePointer(event.localPosition, surfaceSize),
-                          onPointerDown: (event) => _pointerDown(event, surfaceSize),
-                          onPointerUp: _pointerUp,
-                          onPointerCancel: (_) => _releasePointer(),
-                          onPointerSignal: (event) {
-                            if (event is PointerScrollEvent && inputAllowed) {
-                              final delta = event.scrollDelta.dy;
-                              if (delta.abs() >= 1) _controller.sendScroll(delta > 0 ? -1 : 1);
-                            }
-                          },
-                          child: SizedBox(
-                            width: width,
-                            height: height,
-                            child: ColoredBox(
-                              color: const Color(0xFF070D16),
-                              child: _controller.h264Active && _controller.videoTextureId != null
-                                  ? Texture(
-                                      textureId: _controller.videoTextureId!,
-                                      filterQuality: FilterQuality.low,
-                                    )
-                                  : _controller.frame != null
-                                      ? Image.memory(
-                                          _controller.frame!,
-                                          fit: BoxFit.contain,
-                                          gaplessPlayback: true,
-                                          filterQuality: FilterQuality.low,
-                                        )
-                                      : Center(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            connected ? Icons.hourglass_empty_rounded : Icons.desktop_access_disabled_rounded,
-                                            color: P2PColors.muted,
-                                            size: 42,
-                                          ),
-                                          const SizedBox(height: 12),
-                                          Text(
-                                            connected ? '等待远程桌面画面…' : '连接成功后，远程画面会显示在这里',
-                                            style: const TextStyle(color: P2PColors.muted, fontSize: 13),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                            ),
-                          ),
-                        ),
+                        child: _videoSurface(surfaceSize),
                       );
                     },
                   ),
@@ -413,6 +372,152 @@ class _RemoteScreenState extends State<RemoteScreen> {
     );
   }
 
+  Widget _videoSurface(Size size) {
+    final connected = _controller.viewerConnected;
+    final ratio = _controller.frameWidth > 0 && _controller.frameHeight > 0
+        ? _controller.frameWidth / _controller.frameHeight : 16 / 9;
+    return SizedBox(
+      width: size.width,
+      height: size.height,
+      child: ColoredBox(
+        color: const Color(0xFF070D16),
+        child: Center(
+          child: AspectRatio(
+            aspectRatio: ratio,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final actual = Size(constraints.maxWidth, constraints.maxHeight);
+                return Semantics(
+                  container: true,
+                  identifier: 'p2p_remote_video',
+                  label: '远程画面操作区域',
+                  excludeSemantics: true,
+                  child: Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerHover: (event) => _movePointer(event.localPosition, actual),
+                    onPointerMove: (event) {
+                      if (_activePointer == event.pointer) {
+                        _movePointer(event.localPosition, actual);
+                      }
+                    },
+                    onPointerDown: (event) => _pointerDown(event, actual),
+                    onPointerUp: (event) {
+                      if (_activePointer == event.pointer) {
+                        _movePointer(event.localPosition, actual);
+                        _releasePointer();
+                      }
+                    },
+                    onPointerCancel: (event) {
+                      if (_activePointer == event.pointer) _releasePointer();
+                    },
+                    onPointerSignal: (event) {
+                      if (event is PointerScrollEvent && connected && _controller.viewerAllowsInput) {
+                        if (event.scrollDelta.dy.abs() >= 1) {
+                          _controller.sendScroll(event.scrollDelta.dy > 0 ? -1 : 1);
+                        }
+                      }
+                    },
+                    child: SizedBox.expand(
+                      child: _controller.h264Active && _controller.videoTextureId != null
+                          ? Texture(textureId: _controller.videoTextureId!, filterQuality: FilterQuality.low)
+                          : _controller.frame != null
+                              ? Image.memory(_controller.frame!, fit: BoxFit.contain,
+                                  gaplessPlayback: true, filterQuality: FilterQuality.low)
+                              : Center(child: Text(connected ? '等待远程桌面画面…' : '连接成功后，远程画面会显示在这里')),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openFullscreen() async {
+    _releasePointer();
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (routeContext) => AnimatedBuilder(
+          animation: _controller,
+          builder: (context, _) => Scaffold(
+            backgroundColor: const Color(0xFF070D16),
+            body: SafeArea(
+              child: Column(
+                children: [
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 6,
+                    children: [
+                      TextButton(onPressed: () => Navigator.of(routeContext).pop(),
+                        child: const Text('退出全屏')),
+                      TextButton(
+                        onPressed: _controller.viewerConnected && _controller.viewerAllowsInput
+                            ? () => _fullscreenText(routeContext) : null,
+                        child: const Text('远程输入文字'),
+                      ),
+                      TextButton(
+                        onPressed: _controller.viewerRequested || _controller.viewerConnected
+                            ? () async {
+                                _releasePointer();
+                                await _controller.disconnectViewer();
+                                if (routeContext.mounted) Navigator.of(routeContext).pop();
+                              } : null,
+                        child: const Text('断开连接'),
+                      ),
+                    ],
+                  ),
+                  Text(_controller.viewerStatus, style: const TextStyle(fontSize: 12)),
+                  Expanded(child: LayoutBuilder(
+                    builder: (context, constraints) => _videoSurface(
+                      Size(constraints.maxWidth, constraints.maxHeight),
+                    ),
+                  )),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    _releasePointer();
+  }
+
+  Future<void> _fullscreenText(BuildContext routeContext) async {
+    final text = TextEditingController();
+    try {
+      await showDialog<void>(
+        context: routeContext,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('远程输入文字'),
+          content: TextField(
+            controller: text,
+            autofocus: true,
+            maxLength: 250,
+            decoration: const InputDecoration(labelText: '远程文字内容'),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('取消')),
+            FilledButton(
+              onPressed: () async {
+                if (text.text.trim().isEmpty) return;
+                if (await _controller.sendText(text.text) && dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop();
+                }
+              },
+              child: const Text('发送远程文字'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      text.dispose();
+    }
+  }
+
   (double, double)? _normalized(Offset point, Size surface) {
     final width = _controller.frameWidth.toDouble();
     final height = _controller.frameHeight.toDouble();
@@ -445,7 +550,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
   }
 
   void _pointerDown(PointerDownEvent event, Size surface) {
-    if (!_controller.viewerConnected || !_controller.viewerAllowsInput) return;
+    if (!_controller.viewerConnected || !_controller.viewerAllowsInput || _activePointer != null) return;
     final position = _normalized(event.localPosition, surface);
     if (position == null) return;
     _lastX = position.$1;
@@ -455,14 +560,14 @@ class _RemoteScreenState extends State<RemoteScreen> {
       return;
     }
     _pressed = true;
+    _activePointer = event.pointer;
     _controller.sendPointer('down', _lastX, _lastY);
   }
-
-  void _pointerUp(PointerUpEvent event) => _releasePointer();
 
   void _releasePointer() {
     if (!_pressed) return;
     _pressed = false;
+    _activePointer = null;
     _controller.sendPointer('up', _lastX, _lastY);
   }
 }

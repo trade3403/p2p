@@ -140,10 +140,17 @@ class _AndroidBridgeNotice extends StatelessWidget {
   }
 }
 
-class _LocalDeviceCard extends StatelessWidget {
+class _LocalDeviceCard extends StatefulWidget {
   const _LocalDeviceCard({required this.onSettings});
 
   final VoidCallback onSettings;
+
+  @override
+  State<_LocalDeviceCard> createState() => _LocalDeviceCardState();
+}
+
+class _LocalDeviceCardState extends State<_LocalDeviceCard> {
+  bool _showCode = false;
 
   @override
   Widget build(BuildContext context) {
@@ -195,7 +202,7 @@ class _LocalDeviceCard extends StatelessWidget {
                       ),
                       _NumberBlock(
                         label: '6位动态验证码',
-                        value: hasCode ? controller.pairingCode : '等待生成…',
+                        value: hasCode ? (_showCode ? controller.pairingCode : '••••••') : '等待生成…',
                         helper: '由中转服务定时轮换；仅用于首次授权。',
                         amber: true,
                       ),
@@ -233,6 +240,11 @@ class _LocalDeviceCard extends StatelessWidget {
                       label: const Text('复制设备号'),
                     ),
                   if (hasCode)
+                    TextButton(
+                      onPressed: () => setState(() => _showCode = !_showCode),
+                      child: Text(_showCode ? '隐藏验证码' : '显示验证码'),
+                    ),
+                  if (hasCode)
                     OutlinedButton.icon(
                       onPressed: () => _copy(context, controller.pairingCode, '验证码'),
                       icon: const Icon(Icons.copy_rounded, size: 15),
@@ -240,13 +252,13 @@ class _LocalDeviceCard extends StatelessWidget {
                     ),
                   if (!controller.tokenConfigured)
                     OutlinedButton.icon(
-                      onPressed: onSettings,
+                      onPressed: widget.onSettings,
                       icon: const Icon(Icons.settings_rounded, size: 15),
                       label: const Text('配置中转服务'),
                     ),
                   FilledButton.icon(
                     onPressed: !controller.bridgeAvailable || (!running && !controller.tokenConfigured)
-                        ? onSettings
+                        ? widget.onSettings
                         : () => running ? controller.stopHost() : controller.startHost(),
                     icon: Icon(running ? Icons.stop_rounded : Icons.play_arrow_rounded),
                     label: Text(running ? '停止共享' : '启动本机共享'),
