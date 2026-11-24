@@ -46,6 +46,8 @@ struct Snapshot {
     allow_input: bool,
     allow_clipboard: bool,
     viewer_connected: bool,
+    viewer_allow_input: bool,
+    viewer_allow_clipboard: bool,
     viewer_status: String,
     viewer_width: u32,
     viewer_height: u32,
@@ -70,6 +72,8 @@ impl Default for Snapshot {
             allow_input: false,
             allow_clipboard: false,
             viewer_connected: false,
+            viewer_allow_input: false,
+            viewer_allow_clipboard: false,
             viewer_status: "未连接".into(),
             viewer_width: 0,
             viewer_height: 0,
@@ -190,7 +194,10 @@ impl Engine {
 
     fn snapshot(&self) -> Value {
         let shared = shared_lock(&self.shared);
-        serde_json::to_value(&shared.snapshot).unwrap_or_else(|_| json!({}))
+        let mut value = serde_json::to_value(&shared.snapshot).unwrap_or_else(|_| json!({}));
+        value["viewer_requested"] = json!(self.viewer.as_ref().is_some_and(|v| v.active.load(Ordering::SeqCst)));
+        value["host_running"] = json!(self.host.as_ref().is_some_and(|h| h.running.load(Ordering::SeqCst)));
+        value
     }
 
     fn response(&self, extra: Value) -> Value {
@@ -235,6 +242,7 @@ impl Engine {
         if let Some(error) = self.vault_error.as_ref() {
             return self.fail(error.clone());
         }
+        if self.host.as_ref().is_some_and(|h| h.running.load(Ordering::SeqCst)) || self.viewer.as_ref().is_some_and(|v| v.active.load(Ordering::SeqCst)) || self.pairing_active.as_ref().is_some_and(|p| p.load(Ordering::SeqCst)) { return self.fail("请先结束当前共享、连接或配对"); }
         let Some(server) = value.get("server").and_then(Value::as_str).map(str::trim) else {
             return self.fail("中转地址不能为空");
         };
@@ -359,6 +367,10 @@ impl Engine {
                             state.snapshot.pending_viewer_fingerprint = event["viewer_fingerprint"].as_str().map(str::to_owned);
                         }
                         "pairing_request_expired" | "pairing_request_denied" | "pairing_approved" => {
+                            if event["event"] == "pairing_approved" {
+                                state.snapshot.pairing_code.clear();
+                                state.snapshot.pairing_expires_at = 0;
+                            }
                             state.snapshot.pending_pairing_request_id = None;
                             state.snapshot.pending_viewer_fingerprint = None;
                         }
@@ -529,6 +541,7 @@ impl Engine {
     }
 
     fn connect_legacy(&mut self, value: &Value) -> Value {
+        if self.viewer.as_ref().is_some_and(|v| v.active.load(Ordering::SeqCst)) || self.pairing_active.as_ref().is_some_and(|p| p.load(Ordering::SeqCst)) { return self.fail("请先结束当前连接或配对"); }
         let Some(secret_hex) = value.get("sessionKey").and_then(Value::as_str) else {
             return self.fail("缺少64位会话密钥");
         };
@@ -572,12 +585,14 @@ impl Engine {
                         state.emit(json!({"type":"viewerState","message":message}));
                     }
                     ViewerEvent::Connected => {
-                        state.snapshot.viewer_connected = true;
-                        state.snapshot.viewer_status = "WSS 已连接，等待远程桌面画面".into();
+                        state.snapshot.viewer_connected = false;
+                        state.snapshot.viewer_status = "WSS 已连接，等待加密远程桌面画面".into();
                         state.emit(json!({"type":"viewerConnected"}));
                     }
                     ViewerEvent::Disconnected => {
                         state.snapshot.viewer_connected = false;
+                        state.snapshot.viewer_allow_input = false;
+                        state.snapshot.viewer_allow_clipboard = false;
                         state.snapshot.viewer_width = 0;
                         state.snapshot.viewer_height = 0;
                         state.frame = None;
@@ -592,11 +607,18 @@ impl Engine {
                             state.snapshot.viewer_width = width;
                             state.snapshot.viewer_height = height;
                             state.frame = Some(Frame { bytes, width, height, version });
+                            if !state.snapshot.viewer_connected {
+                                state.snapshot.viewer_connected = true;
+                                state.snapshot.viewer_status = "已收到端到端加密画面".into();
+                                state.emit(json!({"type":"viewerVideoReady"}));
+                            }
                         }
                     }
                     ViewerEvent::Monitors(value) => {
                         state.snapshot.monitors = serde_json::from_str(&value).unwrap_or(json!({"count":1,"selected":0}));
                         let monitors = state.snapshot.monitors.clone();
+                        state.snapshot.viewer_allow_input = monitors["allow_input"].as_bool().unwrap_or(false);
+                        state.snapshot.viewer_allow_clipboard = monitors["allow_clipboard"].as_bool().unwrap_or(false);
                         state.emit(json!({"type":"monitors","value":monitors}));
                     }
                     ViewerEvent::Clipboard(value) => {
@@ -609,6 +631,8 @@ impl Engine {
         self.viewer = Some(ViewerHandle { active, controls: control_tx });
         let mut shared = shared_lock(&self.shared);
         shared.snapshot.viewer_connected = false;
+        shared.snapshot.viewer_allow_input = false;
+        shared.snapshot.viewer_allow_clipboard = false;
         shared.snapshot.viewer_status = "正在连接远程 Windows".into();
         shared.snapshot.viewer_width = 0;
         shared.snapshot.viewer_height = 0;
@@ -626,6 +650,8 @@ impl Engine {
         }
         let mut shared = shared_lock(&self.shared);
         shared.snapshot.viewer_connected = false;
+        shared.snapshot.viewer_allow_input = false;
+        shared.snapshot.viewer_allow_clipboard = false;
         shared.snapshot.viewer_width = 0;
         shared.snapshot.viewer_height = 0;
         shared.snapshot.viewer_status = "已手动断开".into();
@@ -638,6 +664,17 @@ impl Engine {
     fn send_control(&self, value: Value) -> Result<(), String> {
         let Some(viewer) = self.viewer.as_ref() else { return Err("尚未连接远程电脑".into()); };
         if !viewer.active.load(Ordering::SeqCst) { return Err("远程会话已断开".into()); }
+        {
+            let shared = shared_lock(&self.shared);
+            if !shared.snapshot.viewer_connected { return Err("等待已验证的远程画面".into()); }
+            match value["type"].as_str().unwrap_or("") {
+                "move" | "down" | "up" | "right_click" | "scroll" | "text" | "key" if !shared.snapshot.viewer_allow_input =>
+                    return Err("被控端尚未授权鼠标键盘".into()),
+                "clipboard_get" | "clipboard_set" if !shared.snapshot.viewer_allow_clipboard =>
+                    return Err("被控端尚未授权剪贴板".into()),
+                _ => {}
+            }
+        }
         let text = value.to_string();
         if text.len() > 8192 { return Err("控制命令过长".into()); }
         viewer.controls.send(text).map_err(|_| "远程控制通道已关闭".into())
@@ -743,6 +780,8 @@ impl Engine {
         shared.snapshot.token_configured = false;
         shared.snapshot.vault_error = None;
         shared.snapshot.viewer_connected = false;
+        shared.snapshot.viewer_allow_input = false;
+        shared.snapshot.viewer_allow_clipboard = false;
         shared.snapshot.viewer_status = "本机凭据已撤销".into();
         shared.emit(json!({"type":"trustRevoked"}));
         drop(shared);

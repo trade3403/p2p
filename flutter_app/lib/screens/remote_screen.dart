@@ -45,6 +45,9 @@ class _RemoteScreenState extends State<RemoteScreen> {
       animation: _controller,
       builder: (context, _) {
         final connected = _controller.viewerConnected;
+        final requested = _controller.viewerRequested;
+        final inputAllowed = connected && _controller.viewerAllowsInput;
+        final clipboardAllowed = connected && _controller.viewerAllowsClipboard;
         return ListView(
           children: [
             PageHeading(
@@ -53,7 +56,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
               subtitle: '通过端到端加密会话查看桌面，并发送鼠标、键盘和剪贴板操作。',
               trailing: StatusDot(
                 color: connected ? P2PColors.mint : P2PColors.muted,
-                label: connected ? '已连接' : '未连接',
+                label: connected ? '画面已验证' : requested ? '连接或恢复中' : '未连接',
               ),
             ),
             const SizedBox(height: 20),
@@ -73,7 +76,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       Expanded(
                         child: TextField(
                           controller: _deviceNumber,
-                          enabled: !connected && !_controller.pairingActive,
+                          enabled: !requested && !_controller.pairingActive,
                           keyboardType: TextInputType.number,
                           inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(9)],
                           onChanged: (_) => setState(() {}),
@@ -84,7 +87,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       Expanded(
                         child: TextField(
                           controller: _pairingCode,
-                          enabled: !connected && !_controller.pairingActive,
+                          enabled: !requested && !_controller.pairingActive,
                           keyboardType: TextInputType.number,
                           obscureText: true,
                           inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(6)],
@@ -100,7 +103,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                     runSpacing: 8,
                     children: [
                       FilledButton.icon(
-                        onPressed: connected
+                        onPressed: !_controller.bridgeAvailable || !_controller.tokenConfigured || requested
                             ? null
                             : _controller.pairingActive
                                 ? () => _controller.cancelPairing()
@@ -110,7 +113,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                         icon: Icon(_controller.pairingActive ? Icons.close_rounded : Icons.link_rounded),
                         label: Text(_controller.pairingActive ? '取消配对' : '请求连接'),
                       ),
-                      if (connected)
+                      if (requested || connected)
                         OutlinedButton.icon(
                           onPressed: () => _controller.disconnectViewer(),
                           icon: const Icon(Icons.link_off_rounded),
@@ -135,7 +138,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       ),
                     ),
                     FilledButton(
-                      onPressed: connected || _legacyKey.text.length != 64
+                      onPressed: !_controller.bridgeAvailable || !_controller.tokenConfigured || requested || _controller.pairingActive || !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(_legacyKey.text)
                           ? null
                           : () => _controller.connectLegacy(_legacyKey.text),
                       child: const Text('使用旧版密钥连接'),
@@ -149,6 +152,10 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       fontSize: 12,
                     ),
                   ),
+                  if (!_controller.tokenConfigured)
+                    const Text('请先在网络连接中保存 Relay 访问口令。'),
+                  if (requested || connected)
+                    Text('${_controller.transport} · RTT ${_controller.rttMs?.toString() ?? "待测"} ms'),
                   if (!_controller.bridgeAvailable)
                     Padding(
                       padding: const EdgeInsets.only(top: 7),
@@ -206,7 +213,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                           onPointerUp: _pointerUp,
                           onPointerCancel: (_) => _releasePointer(),
                           onPointerSignal: (event) {
-                            if (event is PointerScrollEvent && connected) {
+                            if (event is PointerScrollEvent && inputAllowed) {
                               final delta = event.scrollDelta.dy;
                               if (delta.abs() >= 1) _controller.sendScroll(delta > 0 ? -1 : 1);
                             }
@@ -273,16 +280,14 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       runSpacing: 8,
                       children: [
                         OutlinedButton.icon(
-                          onPressed: _controller.probeStun,
+                          onPressed: _controller.bridgeAvailable ? _controller.probeStun : null,
                           icon: const Icon(Icons.network_check_rounded),
                           label: const Text('检测 STUN'),
                         ),
                         FilledButton.icon(
-                          onPressed: connected && _controller.tokenConfigured && !_controller.udpAttempted
-                              ? _controller.startUdpPunch
-                              : null,
+                          onPressed: null,
                           icon: const Icon(Icons.bolt_rounded),
-                          label: const Text('尝试加密 UDP 预览'),
+                          label: const Text('UDP 预览暂未接入新版 Host'),
                         ),
                       ],
                     ),
@@ -315,7 +320,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                             const SizedBox(height: 10),
                             TextField(
                               controller: _textToSend,
-                              enabled: connected,
+                              enabled: inputAllowed,
                               onChanged: (_) => setState(() {}),
                               maxLength: 250,
                               decoration: const InputDecoration(
@@ -329,7 +334,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                               runSpacing: 7,
                               children: [
                                 FilledButton(
-                                  onPressed: connected && _textToSend.text.isNotEmpty
+                                  onPressed: inputAllowed && _textToSend.text.isNotEmpty
                                       ? () async {
                                           final value = _textToSend.text;
                                           if (await _controller.sendText(value)) _textToSend.clear();
@@ -339,7 +344,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                                 ),
                                 for (final key in const ['enter', 'backspace', 'tab', 'escape', 'ctrl_a', 'ctrl_c', 'ctrl_v'])
                                   OutlinedButton(
-                                    onPressed: connected ? () => _controller.sendKey(key) : null,
+                                    onPressed: inputAllowed ? () => _controller.sendKey(key) : null,
                                     child: Text(key.replaceAll('_', ' ')),
                                   ),
                               ],
@@ -362,7 +367,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                             ),
                             const SizedBox(height: 10),
                             OutlinedButton.icon(
-                              onPressed: connected ? () => _controller.getClipboardText() : null,
+                              onPressed: clipboardAllowed ? () => _controller.getClipboardText() : null,
                               icon: const Icon(Icons.download_rounded),
                               label: const Text('读取远程剪贴板'),
                             ),
@@ -376,7 +381,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                             const SizedBox(height: 10),
                             TextField(
                               controller: _clipboardToSend,
-                              enabled: connected,
+                              enabled: clipboardAllowed,
                               onChanged: (_) => setState(() {}),
                               maxLines: 2,
                               maxLength: 4096,
@@ -384,7 +389,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                             ),
                             const SizedBox(height: 7),
                             FilledButton(
-                              onPressed: connected && _clipboardToSend.text.isNotEmpty
+                              onPressed: clipboardAllowed && _clipboardToSend.text.isNotEmpty
                                   ? () => _controller.setClipboardText(_clipboardToSend.text)
                                   : null,
                               child: const Text('发送剪贴板文字'),
@@ -428,7 +433,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
   }
 
   void _movePointer(Offset point, Size surface) {
-    if (!_controller.viewerConnected) return;
+    if (!_controller.viewerConnected || !_controller.viewerAllowsInput) return;
     final now = DateTime.now();
     if (now.difference(_lastMoveSent).inMilliseconds < 25) return;
     final position = _normalized(point, surface);
@@ -440,7 +445,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
   }
 
   void _pointerDown(PointerDownEvent event, Size surface) {
-    if (!_controller.viewerConnected) return;
+    if (!_controller.viewerConnected || !_controller.viewerAllowsInput) return;
     final position = _normalized(event.localPosition, surface);
     if (position == null) return;
     _lastX = position.$1;

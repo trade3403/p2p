@@ -43,6 +43,7 @@ internal class AndroidRemoteEngine(
     private var online = false
     private var requested = false
     private var receivingFrames = false
+    private var receivedFrames = 0L
     private var activeEndpoint = ""
     private var lanEndpoint = ""
     private var lanAttempted = false
@@ -89,6 +90,7 @@ internal class AndroidRemoteEngine(
                 main.post {
                     if (requested && h264Active) {
                         receivingFrames = true
+                        receivedFrames++
                         lastFrameAtMs = SystemClock.elapsedRealtime()
                         retryAttempt = 0
                         status = "已连接家庭电脑 · H.264 正在播放"
@@ -134,7 +136,11 @@ internal class AndroidRemoteEngine(
 
     private fun snapshotMap(): Map<String, Any?> = mapOf(
         "host_running" to false,
-        "viewer_connected" to online,
+        "viewer_connected" to (online && receivingFrames),
+        "viewer_requested" to requested,
+        "viewer_allow_input" to (hostAllowsInput == true),
+        "viewer_allow_clipboard" to (hostAllowsClipboard == true),
+        "received_frames" to receivedFrames,
         "pairing_active" to pairingActive,
         "token_configured" to (relayToken.length >= 32),
         "allow_input" to (hostAllowsInput == true),
@@ -212,6 +218,10 @@ internal class AndroidRemoteEngine(
             server.trim().startsWith("https://") -> "wss://" + server.trim().removePrefix("https://").trimEnd('/')
             else -> throw IllegalArgumentException("中转服务器必须使用 HTTPS/WSS")
         }
+        require(!requested && !pairingActive) { "请先断开当前连接或取消配对" }
+        val uri = java.net.URI(normalized)
+        require(uri.host != null && uri.userInfo == null && uri.query == null &&
+            uri.fragment == null && (uri.path.isNullOrEmpty() || uri.path == "/")) { "中转地址只能包含 HTTPS/WSS 主机和端口" }
         val nextToken = token.trim().ifEmpty { relayToken }
         require(nextToken.length in 32..512) { "请输入有效的 Relay Access Token" }
         credentials.save(normalized, nextToken)
@@ -267,18 +277,18 @@ internal class AndroidRemoteEngine(
 
     private fun cancelPairing() {
         pairingCancelled.set(true)
-        pairingActive = false
         status = "正在取消配对…"
     }
 
     private fun connectLegacy(sessionKey: String) {
+        require(!requested && !pairingActive) { "请先断开当前会话" }
+        require(sessionKey.matches(Regex("^[0-9a-fA-F]{64}$"))) { "会话密钥必须是64位十六进制字符串" }
         require(relayToken.length >= 32) { "请先在网络连接中配置 Relay 访问口令" }
         connect(relayUrl, relayToken, sessionKey, "")
     }
 
     private fun disconnectViewer() {
         pairingCancelled.set(true)
-        pairingActive = false
         disconnect()
     }
 
@@ -289,6 +299,7 @@ internal class AndroidRemoteEngine(
 
     private fun emitFrame(bytes: ByteArray, width: Int, height: Int) {
         if (bytes.isEmpty() || bytes.size > 3 * 1024 * 1024 || width <= 0 || height <= 0) return
+        receivedFrames++
         onEvent(mapOf(
             "type" to "frame",
             "frame" to bytes.copyOf(),
@@ -527,6 +538,8 @@ internal class AndroidRemoteEngine(
                     if (socket !== webSocket || !requested) return@post
                     socket = null
                     online = false
+                    hostAllowsInput = null
+                    hostAllowsClipboard = null
                     udpProbe?.stop()
                     udpProbe = null
                     udpAttempted = false
@@ -568,6 +581,8 @@ internal class AndroidRemoteEngine(
                     if (socket !== webSocket || !requested) return@post
                     socket = null
                     online = false
+                    hostAllowsInput = null
+                    hostAllowsClipboard = null
                     udpProbe?.stop()
                     udpProbe = null
                     udpAttempted = false
@@ -616,11 +631,11 @@ internal class AndroidRemoteEngine(
 
     private fun startWatchdog() {
         stopWatchdog()
-        lastFrameAtMs = 0L
+        lastFrameAtMs = SystemClock.elapsedRealtime()
         watchdogTask = object : Runnable {
             override fun run() {
                 if (!requested || !online) return
-                if (receivingFrames && SystemClock.elapsedRealtime() - lastFrameAtMs > 20_000L) {
+                if (SystemClock.elapsedRealtime() - lastFrameAtMs > 20_000L) {
                     status = "画面超过 20 秒未更新，正在恢复连接"
                     socket?.cancel()
                     return
@@ -777,15 +792,15 @@ internal class AndroidRemoteEngine(
     }
 
     private fun selectMonitor(index: Int) {
-        if(index < 0 || index >= monitorCount) return
+        require(index in 0 until monitorCount) { "显示器索引无效" }
         send(JSONObject().put("type","monitor").put("index",index))
     }
     private fun sendScroll(delta: Int) {
-        if(delta !in -10..10 || delta == 0) return
+        require(delta in -10..10 && delta != 0) { "滚动幅度无效" }
         send(JSONObject().put("type","scroll").put("delta",delta))
     }
     private fun sendClipboardSet(value: String) {
-        if(value.isEmpty() || value.toByteArray(Charsets.UTF_8).size > 4096) return
+        require(value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size <= 4096) { "剪贴板内容无效" }
         send(JSONObject().put("type","clipboard_set").put("text",value))
     }
 
@@ -795,20 +810,25 @@ internal class AndroidRemoteEngine(
     }
     private fun sendControlText(text:String){
         // Text injection is explicit; never forward private IME/clipboard contents.
-        if(text.isNotBlank() && text.codePointCount(0,text.length) in 1..250) {
-            send(JSONObject().put("type","text").put("text",text))
-            status="已发送文字；请先点击电脑端的微信/聊天输入框并确认允许远控"
-        }
+        require(text.isNotBlank() && text.codePointCount(0,text.length) in 1..250) { "文字长度无效" }
+        send(JSONObject().put("type","text").put("text",text))
+        status="文字指令已发送，等待远端执行"
     }
     private fun sendRemoteKey(name:String){
-        if(!RemoteKeys.isAllowed(name))return
+        require(RemoteKeys.isAllowed(name)) { "按键不在白名单中" }
         send(JSONObject().put("type","key").put("key",name))
     }
     private fun send(data:JSONObject){
-        val s=secret ?:return
-        val ws=socket?:return
-        if(!online)return
-        try{ws.send(encryptPacket(s,2,data.toString().toByteArray()).toByteString())}catch(_:Exception){}
+        val s = requireNotNull(secret) { "尚未建立加密会话" }
+        val ws = requireNotNull(socket) { "远程连接已断开" }
+        require(requested && online && receivingFrames) { "等待已验证的远程画面" }
+        when (data.optString("type")) {
+            "move", "down", "up", "right_click", "scroll", "text", "key" ->
+                require(hostAllowsInput == true) { "被控端尚未授权鼠标键盘" }
+            "clipboard_get", "clipboard_set" ->
+                require(hostAllowsClipboard == true) { "被控端尚未授权剪贴板" }
+        }
+        check(ws.send(encryptPacket(s,2,data.toString().toByteArray()).toByteString())) { "控制指令发送失败" }
     }
     fun close() {
         if (closed) return

@@ -73,6 +73,11 @@ class P2PRemoteController extends ChangeNotifier {
   bool get isAndroid => Platform.isAndroid;
   bool get hostRunning => _snapshot['host_running'] == true;
   bool get viewerConnected => _snapshot['viewer_connected'] == true;
+  bool get viewerRequested => _snapshot['viewer_requested'] == true;
+  bool get viewerAllowsInput => _snapshot['viewer_allow_input'] == true;
+  bool get viewerAllowsClipboard => _snapshot['viewer_allow_clipboard'] == true;
+  String get transport => (_snapshot['transport'] as String?) ?? (viewerConnected ? 'WSS 中转' : '未连接');
+  int? get rttMs => (_snapshot['rtt_ms'] as num?)?.toInt();
   bool get pairingActive => _snapshot['pairing_active'] == true;
   bool get tokenConfigured => _snapshot['token_configured'] == true;
   bool get allowInput => _snapshot['allow_input'] == true;
@@ -89,13 +94,13 @@ class P2PRemoteController extends ChangeNotifier {
 
   int get monitorCount {
     final value = _snapshot['monitors'];
-    if (value is Map<String, dynamic>) return (value['count'] as num?)?.toInt() ?? 1;
+    if (value is Map) return (value['count'] as num?)?.toInt() ?? 1;
     return 1;
   }
 
   int get selectedMonitor {
     final value = _snapshot['monitors'];
-    if (value is Map<String, dynamic>) return (value['selected'] as num?)?.toInt() ?? 0;
+    if (value is Map) return (value['selected'] as num?)?.toInt() ?? 0;
     return 0;
   }
 
@@ -178,6 +183,8 @@ class P2PRemoteController extends ChangeNotifier {
       }
     }
     if (!bridgeAvailable || _command == null || _freeString == null) {
+      lastEvent = bridgeError;
+      notifyListeners();
       return <String, dynamic>{'ok': false, 'error': bridgeError};
     }
     final input = jsonEncode(command).toNativeUtf8();
