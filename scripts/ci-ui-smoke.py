@@ -71,7 +71,7 @@ def windows():
     import pyautogui as gui
     import imageio_ffmpeg
     import threading
-    exe = next(pathlib.Path("dist/v0.20-windows").glob("p2p_remote_ui.exe")).resolve()
+    exe = next(pathlib.Path("dist/v0.21-windows").glob("p2p_remote_ui.exe")).resolve()
     proc = subprocess.Popen([str(exe)], cwd=exe.parent)
     stop = threading.Event()
     errors = []

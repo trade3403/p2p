@@ -200,7 +200,7 @@ class _DesktopSidebar extends StatelessWidget {
               const SizedBox(height: 12),
               const StatusDot(color: P2PColors.mint, label: '原生远控已接入'),
               const SizedBox(height: 9),
-              const Text('V0.20 Flutter + Native', style: TextStyle(color: P2PColors.muted, fontSize: 10)),
+              const Text('V0.21 Flutter + Native', style: TextStyle(color: P2PColors.muted, fontSize: 10)),
             ],
           ),
         ),

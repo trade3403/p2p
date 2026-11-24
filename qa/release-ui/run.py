@@ -36,7 +36,7 @@ REPORT={"role":ROLE,"scope":"actual release client UI on dedicated GitHub runner
 STAGE="initialization"
 WS=None
 KEY=None
-MARKER="P2P-V020-PUBLIC-UI-"+os.environ.get("GITHUB_RUN_ID","local")
+MARKER="P2P-V021-PUBLIC-UI-"+os.environ.get("GITHUB_RUN_ID","local")
 PACKAGE="com.p2p.remote.p2p_remote_ui"
 
 def require(value,reason):
@@ -120,8 +120,11 @@ class Recording:
             while not self.stop.is_set():
                 start=time.monotonic()
                 img=self.capture().convert("RGB")
-                require(img.size[0]>=w and img.size[1]>=h,"Screen geometry changed during recording")
-                writer.send(img.crop((0,0,w,h)).tobytes())
+                # Keep original screen proportions across real portrait/landscape changes.
+                img.thumbnail((w,h))
+                canvas=Image.new("RGB",(w,h))
+                canvas.paste(img,((w-img.width)//2,(h-img.height)//2))
+                writer.send(canvas.tobytes())
                 self.frames+=1
                 self.stop.wait(max(0,.25-(time.monotonic()-start)))
         except Exception as e:
@@ -245,6 +248,28 @@ def remote_point(bounds,xy):
     return [str(round(bounds[0]+xy[0]*(bounds[2]-bounds[0]))),
             str(round(bounds[1]+xy[1]*(bounds[3]-bounds[1])))]
 
+def read_avc_metrics():
+    android_tap("视频性能")
+    def extract():
+        fields=[]
+        for node in android_tree():
+            fields.extend([node.get("text",""),node.get("content-desc","")])
+        for field in fields:
+            if "codec=" in field and "decoder_mode=" in field:
+                items=dict(re.findall(r"(?m)^([a-z_]+)=([^\n]+)",field))
+                if len(items)>=10:
+                    return items
+        return None
+    data=wait("Actual release video diagnostic data",extract,25)
+    android_tap("关闭性能数据")
+    for key in ("frames","bps","rtt","target_bps","target_fps","drops"):
+        data[key]=int(data[key])
+    data["fps"]=float(data["fps"])
+    require(data["codec"]=="H264" and data["frames"]>0,"Actual MediaCodec AVC playback not verified")
+    require(data["encoder"]=="OpenH264 software" and data["decoder"] not in ("","unknown"),"Actual encoder and decoder not reported")
+    require(data["decoder_mode"] in ("hardware","software","unknown"),"Invalid decoder classification")
+    return data
+
 def android():
     global STAGE
     rec=None
@@ -289,6 +314,7 @@ def android():
         find_android("远程输入文字",seconds=45)
         find_android("p2p_remote_video",enabled=False)
         passed("Real numeric pairing and first video in the release Flutter UI")
+        require(android_capture().width>android_capture().height,"Android full-screen did not rotate to landscape")
         STAGE="desktop"
         targets=await_message("targets",seconds=60)
         time.sleep(2)
@@ -312,12 +338,26 @@ def android():
         adb("shell","input","tap",*remote_point(b,moved["edit"]))
         android_tap("远程输入文字")
         android_field("远程文字内容",MARKER,identifier="p2p_remote_text")
+        text_started=time.monotonic()
         android_tap("发送远程文字")
         send("text_sent")
         await_message("text_ok")
+        REPORT["text_ui_to_host_confirmation_ms"]=round((time.monotonic()-text_started)*1000)
+        # Includes automation and rendezvous acknowledgment; not glass-to-glass latency.
         time.sleep(2)
         snapshot(android_capture,"04-notepad-remote-text")
         passed("Remote text verified by Windows independently")
+        STAGE="actual_avc_performance"
+        # Read only user-visible diagnostics backed by actual decoder callbacks.
+        # Existing functional assertions and videos remain mandatory.
+        first=read_avc_metrics()
+        time.sleep(10)
+        second=read_avc_metrics()
+        require(second["frames"]>first["frames"] and second["fps"]>0 and second["bps"]>0
+                and second["rtt"]>=0,"No measured live AVC progress")
+        REPORT["actual_avc_metrics"]={"first":first,"second":second,
+            "scope":"MediaCodec rendered output, received AVC payload bitrate, authenticated RTT; no synthetic data"}
+        passed("Live AVC rendering, actual throughput and RTT measured in landscape release APK")
         STAGE="disconnect"
         android_tap("断开连接")
         find_android("请求连接",enabled=False,seconds=30,scroll=True)
@@ -406,7 +446,7 @@ def windows():
         return [w.left,w.top,w.width,w.height]
     try:
         STAGE="install_release_exe"
-        setup=next(Path("windows-package").rglob("P2PRemote-Setup-v0.20.0.exe"))
+        setup=next(Path("windows-package").rglob("P2PRemote-Setup-v0.21.0.exe"))
         installer=subprocess.run([str(setup.resolve()),"/S"],timeout=120)
         REPORT["installer_exit_code"]=installer.returncode
         print("Release NSIS installer exit code:",installer.returncode,flush=True)

@@ -53,7 +53,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
         return ListView(
           children: [
             PageHeading(
-              eyebrow: 'REMOTE SESSION  /  V0.20',
+              eyebrow: 'REMOTE SESSION  /  V0.21',
               title: '远程控制',
               subtitle: '通过端到端加密会话查看桌面，并发送鼠标、键盘和剪贴板操作。',
               trailing: StatusDot(
@@ -446,7 +446,18 @@ class _RemoteScreenState extends State<RemoteScreen> {
 
   Future<void> _openFullscreen() async {
     _releasePointer();
-    await Navigator.of(context).push<void>(
+    final android = _controller.isAndroid;
+    if (android) {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight,
+      ]);
+    }
+    if (!mounted) {
+      if (android) await SystemChrome.setPreferredOrientations([]);
+      return;
+    }
+    try {
+      await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         fullscreenDialog: true,
         builder: (routeContext) => AnimatedBuilder(
@@ -463,6 +474,10 @@ class _RemoteScreenState extends State<RemoteScreen> {
                     children: [
                       TextButton(onPressed: () => Navigator.of(routeContext).pop(),
                         child: const Text('退出全屏')),
+                      TextButton(
+                        onPressed: () => _showVideoMetrics(routeContext),
+                        child: const Text('视频性能'),
+                      ),
                       TextButton(
                         onPressed: _controller.viewerConnected && _controller.viewerAllowsInput
                             ? () => _fullscreenText(routeContext) : null,
@@ -491,8 +506,43 @@ class _RemoteScreenState extends State<RemoteScreen> {
           ),
         ),
       ),
+      );
+    } finally {
+      _releasePointer();
+      if (android) await SystemChrome.setPreferredOrientations([]);
+    }
+  }
+
+  Future<void> _showVideoMetrics(BuildContext routeContext) async {
+    final s = _controller.snapshot;
+    final codec = s['h264_active'] == true ? 'H264' : 'JPEG';
+    final hardware = s['avc_decoder_hardware'] == true
+        ? 'hardware' : s['avc_decoder_hardware'] == false ? 'software' : 'unknown';
+    final details = 'codec=$codec\n'
+        'frames=${s['avc_rendered_frames'] ?? 0}\n'
+        'fps=${s['rendered_fps'] ?? 0}\n'
+        'bps=${s['measured_video_bps'] ?? 0}\n'
+        'rtt=${s['rtt_ms'] ?? -1}\n'
+        'target_bps=${s['video_target_bps'] ?? 0}\n'
+        'target_fps=${s['video_target_fps'] ?? 0}\n'
+        'drops=${s['avc_decoder_drops'] ?? 0}\n'
+        'encoder=${s['video_encoder'] ?? 'unknown'}\n'
+        'decoder=${s['avc_decoder'] ?? 'unknown'}\n'
+        'decoder_mode=$hardware';
+    await showDialog<void>(
+      context: routeContext,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('实际视频性能'),
+        content: SingleChildScrollView(
+          child: Semantics(
+            identifier: 'p2p_video_metrics',
+            child: Text(details),
+          ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('关闭性能数据'))],
+      ),
     );
-    _releasePointer();
   }
 
   Future<void> _fullscreenText(BuildContext routeContext) async {

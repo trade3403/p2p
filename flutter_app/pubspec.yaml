@@ -1,7 +1,7 @@
 name: p2p_remote_ui
-description: P2P Remote V0.20 Flutter client with native Windows and Android remote bridges.
+description: P2P Remote V0.21 Flutter client with native Windows and Android remote bridges.
 publish_to: none
-version: 0.20.0+20
+version: 0.21.0+21
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

@@ -1,0 +1,115 @@
+name: V0.21 Public Windows Android E2E
+
+on:
+  push:
+    branches: ['feature/v0.21-h264-performance']
+    paths:
+      - '.github/workflows/v21-public-e2e.yml'
+      - 'qa/public-relay/**'
+      - 'android/**'
+      - 'desktop/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2p-v21-public-e2e
+  cancel-in-progress: true
+
+jobs:
+  windows-host:
+    if: github.ref == 'refs/heads/feature/v0.21-h264-performance'
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build real native host
+        run: cargo build --manifest-path desktop/Cargo.toml --lib --no-default-features --release
+      - run: python -m pip install websocket-client==1.8.0 cryptography==46.0.3
+      - name: Real public WSS host and synthetic input target
+        env:
+          RELAY_ACCESS_TOKEN: ${{ secrets.RELAY_ACCESS_TOKEN }}
+        run: python qa/public-relay/run.py host
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: V021-public-host-evidence
+          path: evidence/public-relay-host/
+          if-no-files-found: warn
+          retention-days: 14
+
+  android-viewer:
+    if: github.ref == 'refs/heads/feature/v0.21-h264-performance'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+          cache-read-only: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build Android native engine and instrumentation
+        working-directory: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../evidence/public-relay-android
+          for attempt in 1 2 3; do
+            log="../evidence/public-relay-android/gradle-attempt-$attempt.log"
+            if gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest 2>&1 | tee "$log"; then
+              exit 0
+            fi
+            if ! grep -Eq 'status code 429|HTTP 429|Too Many Requests' "$log"; then
+              echo "::error::Non-rate-limit Gradle failure; not retrying"
+              exit 1
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Maven rate limit persisted after three full build attempts"
+              exit 1
+            fi
+            delay=$((attempt * 60))
+            echo "::warning::Maven HTTP 429; retrying the same full build after ${delay}s"
+            sleep "$delay"
+          done
+          exit 1
+      - name: Install verified protocol and bundled video encoder dependencies
+        run: |
+          python -m pip install websocket-client==1.8.0 cryptography==46.0.3 imageio-ffmpeg==0.6.0
+          python -c "import imageio_ffmpeg, subprocess; subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-version'], check=True)"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Real Android viewer on public relay
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          RELAY_ACCESS_TOKEN: ${{ secrets.RELAY_ACCESS_TOKEN }}
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          script: python qa/public-relay/run.py android
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: V021-public-android-evidence
+          path: |
+            evidence/public-relay-android/
+            android/app/build/test-results/
+          if-no-files-found: warn
+          retention-days: 14

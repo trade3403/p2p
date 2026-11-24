@@ -17,7 +17,7 @@ class SettingsScreen extends StatelessWidget {
           eyebrow: 'PREFERENCES',
           title: '设置',
           subtitle: '查看当前应用配置与本机信息。',
-          trailing: StatusDot(color: P2PColors.mint, label: 'V0.20 原生桥接'),
+          trailing: StatusDot(color: P2PColors.mint, label: 'V0.21 原生桥接'),
         ),
         const SizedBox(height: 24),
         const PanelCard(
@@ -102,7 +102,7 @@ class SettingsScreen extends StatelessWidget {
                       children: [
                         Text('P2P Remote', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
                         SizedBox(height: 3),
-                        Text('V0.20 Android Native Bridge', style: TextStyle(color: P2PColors.muted, fontSize: 11)),
+                        Text('V0.21 Android Native Bridge', style: TextStyle(color: P2PColors.muted, fontSize: 11)),
                       ],
                     ),
                   ),
