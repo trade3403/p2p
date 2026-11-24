@@ -17,58 +17,18 @@ permissions:
 
 concurrency:
   group: p2p-v19-native-integration
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   windows:
     name: Rust native core + Flutter Windows integration
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-latest
     timeout-minutes: 120
     defaults:
       run:
         shell: powershell
     steps:
-      - name: Retrieve exact commit from the official GitHub archive API
-        id: source_archive
-        continue-on-error: true
-        shell: powershell
-        env:
-          GH_SOURCE_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $workspace = $env:GITHUB_WORKSPACE
-          $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-v018-archive-' + $env:GITHUB_RUN_ID)
-          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
-          $zip = Join-Path $archiveRoot 'source.zip'
-          $uri = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/zipball/' + $env:GITHUB_SHA
-          $headers = @{ Authorization = ('Bearer ' + $env:GH_SOURCE_TOKEN); 'User-Agent' = 'p2p-v018-native-ci'; Accept = 'application/vnd.github+json' }
-          Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $zip -UseBasicParsing -TimeoutSec 180
-          if ((Get-Item $zip).Length -lt 1024) { throw 'GitHub repository ZIP archive is empty.' }
-          $unpack = Join-Path $archiveRoot 'extracted'
-          Expand-Archive -Path $zip -DestinationPath $unpack -Force
-          $root = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
-          if (-not $root) { throw 'Official archive contains no repository directory.' }
-          Get-ChildItem -LiteralPath $root.FullName -Force | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $workspace -Recurse -Force
-          }
-          if (-not (Test-Path (Join-Path $workspace 'desktop/Cargo.toml'))) {
-            throw 'Missing desktop/Cargo.toml after archive extraction.'
-          }
-          Write-Host ('Verified source archive checkout for commit ' + $env:GITHUB_SHA)
-
       - uses: actions/checkout@v4
-        if: steps.source_archive.outcome == 'failure'
-
-      - name: Prefer Git Bash over WSL for the Rust toolchain action
-        shell: powershell
-        run: |
-          $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
-          if (-not (Test-Path $bash)) { throw "Git Bash not installed at $bash" }
-          $gitBin = Split-Path -Parent $bash
-          Add-Content -Path $env:GITHUB_PATH -Value $gitBin
-          $env:PATH = $gitBin + ';' + $env:PATH
-          & $bash -c 'echo Git Bash ready'
-          if ($LASTEXITCODE -ne 0) { throw 'Git Bash execution failed' }
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -127,10 +87,8 @@ jobs:
             $path = Join-Path $env:GITHUB_WORKSPACE ('flutter_app\' + $generated)
             if (Test-Path $path) { Remove-Item -LiteralPath $path -Recurse -Force }
           }
-          flutter create --platforms=windows,android --org com.p2p.remote --project-name p2p_remote_ui .
+          flutter create --platforms=windows --org com.p2p.remote --project-name p2p_remote_ui .
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows/Android runner generation failed' }
-          & ..\scripts\prepare-flutter-android.ps1
-          if ($LASTEXITCODE -ne 0) { throw 'Flutter Android native bridge preparation failed' }
           & ..\scripts\prepare-flutter-windows-tray.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows tray preparation failed' }
           $rustDll = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE 'desktop\target\release\p2p_remote.dll')).Path.Replace('\','/')
@@ -208,6 +166,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
           Copy-Item $zip -Destination $artifactDir -Force
           Copy-Item $setup -Destination $artifactDir -Force
+          Get-ChildItem $artifactDir -File | ForEach-Object {
+            (Get-FileHash $_.FullName -Algorithm SHA256).Hash | Set-Content ($_.FullName + '.sha256')
+          }
           Write-Host ('Packaged Windows ZIP and NSIS installer in ' + $artifactDir)
 
       - uses: actions/upload-artifact@v4
@@ -217,40 +178,48 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Windows UI smoke test and recording
+        run: |
+          python -m pip install pyautogui pillow imageio-ffmpeg
+          python scripts/ci-ui-smoke.py windows
+          if ($LASTEXITCODE -ne 0) { throw 'Windows UI smoke test failed' }
+
+      - name: Windows evidence summary
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force evidence/windows | Out-Null
+          "Windows job status: ${{ job.status }}" | Set-Content evidence/windows/job-status.txt
+          "Windows job status: ${{ job.status }}" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Windows-test-evidence
+          path: evidence/windows/
+          retention-days: 14
+
   android:
     name: Flutter Android + Kotlin remote bridge
-    needs: windows
-    if: always()
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-latest
     timeout-minutes: 120
     defaults:
       run:
         shell: powershell
     steps:
-      - name: Retrieve exact source archive for the Android build
-        shell: powershell
-        env:
-          GH_SOURCE_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $archiveRoot = Join-Path $env:RUNNER_TEMP ('p2p-v019-android-' + $env:GITHUB_RUN_ID)
-          New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
-          $zip = Join-Path $archiveRoot 'source.zip'
-          $uri = 'https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/zipball/' + $env:GITHUB_SHA
-          $headers = @{ Authorization = ('Bearer ' + $env:GH_SOURCE_TOKEN); 'User-Agent' = 'p2p-v019-android-ci'; Accept = 'application/vnd.github+json' }
-          Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $zip -UseBasicParsing -TimeoutSec 180
-          $unpack = Join-Path $archiveRoot 'extracted'
-          Expand-Archive -Path $zip -DestinationPath $unpack -Force
-          $root = Get-ChildItem -LiteralPath $unpack -Directory | Select-Object -First 1
-          if (-not $root) { throw 'Android source archive is missing its repository directory.' }
-          Get-ChildItem -LiteralPath $root.FullName -Force | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force
-          }
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Kotlin unit tests
+        working-directory: android
+        run: |
+          gradle --no-daemon :app:testDebugUnitTest
+          if ($LASTEXITCODE -ne 0) { throw 'Kotlin unit tests failed' }
 
       - name: Prepare Flutter and Android SDK
         run: |
@@ -280,6 +249,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Flutter SDK is unavailable.' }
           # flutter doctor --android-licenses is interactive and may block unattended
           # self-hosted runners indefinitely. Check availability without prompting.
+          $sdkmanager = Join-Path $sdk 'cmdline-tools\latest\bin\sdkmanager.bat'
+          if (-not (Test-Path $sdkmanager)) {
+            $sdkmanager = (Get-ChildItem (Join-Path $sdk 'cmdline-tools') -Filter sdkmanager.bat -Recurse | Select-Object -First 1).FullName
+          }
+          if (-not $sdkmanager) { throw 'sdkmanager unavailable' }
+          & $sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+          if ($LASTEXITCODE -ne 0) { throw 'Android SDK install failed' }
           flutter precache --android
           if ($LASTEXITCODE -ne 0) { throw 'Flutter Android engine artifacts could not be precached.' }
           flutter doctor -v
@@ -331,9 +307,99 @@ jobs:
           flutter build apk --release --verbose
           if ($LASTEXITCODE -ne 0) { throw 'Android release APK build failed.' }
 
+      - name: Android checksum
+        run: |
+          $apk = 'flutter_app/build/app/outputs/flutter-apk/app-release.apk'
+          (Get-FileHash $apk -Algorithm SHA256).Hash | Set-Content ($apk + '.sha256')
+
       - uses: actions/upload-artifact@v4
         with:
           name: P2PRemote-V0.19-Android-Release
-          path: flutter_app/build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            flutter_app/build/app/outputs/flutter-apk/app-release.apk
+            flutter_app/build/app/outputs/flutter-apk/app-release.apk.sha256
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Android build and test summary
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force evidence/android-build | Out-Null
+          "Android build status: ${{ job.status }}" | Set-Content evidence/android-build/job-status.txt
+          "Android build status: ${{ job.status }}" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-build-test-evidence
+          path: |
+            evidence/android-build/
+            android/app/build/test-results/
+            android/app/build/reports/tests/
+          retention-days: 14
+
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: Relay tests
+        shell: bash
+        run: |
+          mkdir -p evidence/relay
+          cd relay
+          go test -race -count=1 -json ./... | tee ../evidence/relay/go-test.jsonl
+      - name: Container build
+        run: docker build -t p2p-relay:ci ./relay
+      - name: Relay summary
+        if: always()
+        run: |
+          mkdir -p evidence/relay
+          echo 'Relay status: ${{ job.status }}' | tee evidence/relay/job-status.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Relay-test-evidence
+          path: evidence/relay/
+          retention-days: 14
+
+  android-ui:
+    needs: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: P2PRemote-V0.19-Android-Release
+          path: apk
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install image tools
+        run: python -m pip install pillow
+      - name: Android emulator UI smoke test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          script: python scripts/ci-ui-smoke.py android
+      - name: Android UI summary
+        if: always()
+        run: |
+          mkdir -p evidence/android
+          echo 'Android UI status: ${{ job.status }}' | tee evidence/android/job-status.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-UI-test-evidence
+          path: evidence/android/
           retention-days: 14
