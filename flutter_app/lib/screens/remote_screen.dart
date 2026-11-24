@@ -76,18 +76,23 @@ class _RemoteScreenState extends State<RemoteScreen> {
                   Row(
                     children: [
                       Expanded(
-                        child: TextField(
+                        child: Semantics(
+                          identifier: 'p2p_remote_device_number',
+                          child: TextField(
                           controller: _deviceNumber,
                           enabled: !requested && !_controller.pairingActive,
                           keyboardType: TextInputType.number,
                           inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(9)],
                           onChanged: (_) => setState(() {}),
                           decoration: const InputDecoration(labelText: '9位设备号', hintText: '输入电脑上的设备号'),
+                          ),
                         ),
                       ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: TextField(
+                        child: Semantics(
+                          identifier: 'p2p_remote_pairing_code',
+                          child: TextField(
                           controller: _pairingCode,
                           enabled: !requested && !_controller.pairingActive,
                           keyboardType: TextInputType.number,
@@ -95,6 +100,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                           inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(6)],
                           onChanged: (_) => setState(() {}),
                           decoration: const InputDecoration(labelText: '6位动态验证码', hintText: '一次性验证码'),
+                          ),
                         ),
                       ),
                     ],
@@ -179,10 +185,13 @@ class _RemoteScreenState extends State<RemoteScreen> {
                         child: Text('远程桌面', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
                       ),
                       if (connected)
-                        IconButton(
-                          tooltip: '全屏远控',
-                          onPressed: _openFullscreen,
-                          icon: const Icon(Icons.fullscreen_rounded),
+                        Semantics(
+                          identifier: 'p2p_remote_fullscreen',
+                          child: IconButton(
+                            tooltip: '全屏远控',
+                            onPressed: _openFullscreen,
+                            icon: const Icon(Icons.fullscreen_rounded),
+                          ),
                         ),
                       if (connected && _controller.monitorCount > 1)
                         DropdownButton<int>(
@@ -493,11 +502,14 @@ class _RemoteScreenState extends State<RemoteScreen> {
         context: routeContext,
         builder: (dialogContext) => AlertDialog(
           title: const Text('远程输入文字'),
-          content: TextField(
-            controller: text,
-            autofocus: true,
-            maxLength: 250,
-            decoration: const InputDecoration(labelText: '远程文字内容'),
+          content: Semantics(
+            identifier: 'p2p_remote_text',
+            child: TextField(
+              controller: text,
+              autofocus: true,
+              maxLength: 250,
+              decoration: const InputDecoration(labelText: '远程文字内容'),
+            ),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('取消')),

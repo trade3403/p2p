@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import imageio_ffmpeg
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 import websocket
 
 HOST="p2ptest.aikissgo.com"
@@ -89,6 +89,9 @@ def await_message(kind,seconds=90,repeat=None):
             last=time.monotonic()
         m=recv()
         if m and m.get("type")==kind: return m
+        if not repeat and time.monotonic()-last>20:
+            WS.ping()
+            last=time.monotonic()
     raise AssertionError("Timed out waiting for "+kind)
 
 class Recording:
@@ -149,12 +152,41 @@ def snapshot(capture,name):
     return img
 
 def android_tree():
-    # Never write XML (may contain sensitive field values) to artifacts.
+    # Never export raw UI XML: it may contain sensitive fields.
+    adb("shell","rm","-f","/sdcard/p2p-ui.xml",check=False)
     result=adb("shell","uiautomator","dump","/sdcard/p2p-ui.xml",check=False)
-    if result.returncode: return []
+    if result.returncode:
+        REPORT["ui_dump_failures"]=REPORT.get("ui_dump_failures",0)+1
+        return []
     raw=adb("exec-out","cat","/sdcard/p2p-ui.xml",check=False)
-    try: return list(ET.fromstring(raw.stdout).iter("node"))
-    except ET.ParseError: return []
+    try:
+        nodes=list(ET.fromstring(raw.stdout).iter("node"))
+        REPORT["last_ui_node_count"]=len(nodes)
+        return nodes
+    except ET.ParseError:
+        REPORT["ui_xml_parse_failures"]=REPORT.get("ui_xml_parse_failures",0)+1
+        return []
+
+def android_foreground():
+    raw=adb("shell","dumpsys","activity","activities",check=False).stdout.decode(errors="replace")
+    return any(PACKAGE in line and ("ResumedActivity" in line or "topResumedActivity" in line)
+               for line in raw.splitlines())
+
+def android_nav(index,step):
+    # Identical real touch positions to the successful release APK smoke test.
+    # The page transition must be visible; no internal navigation call.
+    require(android_foreground(),"Release Flutter activity not foreground")
+    before=android_capture()
+    w,h=before.size
+    require(h>w,"Expected portrait release app on emulator")
+    adb("shell","input","tap",str(int(w*((index+.5)/4))),str(int(h*.925)))
+    time.sleep(3)
+    after=snapshot(android_capture,step)
+    box=(w//12,h//14,w*11//12,h*4//5)
+    delta=ImageStat.Stat(ImageChops.difference(before.crop(box).resize((160,160)),
+                 after.crop(box).resize((160,160)))).mean
+    require(sum(delta)/3>.8 and android_foreground(),"Actual Flutter navigation did not change page")
+
 
 def find_android(label,enabled=True,seconds=35,scroll=False,identifier=None):
     attempts=0
@@ -167,6 +199,9 @@ def find_android(label,enabled=True,seconds=35,scroll=False,identifier=None):
             if enabled and a.get("enabled")!="true": continue
             fields=[a.get("text",""),a.get("content-desc",""),a.get("resource-id","")]
             exact=any(label==v or label in v.splitlines() or (label=="p2p_remote_video" and v.endswith(label)) for v in fields)
+            # Flutter often merges a row's title, subtitle and role into one label.
+            if label in ("网络连接","保存中转配置","请求连接","全屏远控","远程输入文字","发送远程文字","断开连接"):
+                exact=exact or any(label in v for v in fields[:2])
             # Flutter EditText accessibility names may combine label and hint.
             edit_match=a.get("class","").endswith("EditText") and any(label in v for v in fields)
             resource=a.get("resource-id","")
@@ -217,9 +252,14 @@ def android():
         apk=next(Path("apk").rglob("app-release.apk"))
         adb("install","-r",str(apk))
         adb("shell","am","start","-W","-n",PACKAGE+"/.MainActivity")
+        time.sleep(8)
+        wait("Release Flutter activity resumed",android_foreground,30)
+        snapshot(android_capture,"00-home-before-credential")
+        # Register the coordinator first so a later UI failure reaches Windows.
+        rendezvous("viewer")
         STAGE="configure_via_flutter_ui"
-        android_tap("我的")
-        android_tap("网络连接")
+        android_nav(3,"00-settings-before-credential")
+        android_tap("网络连接",identifier="p2p_settings_network",scroll=True)
         # Safe pre-credential evidence; do not record the secret entry.
         snapshot(android_capture,"00-network-before-credential")
         android_field("Relay Access Token",TOKEN,scroll=True,identifier="p2p_relay_token")
@@ -227,21 +267,20 @@ def android():
         android_tap("保存中转配置",scroll=True)
         find_android("已通过 Android Keystore 加密保存",enabled=False,scroll=True,
                      identifier="p2p_relay_token_saved",seconds=55)
-        android_tap("远控")
+        android_nav(2,"00-remote-after-credential-saved")
         passed("Installed release Flutter APK and configured public relay through actual UI")
         STAGE="pairing"
-        rendezvous("viewer")
-        pair=await_message("pair",seconds=1200,repeat="ready")
+        pair=await_message("pair",seconds=240,repeat="ready")
         rec=Recording(android_capture,"Android-Release-UI.mp4")
         rec.start()
         snapshot(android_capture,"01-pairing-form")
-        android_field("9位设备号",pair["number"])
-        android_field("6位动态验证码",pair["code"])
+        android_field("9位设备号",pair["number"],identifier="p2p_remote_device_number")
+        android_field("6位动态验证码",pair["code"],identifier="p2p_remote_pairing_code")
         adb("shell","input","keyevent","4")
         android_tap("请求连接")
         send("pair_submitted")
         # Full-screen button exists only after native engine receives authenticated video.
-        android_tap("全屏远控",seconds=65,scroll=True)
+        android_tap("全屏远控",seconds=65,scroll=True,identifier="p2p_remote_fullscreen")
         send("connected")
         find_android("远程输入文字",seconds=45)
         find_android("p2p_remote_video",enabled=False)
@@ -268,7 +307,7 @@ def android():
         b=find_android("p2p_remote_video",enabled=False)
         adb("shell","input","tap",*remote_point(b,moved["edit"]))
         android_tap("远程输入文字")
-        android_field("远程文字内容",MARKER)
+        android_field("远程文字内容",MARKER,identifier="p2p_remote_text")
         android_tap("发送远程文字")
         send("text_sent")
         await_message("text_ok")
@@ -399,7 +438,7 @@ def windows():
         passed("Installed release Windows EXE and configured public relay through actual UI")
         STAGE="pairing"
         rendezvous("host")
-        await_message("ready",seconds=1200)
+        await_message("ready",seconds=300)
         rec=Recording(capture,"Windows-Release-UI.mp4")
         rec.start()
         snapshot(capture,"01-host-home")

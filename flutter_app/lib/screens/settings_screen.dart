@@ -63,11 +63,14 @@ class SettingsScreen extends StatelessWidget {
                 onTap: () => onNavigate(AppPage.security),
               ),
               const Divider(color: P2PColors.outline),
-              _NavigationSetting(
-                icon: Icons.hub_rounded,
-                title: '网络连接',
-                subtitle: 'Relay、局域网直连和诊断',
-                onTap: () => onNavigate(AppPage.network),
+              Semantics(
+                identifier: 'p2p_settings_network',
+                child: _NavigationSetting(
+                  icon: Icons.hub_rounded,
+                  title: '网络连接',
+                  subtitle: 'Relay、局域网直连和诊断',
+                  onTap: () => onNavigate(AppPage.network),
+                ),
               ),
             ],
           ),
