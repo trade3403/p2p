@@ -157,8 +157,8 @@ def host():
                 bridge.cmd("setClipboardAllowed",allowed=True)
                 enabled=True
             if message and message.get("type")=="done":
-                require(approved and enabled and counts=={"clicks":2,"keys":1},
-                        "Host did not observe exactly two remote clicks and one key")
+                require(approved and enabled and counts=={"clicks":3,"keys":2},
+                        "Host did not observe exactly three remote clicks and two keys")
                 REPORT["observed_input"]=counts
                 REPORT["passed"]=True
                 send({"type":"ack"})

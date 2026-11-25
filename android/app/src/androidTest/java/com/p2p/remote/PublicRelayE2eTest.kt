@@ -13,6 +13,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.NetworkInterface
 import java.nio.ByteBuffer
 import java.security.SecureRandom
@@ -138,7 +139,9 @@ class PublicRelayE2eTest {
                     webSocket.close(1000,null)
                 }
             }))
-            server.start(LanEndpoint.PORT)
+            // MockWebServer.start(port) defaults to loopback; the client uses
+            // this literal private IPv4, so bind the same interface explicitly.
+            server.start(InetAddress.getByName(address), LanEndpoint.PORT)
         }
         fun interrupt() {
             check(error.get() == null) { "LAN fixture authentication failed" }
@@ -269,8 +272,10 @@ class PublicRelayE2eTest {
                     lastState.get()=="key" && snap()["viewer_allow_input"]==true
             }
             metrics.put("reconnect_to_verified_frame_ms",SystemClock.elapsedRealtime()-start)
+            click()
+            frame("recovered")
             success("Automatic Android reconnect after real WSS cancellation; input restored")
-            stage="lan_fixture_fallback"
+            stage="lan_fixture_setup"
             // Keep the actual paired root in memory only. Private reflection is
             // confined to instrumentation; no production debug API is added.
             val keyField = AndroidRemoteEngine::class.java.getDeclaredField("secret").apply { isAccessible=true }
@@ -283,25 +288,30 @@ class PublicRelayE2eTest {
                 val hex = root.joinToString("") { "%02x".format(it.toInt() and 255) }
                 lastState.set("")
                 main { connect.invoke(engine,cfg.getString("server"),cfg.getString("token"),hex,lan.address) }
+                stage="lan_fixture_connect"
                 await("authenticated LAN v4 fixture video",20_000) {
                     val s = snap()
                     s["transport"]=="局域网 P2P 直连" && s["viewer_connected"]==true &&
-                        lastState.get()=="key" && (s["relay_socket_opens"] as Number).toLong()==0L
+                        lastState.get()=="recovered" && (s["relay_socket_opens"] as Number).toLong()==0L
                 }
                 success("Actual encrypted LAN socket and fixture JPEG; zero viewer relay opens")
                 lastState.set("")
                 start=SystemClock.elapsedRealtime()
+                stage="lan_fixture_close"
                 lan.interrupt()
+                stage="lan_fallback_public_video"
                 await("LAN close to real public WSS video",45_000) {
                     val s=snap()
                     s["transport"]=="VPS WSS 中转" && s["viewer_connected"]==true &&
-                        lastState.get()=="key" && s["viewer_allow_input"]==true &&
+                        lastState.get()=="recovered" && s["viewer_allow_input"]==true &&
                         s["viewer_allow_clipboard"]==true && (s["relay_socket_opens"] as Number).toLong()>=1L
                 }
                 metrics.put("lan_close_to_public_verified_frame_ms",SystemClock.elapsedRealtime()-start)
                 success("LAN fixture close automatically falls back to real Windows WSS video")
             }
             stage="lan_fallback_input"
+            command("sendKey",mapOf("key" to "enter"))
+            frame("key")
             click()
             frame("recovered")
             val fallbackMarker="P2P-CI-LAN-FALLBACK"
@@ -309,7 +319,7 @@ class PublicRelayE2eTest {
             Thread.sleep(500)
             command("getClipboardText")
             await("clipboard after LAN fallback") { snap()["clipboard_text"]==fallbackMarker }
-            success("Real Windows click and clipboard restored after LAN fallback")
+            success("Real Windows keyboard, click and clipboard restored after LAN fallback")
             stage="disconnect"
             command("disconnectViewer")
             await("manual disconnect") { snap()["viewer_requested"]==false && snap()["viewer_connected"]==false }
