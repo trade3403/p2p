@@ -428,6 +428,7 @@ internal class AndroidRemoteEngine(
             }
             return
         }
+        val handshake = if (tryLan) LanHandshake() else null
         val ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 main.post {
@@ -439,7 +440,7 @@ internal class AndroidRemoteEngine(
                             if(currentKey == null ||
                                 !webSocket.send(
                                     encryptPacket(
-                                        currentKey, 6, "P2P-LAN-HELLO-v1".toByteArray(Charsets.UTF_8)
+                                        currentKey, 6, requireNotNull(handshake).hello()
                                     ).toByteString()
                                 )
                             ) {
@@ -482,11 +483,41 @@ internal class AndroidRemoteEngine(
                     } catch (_: Exception) {}
                     return
                 }
+                // Handle LAN handshake before the decoder gate; all transcript
+                // state is owned by the main thread and bound to this socket.
+                if (tryLan && bytes.size > 0 && (bytes[0].toInt() and 255) == 7) {
+                    try {
+                        val key = secret ?: return
+                        val (kind, payload) = decryptPacket(key, bytes.toByteArray())
+                        if (kind != 7) return
+                        main.post {
+                            if (socket === webSocket && requested && !lanVerified) {
+                                val state = requireNotNull(handshake)
+                                val proof = state.acceptChallenge(payload)
+                                if (proof != null) {
+                                    if (!webSocket.send(encryptPacket(key, 6, proof).toByteString())) {
+                                        webSocket.cancel()
+                                    }
+                                } else if (state.acceptReady(payload)) {
+                                    lanVerified = true
+                                    online = true
+                                    receivingFrames = false
+                                    transport = "局域网 P2P 直连"
+                                    status = "已通过局域网加密验证 · 等待画面"
+                                    startWatchdog()
+                                } else {
+                                    webSocket.cancel()
+                                }
+                            }
+                        }
+                    } catch (_: Exception) { webSocket.cancel() }
+                    return
+                }
                 if (!decoding.compareAndSet(false, true)) return
                 try {
                     val key = secret ?: return
                     val original = decryptPacket(key, bytes.toByteArray())
-                    if (tryLan && !lanVerified && original.first != 7) return
+                    if (tryLan && !lanVerified) return
                     when (original.first) {
                         9 -> {
                             if(original.second.size == 8) {
@@ -498,24 +529,6 @@ internal class AndroidRemoteEngine(
                                         rttMs = (SystemClock.elapsedRealtime() - lastPingTimeMs)
                                             .coerceAtLeast(0)
                                         lastPingTimeMs = 0
-                                    }
-                                }
-                            }
-                        }
-                        7 -> {
-                            if(tryLan &&
-                                original.second.contentEquals(
-                                    "P2P-LAN-READY-v1".toByteArray(Charsets.UTF_8)
-                                )
-                            ){
-                                main.post {
-                                    if(socket===webSocket && requested){
-                                        lanVerified = true
-                                        online = true
-                                        receivingFrames = false
-                                        transport = "局域网 P2P 直连"
-                                        status = "已通过局域网加密验证 · 等待画面"
-                                        startWatchdog()
                                     }
                                 }
                             }

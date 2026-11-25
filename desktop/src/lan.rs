@@ -18,8 +18,26 @@ use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 pub const PORT: u16 = 43821;
 pub const HELLO: u8 = 6;
 pub const READY: u8 = 7;
-const HELLO_PAYLOAD: &[u8] = b"P2P-LAN-HELLO-v1";
-const READY_PAYLOAD: &[u8] = b"P2P-LAN-READY-v1";
+const HELLO_PAYLOAD: &[u8] = b"P2P-LAN-HELLO-v2";
+const CHALLENGE_PAYLOAD: &[u8] = b"P2P-LAN-CHALLENGE-v2";
+const PROOF_PAYLOAD: &[u8] = b"P2P-LAN-PROOF-v2";
+const READY_PAYLOAD: &[u8] = b"P2P-LAN-READY-v2";
+const NONCE_LEN: usize = 32;
+
+fn transcript(prefix: &[u8], client: &[u8], server: &[u8]) -> Vec<u8> {
+    [prefix, client, server].concat()
+}
+
+fn hello_nonce(secret: &[u8;32], packet: &[u8]) -> Option<[u8; NONCE_LEN]> {
+    let (kind, bytes) = protocol::decrypt(secret, packet).ok()?;
+    if kind != HELLO { return None; }
+    bytes.strip_prefix(HELLO_PAYLOAD)?.try_into().ok()
+}
+
+fn matches_proof(secret: &[u8;32], packet: &[u8], client: &[u8], server: &[u8]) -> bool {
+    matches!(protocol::decrypt(secret, packet),
+        Ok((HELLO, bytes)) if bytes == transcript(PROOF_PAYLOAD, client, server))
+}
 
 pub fn is_lan_address(ip: IpAddr) -> bool {
     match ip {
@@ -29,10 +47,7 @@ pub fn is_lan_address(ip: IpAddr) -> bool {
 }
 
 pub fn authorized_hello(secret: &[u8;32], packet: &[u8]) -> bool {
-    match protocol::decrypt(secret, packet) {
-        Ok((kind, bytes)) => kind == HELLO && bytes.as_slice() == HELLO_PAYLOAD,
-        Err(_) => false,
-    }
+    hello_nonce(secret, packet).is_some()
 }
 
 async fn accept_authorized(
@@ -50,15 +65,35 @@ async fn accept_authorized(
     let Message::Binary(packet) = incoming else {
         return Err(anyhow!("LAN authorization requires encrypted binary hello"));
     };
-    if !authorized_hello(&config.secret, &packet) {
-        return Err(anyhow!("LAN client did not prove session key"));
+    let client_nonce = hello_nonce(&config.secret, &packet)
+        .ok_or_else(|| anyhow!("invalid LAN v2 hello"))?;
+    if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
+        return Err(anyhow!("LAN sharing was stopped during authorization"));
+    }
+    // Fresh random host challenge for each socket; captured proofs cannot
+    // authorize a different socket, even when the initial hello is replayed.
+    let server_nonce = protocol::new_secret();
+    let challenge = protocol::encrypt(&config.secret, READY,
+        &transcript(CHALLENGE_PAYLOAD, &client_nonce, &server_nonce))?;
+    tokio::time::timeout(Duration::from_secs(4), socket.send(Message::Binary(challenge)))
+        .await.context("LAN challenge send timed out")??;
+    let incoming = tokio::time::timeout(Duration::from_secs(4), socket.next())
+        .await.context("LAN challenge proof timed out")?
+        .ok_or_else(|| anyhow!("LAN client disconnected before proof"))??;
+    let Message::Binary(proof) = incoming else {
+        return Err(anyhow!("LAN challenge requires encrypted binary proof"));
+    };
+    if !matches_proof(&config.secret, &proof, &client_nonce, &server_nonce) {
+        return Err(anyhow!("invalid LAN challenge proof"));
     }
     // A stop/disable may occur while the handshake is awaiting network I/O.
     if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
         return Err(anyhow!("LAN sharing was stopped during authorization"));
     }
-    let ack = protocol::encrypt(&config.secret, READY, READY_PAYLOAD)?;
-    socket.send(Message::Binary(ack)).await?;
+    let ack = protocol::encrypt(&config.secret, READY,
+        &transcript(READY_PAYLOAD, &client_nonce, &server_nonce))?;
+    tokio::time::timeout(Duration::from_secs(4), socket.send(Message::Binary(ack)))
+        .await.context("LAN ready send timed out")??;
     Ok(socket)
 }
 
@@ -178,12 +213,21 @@ mod tests {
             accept_authorized(stream, &config).await.is_ok()
         });
         let (mut viewer, _) = connect_async(format!("ws://{address}/direct")).await.unwrap();
+        let client = protocol::new_secret();
+        viewer.send(Message::Binary(protocol::encrypt(&key, HELLO,
+            &transcript(HELLO_PAYLOAD, &client, &[])).unwrap())).await.unwrap();
+        let challenge = tokio::time::timeout(Duration::from_secs(5), viewer.next())
+            .await.unwrap().unwrap().unwrap().into_data();
+        let (kind, bytes) = protocol::decrypt(&key, &challenge).unwrap();
+        assert_eq!(kind, READY);
+        let prefix = transcript(CHALLENGE_PAYLOAD, &client, &[]);
+        let server = bytes.strip_prefix(prefix.as_slice()).unwrap();
+        assert_eq!(server.len(), NONCE_LEN);
         if stop_before_proof {
-            // The WebSocket upgrade succeeded, but sharing was revoked before
-            // the encrypted proof arrived. A valid old proof must not get READY.
             running.store(false, Ordering::SeqCst);
         }
-        viewer.send(Message::Binary(protocol::encrypt(&key, HELLO, HELLO_PAYLOAD).unwrap())).await.unwrap();
+        viewer.send(Message::Binary(protocol::encrypt(&key, HELLO,
+            &transcript(PROOF_PAYLOAD, &client, server)).unwrap())).await.unwrap();
         let reply = tokio::time::timeout(Duration::from_secs(5), viewer.next()).await.unwrap();
         if stop_before_proof {
             assert!(!matches!(reply, Some(Ok(Message::Binary(_)))));
@@ -193,14 +237,16 @@ mod tests {
         let ack = reply.unwrap().unwrap().into_data();
         let (kind, contents) = protocol::decrypt(&key, &ack).unwrap();
         assert_eq!(kind, READY);
-        assert_eq!(contents, READY_PAYLOAD);
+        assert_eq!(contents, transcript(READY_PAYLOAD, &client, server));
         assert!(task.await.unwrap());
     }
 
     #[test]
     fn encrypted_hello_is_required() {
         let key = protocol::new_secret();
-        let valid = protocol::encrypt(&key, HELLO, HELLO_PAYLOAD).unwrap();
+        let valid = protocol::encrypt(&key, HELLO, &transcript(HELLO_PAYLOAD, &[1;32], &[])).unwrap();
+        let legacy = protocol::encrypt(&key, HELLO, b"P2P-LAN-HELLO-v1").unwrap();
+        assert!(!authorized_hello(&key, &legacy));
         assert!(authorized_hello(&key, &valid));
         assert!(!authorized_hello(&protocol::new_secret(), &valid));
         let wrong = protocol::encrypt(&key, protocol::CONTROL, HELLO_PAYLOAD).unwrap();
@@ -211,5 +257,21 @@ mod tests {
         let last = tampered.len() - 1;
         tampered[last] ^= 1;
         assert!(!authorized_hello(&key, &tampered));
+    }
+
+    #[test]
+    fn captured_proof_cannot_authorize_a_new_transcript() {
+        let key = protocol::new_secret();
+        let client = [1;32];
+        let old_server = [2;32];
+        let new_server = [3;32];
+        let proof = protocol::encrypt(&key, HELLO,
+            &transcript(PROOF_PAYLOAD, &client, &old_server)).unwrap();
+        assert!(matches_proof(&key, &proof, &client, &old_server));
+        assert!(!matches_proof(&key, &proof, &client, &new_server));
+        assert!(!matches_proof(&key, &proof, &[4;32], &old_server));
+        let reflected = protocol::encrypt(&key, READY,
+            &transcript(CHALLENGE_PAYLOAD, &client, &old_server)).unwrap();
+        assert!(!matches_proof(&key, &reflected, &client, &old_server));
     }
 }
