@@ -689,13 +689,16 @@ def android():
         android_type("-LIVE9")
         send("direct_text_typed")
         await_message("direct_text_ok",seconds=45)
-        android_tap("退格")
-        android_tap("空格")
-        android_type("OK")
-        android_tap("回车")
-        android_type("NEXT")
-        send("direct_edit_typed")
-        await_message("direct_edit_ok",seconds=45)
+        for label,kind,value in [
+            ("backspace","key","退格"),("space","key","空格"),
+            ("word","text","OK"),("enter","key","回车"),("next","text","NEXT"),
+        ]:
+            if kind=="key":
+                android_tap(value)
+            else:
+                android_type(value)
+            send("direct_edit_typed",step=label)
+            await_message("direct_edit_"+label+"_ok",seconds=45)
         snapshot(android_capture,"05g-direct-keyboard-typed")
         android_tap("收起键盘")
         find_android("键盘",seconds=15)
@@ -1016,25 +1019,67 @@ def windows():
         send("stability_text_ok")
         passed("Exact post-stability remote text independently read from Notepad")
         STAGE="direct_keyboard"
+        # Read real Notepad content without selecting, copying, moving the
+        # caret or sending local keyboard input while remote input is in flight.
+        # The previous recording showed -LIVE9, -LIVE, and -LIVE OK, then just
+        # T after the final poll. Ctrl+A/C polling could race remote typing.
         def direct_readback(expected):
-            if ctypes.windll.user32.GetForegroundWindow()!=note._hWnd: return False
-            pyperclip.copy("")
-            gui.hotkey("ctrl","a")
-            gui.hotkey("ctrl","c")
-            time.sleep(.25)
-            value=pyperclip.paste().replace("\r\n","\n")
-            pyperclip.copy("")
-            gui.press("end")
-            return value==expected
+            if ctypes.windll.user32.GetForegroundWindow()!=note._hWnd:
+                return False
+            try:
+                candidates=desktop.window(handle=note._hWnd).descendants(control_type="Edit")
+                for editor in candidates:
+                    if not editor.is_visible():
+                        continue
+                    for read in (lambda: editor.iface_text.DocumentRange.GetText(-1),
+                                 lambda: editor.iface_value.CurrentValue):
+                        try:
+                            value=read()
+                            if isinstance(value,str):
+                                value=value.replace("\r\n","\n")
+                                # UIA TextPattern may expose an implicit final
+                                # paragraph delimiter not present in the file.
+                                if value==expected or value==expected+"\n":
+                                    return True
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            return False
+        REPORT["direct_keyboard_readback"]="read-only Windows UIA Text/Value patterns"
+        REPORT["direct_keyboard_steps"]=[]
         await_message("direct_text_typed",seconds=60)
         prefix=MARKER+"-RECOVERED-STABLE"
         wait("Direct typing arrived without send",lambda: direct_readback(prefix+"-LIVE9"),25)
+        REPORT["direct_keyboard_steps"].append("initial_text")
         send("direct_text_ok")
-        await_message("direct_edit_typed",seconds=60)
-        wait("Direct keyboard Backspace Space Enter and typing",lambda: direct_readback(prefix+"-LIVE OK\nNEXT"),25)
-        snapshot(capture,"11-direct-keyboard-notepad")
+        for step,expected in [
+            ("backspace",prefix+"-LIVE"),
+            ("space",prefix+"-LIVE "),
+            ("word",prefix+"-LIVE OK"),
+            ("enter",prefix+"-LIVE OK\n"),
+            ("next",prefix+"-LIVE OK\nNEXT"),
+        ]:
+            message=await_message("direct_edit_typed",seconds=60)
+            require(message.get("step")==step,"Unexpected direct keyboard step")
+            # Newline needs special care: TextPattern can add its own trailing
+            # delimiter. Independently verify actual native caret line below.
+            if step=="enter":
+                def entered_new_line():
+                    if not direct_readback(expected):
+                        return False
+                    try:
+                        labels=desktop.window(handle=note._hWnd).descendants()
+                        return any(re.search(r"\bLn\s*2\s*,\s*Col\s*1\b",x.element_info.name or "",re.I) for x in labels)
+                    except Exception:
+                        return False
+                wait("Direct keyboard Enter moved actual caret to line 2",entered_new_line,25)
+            else:
+                wait("Direct keyboard "+step,lambda: direct_readback(expected),25)
+            REPORT["direct_keyboard_steps"].append(step)
+            snapshot(capture,"11-direct-keyboard-"+step)
+            send("direct_edit_"+step+"_ok")
         REPORT["direct_keyboard_verified"]=True
-        send("direct_edit_ok")
         passed("Exact live typing and editing independently read from Notepad")
         STAGE="host_confirmation"
         await_message("done",seconds=300)
