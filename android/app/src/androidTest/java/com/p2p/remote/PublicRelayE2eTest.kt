@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
-/** Runs the actual Android native viewer on a disposable emulator. No mock frames. */
+/** Real native viewer and Windows WSS capture; LAN fixture reuses a received JPEG. */
 @RunWith(AndroidJUnit4::class)
 class PublicRelayE2eTest {
     private val inst = InstrumentationRegistry.getInstrumentation()
@@ -75,6 +75,17 @@ class PublicRelayE2eTest {
         private val host = ByteArray(32).also { random.nextBytes(it) }
         private var client: ByteArray? = null
         private var sequence = 0L
+        private var business: ByteArray? = null
+        private var received = 0L
+        private val pongCount = AtomicLong()
+        val authenticatedPongs: Long get() = pongCount.get()
+
+        // Serializes the nonce allocation AND WebSocket enqueue order across
+        // the video worker and the listener's authenticated PONG replies.
+        @Synchronized private fun sendBusiness(ws: WebSocket, key: ByteArray, kind: Int, body: ByteArray) {
+            val nonce = ByteBuffer.allocate(12).putInt(0x484f5354).putLong(++sequence).array()
+            check(ws.send(encode(key,kind,body,nonce)))
+        }
         val address: String
 
         private fun prefix(kind: String) = "P2P-LAN-$kind-v4".toByteArray(Charsets.UTF_8)
@@ -85,10 +96,10 @@ class PublicRelayE2eTest {
             cipher.updateAAD(byteArrayOf(kind.toByte()))
             return (byteArrayOf(kind.toByte()) + nonce + cipher.doFinal(body)).toByteString()
         }
-        private fun decode(packet: ByteArray): ByteArray {
-            require(packet.size >= 30 && packet[0] == 6.toByte())
+        private fun decode(key: ByteArray, packet: ByteArray): ByteArray {
+            require(packet.size >= 29)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(root,"AES"), GCMParameterSpec(128,packet.copyOfRange(1,13)))
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key,"AES"), GCMParameterSpec(128,packet.copyOfRange(1,13)))
             cipher.updateAAD(packet.copyOfRange(0,1))
             return cipher.doFinal(packet.copyOfRange(13,packet.size))
         }
@@ -107,8 +118,22 @@ class PublicRelayE2eTest {
                     try {
                         // Only handshake messages use the root key. The fixture
                         // does not implement remote control or claim LAN input.
-                        if (bytes.size == 0 || bytes[0] != 6.toByte()) return
-                        val body = decode(bytes.toByteArray())
+                        if (bytes.size == 0) return
+                        val packet = bytes.toByteArray()
+                        if (packet[0] == 8.toByte()) {
+                            val key = requireNotNull(business)
+                            val ping = decode(key,packet)
+                            val nonce = ByteBuffer.wrap(packet,1,12)
+                            require(nonce.int == 0x56494557)
+                            val n = nonce.long
+                            require(n > received && n <= 0x7fff_ffffL && ping.size == 8)
+                            received = n
+                            sendBusiness(webSocket,key,9,ping)
+                            pongCount.incrementAndGet()
+                            return
+                        }
+                        if (packet[0] != 6.toByte()) return
+                        val body = decode(root,packet)
                         val current = client
                         if (current == null) {
                             val hello = prefix("HELLO")
@@ -122,11 +147,11 @@ class PublicRelayE2eTest {
                             val mac = Mac.getInstance("HmacSHA256")
                             mac.init(SecretKeySpec(root,"HmacSHA256"))
                             val key = mac.doFinal("P2P-LAN-BUSINESS-v4".toByteArray(Charsets.UTF_8)+current+host)
+                            business = key
                             check(webSocket.send(encode(root,7,prefix("READY")+current+host)))
                             worker.scheduleAtFixedRate({
                                 try {
-                                    val nonce = ByteBuffer.allocate(12).putInt(0x484f5354).putLong(++sequence).array()
-                                    webSocket.send(encode(key,1,jpeg,nonce))
+                                    sendBusiness(webSocket,key,1,jpeg)
                                 } catch (failure: Throwable) { error.compareAndSet(null,failure) }
                             }, 200, 200, TimeUnit.MILLISECONDS)
                         }
@@ -190,6 +215,46 @@ class PublicRelayE2eTest {
         fun frame(name: String) {
             await("authenticated video "+name) { lastState.get()==name && snap()["viewer_connected"]==true }
             lastJpeg.get()?.let { File(out,name+".jpg").writeBytes(it) }
+        }
+        // Each sample uses elapsed realtime and counter deltas, not configured
+        // FPS or target bitrate. RTT observations may repeat between pings.
+        fun sampleTransport(name: String, expected: String, lan: Boolean) {
+            await("$name authenticated RTT",20_000) {
+                val s = snap()
+                s["transport"] == expected && s["viewer_connected"] == true && s["rtt_ms"] is Number
+            }
+            val prefix = if(lan) "viewer_lan" else "viewer_relay"
+            val other = if(lan) "viewer_relay" else "viewer_lan"
+            fun count(s: Map<*,*>, key: String) = (s[key] as Number).toLong()
+            val first = snap()
+            val startFrames = frames.get()
+            val startMs = SystemClock.elapsedRealtime()
+            val rtts = mutableListOf<Long>()
+            var last = first
+            repeat(20) {
+                Thread.sleep(500)
+                last = snap()
+                assertEquals(expected,last["transport"])
+                assertEquals(true,last["viewer_connected"])
+                assertEquals(count(first,"relay_socket_opens"),count(last,"relay_socket_opens"))
+                (last["rtt_ms"] as? Number)?.let { rtts.add(it.toLong()) }
+            }
+            val elapsed = SystemClock.elapsedRealtime()-startMs
+            val decoded = frames.get()-startFrames
+            val bytes = count(last,"${prefix}_video_bytes")-count(first,"${prefix}_video_bytes")
+            val packets = count(last,"${prefix}_video_frames")-count(first,"${prefix}_video_frames")
+            val otherBytes = count(last,"${other}_video_bytes")-count(first,"${other}_video_bytes")
+            assertTrue(decoded>0 && bytes>0 && packets>0 && rtts.isNotEmpty())
+            assertEquals(0L,otherBytes)
+            metrics.put(name,JSONObject()
+                .put("elapsed_ms",elapsed).put("decoded_jpeg_frames",decoded)
+                .put("decoded_jpeg_fps",decoded*1000.0/elapsed)
+                .put("authenticated_video_packets",packets)
+                .put("encrypted_video_bytes",bytes).put("encrypted_video_bps",bytes*8000.0/elapsed)
+                .put("other_transport_video_bytes",otherBytes)
+                .put("rtt_observation_min_ms",rtts.minOrNull())
+                .put("rtt_observation_max_ms",rtts.maxOrNull())
+                .put("rtt_observations",rtts.size))
         }
         fun click() {
             command("sendPointer",mapOf("kind" to "down","x" to .5,"y" to .5))
@@ -265,6 +330,8 @@ class PublicRelayE2eTest {
             await("authenticated RTT") { snap()["rtt_ms"] is Number }
             metrics.put("authenticated_rtt_ms",snap()["rtt_ms"])
             success("Actual received FPS and authenticated RTT")
+            stage="public_performance_sample"
+            sampleTransport("public_live_windows","VPS WSS 中转",false)
             stage="reconnect"
             // Test-only interruption of this viewer's real OkHttp transport.
             // No production debug endpoint or server-side disconnect is added.
@@ -308,6 +375,10 @@ class PublicRelayE2eTest {
                 metrics.put("fixture_lan_video_bytes",(lanStats["viewer_lan_video_bytes"] as Number).toLong())
                 metrics.put("fixture_relay_video_bytes",0)
                 success("Actual encrypted LAN socket and fixture JPEG; zero viewer relay opens and zero admitted relay video bytes")
+                stage="lan_fixture_performance_sample"
+                sampleTransport("lan_local_fixture","局域网 P2P 直连",true)
+                assertTrue("Fixture must answer authenticated application pings",lan.authenticatedPongs>=2)
+                metrics.put("fixture_authenticated_pongs",lan.authenticatedPongs)
                 lastState.set("")
                 start=SystemClock.elapsedRealtime()
                 stage="lan_fixture_close"
@@ -337,6 +408,8 @@ class PublicRelayE2eTest {
             command("getClipboardText")
             await("clipboard after LAN fallback") { snap()["clipboard_text"]==fallbackMarker }
             success("Real Windows keyboard, click and clipboard restored after LAN fallback")
+            stage="fallback_performance_sample"
+            sampleTransport("fallback_live_windows","VPS WSS 中转",false)
             stage="disconnect"
             command("disconnectViewer")
             await("manual disconnect") { snap()["viewer_requested"]==false && snap()["viewer_connected"]==false }
