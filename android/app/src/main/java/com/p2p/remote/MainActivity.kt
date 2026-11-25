@@ -110,17 +110,19 @@ class MainActivity : ComponentActivity() {
     private var h264Active by mutableStateOf(false)
     private var h264Width by mutableIntStateOf(1280)
     private var h264Height by mutableIntStateOf(720)
-    private val avcDecoder by lazy {
+    private val avcDecoder: H264SurfaceDecoder by lazy {
         H264SurfaceDecoder(
-            onRendered = { main.post {
-                if (requested && h264Active) {
+            onRendered = { generation -> main.post {
+                if (requested && h264Active && avcDecoder.isCurrent(generation)) {
                     receivingFrames = true
                     lastFrameAtMs = SystemClock.elapsedRealtime()
                     retryAttempt = 0
                     status = "已连接家庭电脑 · H.264 正在播放"
                 }
             } },
-            onDecoderError = { message -> main.post { if (requested) status = message } },
+            onDecoderError = { generation, message -> main.post {
+                if (requested && avcDecoder.isCurrent(generation)) status = message
+            } },
         )
     }
     private var clipboardResult by mutableStateOf("")
@@ -909,9 +911,11 @@ class MainActivity : ComponentActivity() {
                                         h264Height=accessUnit.height
                                         h264Active=true
                                         frame=null
+                                        // Queue AVC only after the main-thread socket identity
+                                        // check, ordered with disconnect/reset and codec changes.
+                                        avcDecoder.offer(accessUnit.bytes)
                                     }
                                 }
-                                avcDecoder.offer(accessUnit.bytes)
                             }
                         }
                         3 -> {

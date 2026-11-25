@@ -132,11 +132,11 @@ internal class AndroidRemoteEngine(
     private var closed = false
     private var lastEmittedSnapshot: Map<String, Any?>? = null
 
-    private val avcDecoder by lazy {
+    private val avcDecoder: H264SurfaceDecoder by lazy {
         H264SurfaceDecoder(
-            onRendered = {
+            onRendered = { generation ->
                 main.post {
-                    if (requested && h264Active) {
+                    if (requested && h264Active && avcDecoder.isCurrent(generation)) {
                         receivingFrames = true
                         receivedFrames++
                         renderedAvcFrames++
@@ -146,9 +146,9 @@ internal class AndroidRemoteEngine(
                     }
                 }
             },
-            onDecoderError = { message ->
+            onDecoderError = { generation, message ->
                 main.post {
-                    if (requested) {
+                    if (requested && avcDecoder.isCurrent(generation)) {
                         status = message
                         // A codec that cannot start must not leave a black screen.
                         if (avcRequested) {
@@ -615,9 +615,11 @@ internal class AndroidRemoteEngine(
                                         receivedAvcBytes += original.second.size.toLong()
                                         h264Active=true
                                         frame=null
+                                        // Queue AVC only after the main-thread socket identity
+                                        // check, ordered with disconnect/reset and codec changes.
+                                        avcDecoder.offer(accessUnit.bytes)
                                     }
                                 }
-                                avcDecoder.offer(accessUnit.bytes)
                             }
                         }
                         3 -> {

@@ -634,9 +634,84 @@ class PublicRelayE2eTest {
                     .put("decoder",last["avc_decoder"]).put("decoder_hardware",last["avc_decoder_hardware"] ?: JSONObject.NULL)
                     .put("relay_video_bytes",0).put("relay_socket_opens",0)
                     .put("source","FFmpeg synthetic test pattern; emulator-local LAN, not physical Windows capture"))
+                success("Real MediaCodec AVC surface output via encrypted LAN fixture, no viewer relay opens or video")
+                val beforeFallback = snap()
+                val fallbackStart = SystemClock.elapsedRealtime()
+                val beforeSurface = consumer.frames
+                stage="lan_avc_interrupt"
+                lan.interrupt()
+                stage="lan_avc_fallback"
+                // Keep the same engine, key and Surface. Only the fixture
+                // transport closes; the real Windows host negotiates AVC on WSS.
+                val encoders = setOf("OpenH264 software","Media Foundation hardware","Media Foundation D3D11 texture")
+                await("live Windows AVC after LAN interruption",45_000) {
+                    val v=snap()
+                    v["transport"]=="VPS WSS 中转" && v["viewer_connected"]==true &&
+                        v["h264_active"]==true && v["viewer_allow_input"]==true &&
+                        v["viewer_allow_clipboard"]==true &&
+                        v["video_encoder"] in encoders &&
+                        ((v["frame_width"] as Number).toInt()!=320 || (v["frame_height"] as Number).toInt()!=240) &&
+                        (v["relay_socket_opens"] as Number).toLong()>=1L &&
+                        (v["viewer_relay_video_bytes"] as Number).toLong()>0L &&
+                        (v["avc_rendered_frames"] as Number).toLong()>(beforeFallback["avc_rendered_frames"] as Number).toLong() &&
+                        consumer.frames>beforeSurface && v["rtt_ms"] is Number &&
+                        (v["host_encoded_frames"] as Number).toLong()>0
+                }
+                metrics.put("lan_avc_close_to_live_wss_avc_ms",SystemClock.elapsedRealtime()-fallbackStart)
+                val recovered=snap()
+                val recoveredSurface=consumer.frames
+                val recoveredAt=SystemClock.elapsedRealtime()
+                val fallbackSamples=org.json.JSONArray()
+                metrics.put("lan_avc_fallback_samples",fallbackSamples)
+                stage="lan_avc_fallback_stability"
+                repeat(20) {
+                    Thread.sleep(500)
+                    val v=snap()
+                    fallbackSamples.put(JSONObject()
+                        .put("elapsed_ms",SystemClock.elapsedRealtime()-recoveredAt)
+                        .put("transport",v["transport"]).put("h264_active",v["h264_active"])
+                        .put("connected",v["viewer_connected"])
+                        .put("relay_opens",v["relay_socket_opens"])
+                        .put("relay_bytes",v["viewer_relay_video_bytes"])
+                        .put("lan_bytes",v["viewer_lan_video_bytes"])
+                        .put("rendered",v["avc_rendered_frames"])
+                        .put("surface_consumed",consumer.frames)
+                        .put("host_encoded",v["host_encoded_frames"]))
+                    assertEquals("VPS WSS 中转",v["transport"])
+                    assertEquals(true,v["h264_active"])
+                    assertEquals(true,v["viewer_connected"])
+                    assertEquals(recovered["relay_socket_opens"],v["relay_socket_opens"])
+                    assertEquals(recovered["viewer_lan_video_bytes"],v["viewer_lan_video_bytes"])
+                }
+                val end=snap()
+                fun fallbackDelta(k:String)=(end[k] as Number).toLong()-(recovered[k] as Number).toLong()
+                val fallbackMs=SystemClock.elapsedRealtime()-recoveredAt
+                val fallbackFrames=fallbackDelta("avc_rendered_frames")
+                val fallbackBytes=fallbackDelta("viewer_relay_video_bytes")
+                assertTrue(fallbackFrames>0 && fallbackBytes>0 && consumer.frames>recoveredSurface)
+                assertTrue(fallbackDelta("host_encoded_frames")>0 && consumer.errors==0L)
+                assertTrue(end["video_encoder"] in encoders && end["rtt_ms"] is Number)
+                metrics.put("lan_avc_fallback_live_windows",JSONObject()
+                    .put("elapsed_ms",fallbackMs)
+                    .put("rendered_avc_frames",fallbackFrames)
+                    .put("rendered_fps",fallbackFrames*1000.0/fallbackMs)
+                    .put("encrypted_video_bytes",fallbackBytes)
+                    .put("encrypted_video_bps",fallbackBytes*8000.0/fallbackMs)
+                    .put("lan_video_byte_delta",fallbackDelta("viewer_lan_video_bytes"))
+                    .put("surface_consumed_frames",consumer.frames-recoveredSurface)
+                    .put("host_encoded_frame_delta",fallbackDelta("host_encoded_frames"))
+                    .put("width",end["frame_width"]).put("height",end["frame_height"])
+                    .put("encoder",end["video_encoder"]).put("decoder",end["avc_decoder"])
+                    .put("authenticated_rtt_ms",end["rtt_ms"]))
+                stage="lan_avc_fallback_clipboard"
+                val avcMarker="P2P-CI-AVC-FALLBACK"
+                command("setClipboardText",mapOf("text" to avcMarker))
+                Thread.sleep(500)
+                command("getClipboardText")
+                await("clipboard after AVC fallback") { snap()["clipboard_text"]==avcMarker }
+                success("LAN AVC interruption recovered live Windows WSS AVC on same Surface; actual clipboard round trip")
                 stage="lan_avc_disconnect"
                 command("disconnectViewer")
-                success("Real MediaCodec AVC surface output via encrypted LAN fixture, no viewer relay opens or video")
             }
             root.fill(0)
             stage="disconnect"

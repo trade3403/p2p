@@ -18,13 +18,15 @@ import java.util.concurrent.atomic.AtomicInteger
  * A new encoder GOP carries SPS/PPS after reconnect or a mode switch.
  */
 internal class H264SurfaceDecoder(
-    private val onRendered: () -> Unit,
-    private val onDecoderError: (String) -> Unit,
+    private val onRendered: (Long) -> Unit,
+    private val onDecoderError: (Long, String) -> Unit,
 ) {
     private val thread = HandlerThread("P2PRemote-H264").apply { start() }
     private val handler = Handler(thread.looper)
     private val pending = AtomicInteger(0)
     private val closed = AtomicBoolean(false)
+    private val generation = AtomicLong()
+    fun isCurrent(g: Long): Boolean = !closed.get() && generation.get() == g
 
     @Volatile var codecName = ""
         private set
@@ -44,6 +46,7 @@ internal class H264SurfaceDecoder(
             newSurface?.release()
             return
         }
+        generation.incrementAndGet()
         handler.post {
             closeCodec()
             surface?.release()
@@ -53,6 +56,7 @@ internal class H264SurfaceDecoder(
 
     fun offer(packet: ByteArray) {
         if (closed.get()) return
+        val g = generation.get()
         val header = AvcPayload.parse(packet) ?: return
         val w = header.width
         val h = header.height
@@ -64,13 +68,13 @@ internal class H264SurfaceDecoder(
         }
         val accepted = handler.post {
             try {
-                if (!closed.get()) decode(w, h, packet)
+                if (isCurrent(g)) decode(w, h, packet, g)
             } catch (error: Exception) {
                 closeCodec()
                 val now = SystemClock.elapsedRealtime()
-                if (now - lastErrorAt > 5000) {
+                if (isCurrent(g) && now - lastErrorAt > 5000) {
                     lastErrorAt = now
-                    onDecoderError("H.264 解码失败：${error.javaClass.simpleName}")
+                    onDecoderError(g, "H.264 解码失败：${error.javaClass.simpleName}")
                 }
             } finally {
                 pending.decrementAndGet()
@@ -79,7 +83,7 @@ internal class H264SurfaceDecoder(
         if (!accepted) pending.decrementAndGet()
     }
 
-    private fun decode(w: Int, h: Int, packet: ByteArray) {
+    private fun decode(w: Int, h: Int, packet: ByteArray, g: Long) {
         val target = surface ?: return
         if (!target.isValid) return
         // Never decode a dependent P frame after a dropped access unit.
@@ -148,8 +152,9 @@ internal class H264SurfaceDecoder(
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                 else -> {
                     if (outputId >= 0) {
-                        decoder.releaseOutputBuffer(outputId, info.size > 0)
-                        if (info.size > 0) onRendered()
+                        val render = info.size > 0 && isCurrent(g)
+                        decoder.releaseOutputBuffer(outputId, render)
+                        if (render && isCurrent(g)) onRendered(g)
                     }
                 }
             }
@@ -177,11 +182,18 @@ internal class H264SurfaceDecoder(
     }
 
     fun reset() {
-        if (!closed.get()) handler.post { closeCodec() }
+        if (!closed.get()) {
+            generation.incrementAndGet()
+            handler.post {
+                closeCodec()
+                lastErrorAt = 0L
+            }
+        }
     }
 
     fun close() {
         if (!closed.compareAndSet(false, true)) return
+        generation.incrementAndGet()
         handler.post {
             closeCodec()
             surface?.release()
