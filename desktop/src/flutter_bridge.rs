@@ -335,7 +335,8 @@ impl Engine {
             allow_input: allow_input.clone(),
             allow_clipboard: allow_clipboard.clone(),
             monitor_index: monitor_index.clone(),
-            lan_direct: Arc::new(AtomicBool::new(false)),
+            // The pairing coordinator starts the listener only after local approval.
+            lan_direct: Arc::new(AtomicBool::new(true)),
             lan_active: Arc::new(AtomicBool::new(false)),
             allow_udp_probe: Arc::new(AtomicBool::new(false)),
             allow_udp_preview: Arc::new(AtomicBool::new(false)),
