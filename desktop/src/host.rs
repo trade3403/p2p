@@ -155,6 +155,8 @@ where
         tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let mut udp_probe: Option<crate::udp_punch::Probe> = None;
     loop {
+        if !config.running.load(Ordering::SeqCst)
+            || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
         tokio::select! {
             signal = udp_signal_rx.recv() => {
                 if let Some(payload) = signal {
@@ -167,7 +169,8 @@ where
                 }
             }
             frame = frames.recv() => {
-                if !config.running.load(Ordering::SeqCst) { break; }
+                if !config.running.load(Ordering::SeqCst)
+                    || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
                 // When an authenticated LAN viewer is active, do not waste
                 // uplink bandwidth relaying frames to the VPS.
                 if !is_lan_session && (config.lan_active.load(Ordering::SeqCst)
@@ -183,6 +186,8 @@ where
                 config.sent_frames.fetch_add(1, Ordering::Relaxed);
             }
             _ = metadata_tick.tick() => {
+                if !config.running.load(Ordering::SeqCst)
+                    || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
                 #[cfg(windows)]
                 {
                     let count = screenshots::Screen::all().map(|screens| screens.len()).unwrap_or(0);
@@ -217,6 +222,8 @@ where
                 }
             }
             next = incoming.next() => {
+                if !config.running.load(Ordering::SeqCst)
+                    || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
                 // Never accept two simultaneous remote controllers.
                 if !is_lan_session && config.lan_active.load(Ordering::SeqCst) {
                     if matches!(next, Some(Ok(Message::Close(_))) | None) { break; }

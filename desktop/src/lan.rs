@@ -39,6 +39,9 @@ async fn accept_authorized(
     stream: TcpStream,
     config: &HostConfig,
 ) -> Result<WebSocketStream<TcpStream>> {
+    if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
+        return Err(anyhow!("LAN sharing is not active"));
+    }
     let mut socket = tokio::time::timeout(Duration::from_secs(4), accept_async(stream))
         .await.context("LAN websocket handshake timed out")??;
     let incoming = tokio::time::timeout(Duration::from_secs(4), socket.next())
@@ -49,6 +52,10 @@ async fn accept_authorized(
     };
     if !authorized_hello(&config.secret, &packet) {
         return Err(anyhow!("LAN client did not prove session key"));
+    }
+    // A stop/disable may occur while the handshake is awaiting network I/O.
+    if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
+        return Err(anyhow!("LAN sharing was stopped during authorization"));
     }
     let ack = protocol::encrypt(&config.secret, READY, READY_PAYLOAD)?;
     socket.send(Message::Binary(ack)).await?;
@@ -68,7 +75,7 @@ pub fn spawn(config: HostConfig) {
                 "局域网直连已启用 · TCP {} · 仅接收私有 IPv4 和加密配对",
                 PORT
             ));
-            while config.running.load(Ordering::SeqCst) {
+            while config.running.load(Ordering::SeqCst) && config.lan_direct.load(Ordering::SeqCst) {
                 tokio::select! {
                     incoming = listener.accept() => {
                         let (stream, address) = incoming?;
@@ -77,6 +84,9 @@ pub fn spawn(config: HostConfig) {
                         }
                         match accept_authorized(stream, &config).await {
                             Ok(socket) => {
+                                if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
+                                    continue;
+                                }
                                 let _ = config.messages.send(format!(
                                     "局域网直连已验证 · 对端 {}",
                                     address.ip()
@@ -129,6 +139,15 @@ mod tests {
     }
     #[tokio::test]
     async fn loopback_websocket_requires_encrypted_proof_before_ready() {
+        exercise_handshake(false).await;
+    }
+
+    #[tokio::test]
+    async fn loopback_websocket_rejects_proof_after_sharing_stops() {
+        exercise_handshake(true).await;
+    }
+
+    async fn exercise_handshake(stop_before_proof: bool) {
         use std::sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize}, Arc, mpsc};
         use tokio_tungstenite::connect_async;
 
@@ -151,6 +170,7 @@ mod tests {
             dropped_frames: Arc::new(AtomicU64::new(0)),
             messages,
         };
+        let running = config.running.clone();
         let listener = TcpListener::bind(("127.0.0.1",0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -158,8 +178,19 @@ mod tests {
             accept_authorized(stream, &config).await.is_ok()
         });
         let (mut viewer, _) = connect_async(format!("ws://{address}/direct")).await.unwrap();
+        if stop_before_proof {
+            // The WebSocket upgrade succeeded, but sharing was revoked before
+            // the encrypted proof arrived. A valid old proof must not get READY.
+            running.store(false, Ordering::SeqCst);
+        }
         viewer.send(Message::Binary(protocol::encrypt(&key, HELLO, HELLO_PAYLOAD).unwrap())).await.unwrap();
-        let ack = viewer.next().await.unwrap().unwrap().into_data();
+        let reply = tokio::time::timeout(Duration::from_secs(5), viewer.next()).await.unwrap();
+        if stop_before_proof {
+            assert!(!matches!(reply, Some(Ok(Message::Binary(_)))));
+            assert!(!task.await.unwrap());
+            return;
+        }
+        let ack = reply.unwrap().unwrap().into_data();
         let (kind, contents) = protocol::decrypt(&key, &ack).unwrap();
         assert_eq!(kind, READY);
         assert_eq!(contents, READY_PAYLOAD);
