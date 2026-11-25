@@ -5,7 +5,10 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
+import android.opengl.EGL14
+import android.opengl.GLES11Ext
+import android.opengl.GLES20
 import android.view.Surface
 import android.os.SystemClock
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -23,6 +26,7 @@ import java.nio.ByteBuffer
 import java.security.SecureRandom
 import java.util.Collections
 import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -197,6 +201,91 @@ class PublicRelayE2eTest {
         }
     }
 
+    // A SurfaceTexture is a producer/consumer queue. Merely registering a
+    // frame callback leaves buffers unconsumed. Latch actual decoder output
+    // on an EGL-owned thread, independently of the engine/UI thread.
+    private class AvcSurfaceConsumer : AutoCloseable {
+        private val thread = HandlerThread("CI-AVC-consumer").apply { start() }
+        private val handler = Handler(thread.looper)
+        private val consumed = AtomicLong()
+        private val failures = AtomicLong()
+        private var display = EGL14.EGL_NO_DISPLAY
+        private var context = EGL14.EGL_NO_CONTEXT
+        private var pbuffer = EGL14.EGL_NO_SURFACE
+        private var texture: SurfaceTexture? = null
+        val frames: Long get() = consumed.get()
+        val errors: Long get() = failures.get()
+        private fun <T> onThread(block: () -> T): T {
+            val task = FutureTask<T> { block() }
+            check(handler.post(task))
+            return task.get(10,TimeUnit.SECONDS)
+        }
+        val surface: Surface = try {
+            onThread {
+                display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+                check(display != EGL14.EGL_NO_DISPLAY)
+                val version = IntArray(2)
+                check(EGL14.eglInitialize(display,version,0,version,1))
+                val configs = arrayOfNulls<android.opengl.EGLConfig>(1)
+                val count = IntArray(1)
+                check(EGL14.eglChooseConfig(display,intArrayOf(
+                    EGL14.EGL_RENDERABLE_TYPE,EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_SURFACE_TYPE,EGL14.EGL_PBUFFER_BIT,
+                    EGL14.EGL_RED_SIZE,8,EGL14.EGL_GREEN_SIZE,8,EGL14.EGL_BLUE_SIZE,8,
+                    EGL14.EGL_NONE),0,configs,0,1,count,0) && count[0]>0)
+                val config = requireNotNull(configs[0])
+                check(EGL14.eglBindAPI(EGL14.EGL_OPENGL_ES_API))
+                context = EGL14.eglCreateContext(display,config,EGL14.EGL_NO_CONTEXT,
+                    intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION,2,EGL14.EGL_NONE),0)
+                check(context != EGL14.EGL_NO_CONTEXT)
+                pbuffer = EGL14.eglCreatePbufferSurface(display,config,
+                    intArrayOf(EGL14.EGL_WIDTH,1,EGL14.EGL_HEIGHT,1,EGL14.EGL_NONE),0)
+                check(pbuffer != EGL14.EGL_NO_SURFACE)
+                check(EGL14.eglMakeCurrent(display,pbuffer,pbuffer,context))
+                val names = IntArray(1)
+                GLES20.glGenTextures(1,names,0)
+                check(names[0]!=0)
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,names[0])
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MIN_FILTER,GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MAG_FILTER,GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_WRAP_S,GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_WRAP_T,GLES20.GL_CLAMP_TO_EDGE)
+                val target = SurfaceTexture(names[0])
+                texture = target
+                target.setDefaultBufferSize(320,240)
+                target.setOnFrameAvailableListener({
+                    try {
+                        target.updateTexImage()
+                        consumed.incrementAndGet()
+                    } catch (_: Exception) { failures.incrementAndGet() }
+                },handler)
+                Surface(target)
+            }
+        } catch (error: Throwable) {
+            close()
+            throw error
+        }
+        override fun close() {
+            try {
+                onThread {
+                    texture?.setOnFrameAvailableListener(null)
+                    texture?.release()
+                    texture = null
+                    if (display != EGL14.EGL_NO_DISPLAY) {
+                        EGL14.eglMakeCurrent(display,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_CONTEXT)
+                        if(pbuffer != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display,pbuffer)
+                        if(context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display,context)
+                        EGL14.eglTerminate(display)
+                        EGL14.eglReleaseThread()
+                    }
+                }
+            } finally {
+                thread.quitSafely()
+                thread.join(5000)
+            }
+        }
+    }
+
     @Test fun realPublicRelayPairingVideoInputAndRecovery() {
         val ctx = inst.targetContext
         val configFile = File(ctx.filesDir,"ci-private.json")
@@ -214,7 +303,7 @@ class PublicRelayE2eTest {
         var recorded = 0
         var stage = "initialize"
         var engine: AndroidRemoteEngine? = null
-        var avcTexture: SurfaceTexture? = null
+        var avcConsumer: AvcSurfaceConsumer? = null
         fun success(name: String) { steps.put(name) }
         fun invoke(method: String, args: Map<String,Any?> = emptyMap()) =
             main { engine!!.invoke(method,args) }
@@ -438,15 +527,9 @@ class PublicRelayE2eTest {
             }
             assertEquals(20,units.size)
             command("disconnectViewer")
-            val surfaceFrames=AtomicLong()
-            main {
-                val texture=SurfaceTexture(false)
-                texture.setDefaultBufferSize(320,240)
-                texture.setOnFrameAvailableListener({ surfaceFrames.incrementAndGet() },
-                    Handler(Looper.getMainLooper()))
-                avcTexture=texture
-                engine!!.attachVideoSurface(Surface(texture))
-            }
+            val consumer=AvcSurfaceConsumer()
+            avcConsumer=consumer
+            main { engine!!.attachVideoSurface(consumer.surface) }
             LanPeer(root,jpeg,units).use { lan ->
                 val connect=AndroidRemoteEngine::class.java.getDeclaredMethod("connect",
                     String::class.java,String::class.java,String::class.java,String::class.java).apply { isAccessible=true }
@@ -458,18 +541,42 @@ class PublicRelayE2eTest {
                     val v=snap()
                     v["transport"]=="局域网 P2P 直连" && v["h264_active"]==true &&
                         v["viewer_connected"]==true && (v["avc_rendered_frames"] as Number).toLong()>beforeAvc &&
-                        surfaceFrames.get()>0 && v["rtt_ms"] is Number
+                        consumer.frames>0 && v["rtt_ms"] is Number
                 }
                 val initial=snap()
-                val startSurface=surfaceFrames.get()
+                val startSurface=consumer.frames
                 val started=SystemClock.elapsedRealtime()
+                val samples=org.json.JSONArray()
+                metrics.put("lan_avc_samples",samples)
+                fun sample(v:Map<*,*>) {
+                    samples.put(JSONObject()
+                        .put("elapsed_ms",SystemClock.elapsedRealtime()-started)
+                        .put("transport",v["transport"])
+                        .put("connected",v["viewer_connected"])
+                        .put("h264_active",v["h264_active"])
+                        .put("rendered",v["avc_rendered_frames"])
+                        .put("surface_consumed",consumer.frames)
+                        .put("surface_errors",consumer.errors)
+                        .put("decoder_drops",v["avc_decoder_drops"])
+                        .put("lan_video_bytes",v["viewer_lan_video_bytes"])
+                        .put("relay_video_bytes",v["viewer_relay_video_bytes"])
+                        .put("relay_opens",v["relay_socket_opens"])
+                        .put("authenticated_pongs",lan.authenticatedPongs)
+                        .put("rtt_ms",v["rtt_ms"]))
+                }
+                sample(initial)
                 stage="lan_avc_performance"
-                repeat(20) {
+                repeat(20) { index ->
                     Thread.sleep(500)
                     val v=snap()
+                    sample(v)
+                    stage="lan_avc_sample_${index+1}_transport"
                     assertEquals("局域网 P2P 直连",v["transport"])
+                    stage="lan_avc_sample_${index+1}_codec"
                     assertEquals(true,v["h264_active"])
+                    stage="lan_avc_sample_${index+1}_connected"
                     assertEquals(true,v["viewer_connected"])
+                    stage="lan_avc_sample_${index+1}_relay"
                     assertEquals(0L,(v["relay_socket_opens"] as Number).toLong())
                     assertEquals(0L,(v["viewer_relay_video_bytes"] as Number).toLong())
                 }
@@ -478,14 +585,23 @@ class PublicRelayE2eTest {
                 fun delta(key:String)=(last[key] as Number).toLong()-(initial[key] as Number).toLong()
                 val rendered=delta("avc_rendered_frames")
                 val bytes=delta("viewer_lan_video_bytes")
-                val callbacks=surfaceFrames.get()-startSurface
-                assertTrue(rendered>0 && bytes>0 && callbacks>0 && lan.authenticatedPongs>=2)
+                val callbacks=consumer.frames-startSurface
+                stage="lan_avc_render_progress"
+                assertTrue(rendered>0)
+                stage="lan_avc_byte_progress"
+                assertTrue(bytes>0)
+                stage="lan_avc_surface_progress"
+                assertTrue(callbacks>0 && consumer.errors==0L)
+                stage="lan_avc_ping_progress"
+                assertTrue(lan.authenticatedPongs>=2)
+                stage="lan_avc_decoder_identity"
                 assertTrue((last["avc_decoder"] as String).isNotBlank())
                 metrics.put("lan_avc_fixture",JSONObject()
                     .put("elapsed_ms",elapsed).put("rendered_avc_frames",rendered)
                     .put("rendered_fps",rendered*1000.0/elapsed)
                     .put("encrypted_video_bytes",bytes).put("encrypted_video_bps",bytes*8000.0/elapsed)
-                    .put("surface_frame_callbacks",callbacks).put("authenticated_rtt_ms",last["rtt_ms"])
+                    .put("surface_consumed_frames",callbacks).put("surface_errors",consumer.errors)
+                    .put("authenticated_rtt_ms",last["rtt_ms"])
                     .put("decoder",last["avc_decoder"]).put("decoder_hardware",last["avc_decoder_hardware"] ?: JSONObject.NULL)
                     .put("relay_video_bytes",0).put("relay_socket_opens",0)
                     .put("source","FFmpeg synthetic test pattern; emulator-local LAN, not physical Windows capture"))
@@ -507,7 +623,7 @@ class PublicRelayE2eTest {
             throw AssertionError("Public relay E2E failed at "+stage)
         } finally {
             engine?.let { main { it.close() } }
-            avcTexture?.let { main { it.release() } }
+            avcConsumer?.close()
             metrics.put("verified_frames",frames.get()).put("recorded_frames",recorded)
             report.put("metrics",metrics).put("steps",steps)
             File(out,"report.json").writeText(report.toString(2))
