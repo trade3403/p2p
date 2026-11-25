@@ -31,7 +31,16 @@ internal class LanHandshake(private val clientNonce: ByteArray = ByteArray(32).a
         return true
     }
 
-    private fun prefix(kind: String) = "P2P-LAN-$kind-v2".toByteArray(Charsets.UTF_8)
+    fun businessKey(root: ByteArray): ByteArray {
+        check(complete) { "LAN handshake not complete" }
+        val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+        mac.init(javax.crypto.spec.SecretKeySpec(root, "HmacSHA256"))
+        mac.update("P2P-LAN-BUSINESS-v3".toByteArray(Charsets.UTF_8))
+        mac.update(client)
+        return mac.doFinal(requireNotNull(server))
+    }
+
+    private fun prefix(kind: String) = "P2P-LAN-$kind-v3".toByteArray(Charsets.UTF_8)
 }
 
 /** Per-socket authenticated business nonce guard. Called only after AES-GCM

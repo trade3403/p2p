@@ -39,6 +39,8 @@ internal class AndroidRemoteEngine(
         .build()
     private var socket: WebSocket? = null
     private var secret: ByteArray? = null
+    @Volatile private var lanBusinessKey: ByteArray? = null
+    private fun businessKey(): ByteArray? = if (usingLan) lanBusinessKey else secret
     private val decoding = AtomicBoolean(false)
     private var online = false
     private var requested = false
@@ -408,6 +410,7 @@ internal class AndroidRemoteEngine(
         val tryLan = !lanAttempted && lanEndpoint.isNotEmpty()
         if (tryLan) lanAttempted = true
         usingLan = tryLan
+        lanBusinessKey = null
         lanVerified = false
         transport = if(tryLan) "局域网加密直连 · 验证中" else "VPS WSS 中转"
         status = if(tryLan) "尝试局域网直连..." else
@@ -500,6 +503,7 @@ internal class AndroidRemoteEngine(
                                         webSocket.cancel()
                                     }
                                 } else if (state.acceptReady(payload)) {
+                                    lanBusinessKey = state.businessKey(key)
                                     lanVerified = true
                                     online = true
                                     receivingFrames = false
@@ -516,7 +520,7 @@ internal class AndroidRemoteEngine(
                 }
                 if (!decoding.compareAndSet(false, true)) return
                 try {
-                    val key = secret ?: return
+                    val key = (if (tryLan) lanBusinessKey else secret) ?: return
                     val packet = bytes.toByteArray()
                     val original = decryptPacket(key, packet)
                     if (tryLan && !lanVerified) return
@@ -751,7 +755,7 @@ internal class AndroidRemoteEngine(
     }
 
     private fun sendVideoControl(message:JSONObject) {
-        val key=secret ?: return
+        val key=businessKey() ?: return
         val ws=socket ?: return
         if(!requested || !online) return
         ws.send(encryptPacket(key,2,message.toString().toByteArray()).toByteString())
@@ -872,7 +876,7 @@ internal class AndroidRemoteEngine(
     }
 
     private fun sendPing() {
-        val currentKey = secret ?: return
+        val currentKey = businessKey() ?: return
         val ws = socket ?: return
         if(!requested || !online) return
         val nonce = SecureRandom().nextLong()
@@ -904,6 +908,7 @@ internal class AndroidRemoteEngine(
 
     private fun disconnect() {
         requested = false
+        lanBusinessKey = null
         udpProbe?.stop()
         udpProbe = null
         udpAttempted = false
@@ -970,7 +975,7 @@ internal class AndroidRemoteEngine(
         send(JSONObject().put("type","key").put("key",name))
     }
     private fun send(data:JSONObject){
-        val s = requireNotNull(secret) { "尚未建立加密会话" }
+        val s = requireNotNull(businessKey()) { "尚未建立加密会话" }
         val ws = requireNotNull(socket) { "远程连接已断开" }
         require(requested && online && receivingFrames) { "等待已验证的远程画面" }
         when (data.optString("type")) {

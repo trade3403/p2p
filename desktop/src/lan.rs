@@ -18,14 +18,24 @@ use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 pub const PORT: u16 = 43821;
 pub const HELLO: u8 = 6;
 pub const READY: u8 = 7;
-const HELLO_PAYLOAD: &[u8] = b"P2P-LAN-HELLO-v2";
-const CHALLENGE_PAYLOAD: &[u8] = b"P2P-LAN-CHALLENGE-v2";
-const PROOF_PAYLOAD: &[u8] = b"P2P-LAN-PROOF-v2";
-const READY_PAYLOAD: &[u8] = b"P2P-LAN-READY-v2";
+const HELLO_PAYLOAD: &[u8] = b"P2P-LAN-HELLO-v3";
+const CHALLENGE_PAYLOAD: &[u8] = b"P2P-LAN-CHALLENGE-v3";
+const PROOF_PAYLOAD: &[u8] = b"P2P-LAN-PROOF-v3";
+const READY_PAYLOAD: &[u8] = b"P2P-LAN-READY-v3";
 const NONCE_LEN: usize = 32;
 
 fn transcript(prefix: &[u8], client: &[u8], server: &[u8]) -> Vec<u8> {
     [prefix, client, server].concat()
+}
+
+// Domain separation binds the business key to both fresh nonces.
+fn business_key(secret: &[u8;32], client: &[u8], server: &[u8]) -> [u8;32] {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret).expect("32-byte HMAC key");
+    mac.update(b"P2P-LAN-BUSINESS-v3");
+    mac.update(client);
+    mac.update(server);
+    mac.finalize().into_bytes().into()
 }
 
 fn hello_nonce(secret: &[u8;32], packet: &[u8]) -> Option<[u8; NONCE_LEN]> {
@@ -53,7 +63,7 @@ pub fn authorized_hello(secret: &[u8;32], packet: &[u8]) -> bool {
 async fn accept_authorized(
     stream: TcpStream,
     config: &HostConfig,
-) -> Result<WebSocketStream<TcpStream>> {
+) -> Result<(WebSocketStream<TcpStream>, [u8;32])> {
     if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
         return Err(anyhow!("LAN sharing is not active"));
     }
@@ -66,7 +76,7 @@ async fn accept_authorized(
         return Err(anyhow!("LAN authorization requires encrypted binary hello"));
     };
     let client_nonce = hello_nonce(&config.secret, &packet)
-        .ok_or_else(|| anyhow!("invalid LAN v2 hello"))?;
+        .ok_or_else(|| anyhow!("invalid LAN v3 hello"))?;
     if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
         return Err(anyhow!("LAN sharing was stopped during authorization"));
     }
@@ -94,7 +104,7 @@ async fn accept_authorized(
         &transcript(READY_PAYLOAD, &client_nonce, &server_nonce))?;
     tokio::time::timeout(Duration::from_secs(4), socket.send(Message::Binary(ack)))
         .await.context("LAN ready send timed out")??;
-    Ok(socket)
+    Ok((socket, business_key(&config.secret, &client_nonce, &server_nonce)))
 }
 
 pub fn spawn(config: HostConfig) {
@@ -118,7 +128,7 @@ pub fn spawn(config: HostConfig) {
                             continue;
                         }
                         match accept_authorized(stream, &config).await {
-                            Ok(socket) => {
+                            Ok((socket, key)) => {
                                 if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
                                     continue;
                                 }
@@ -129,7 +139,9 @@ pub fn spawn(config: HostConfig) {
                                 // One authorized LAN viewer per host at a time.
                                 // Relay remains connected independently for fallback.
                                 config.lan_active.store(true, Ordering::SeqCst);
-                                let result = host::serve_session(&config, socket, true).await;
+                                let mut lan_config = config.clone();
+                                lan_config.secret = key;
+                                let result = host::serve_session(&lan_config, socket, true).await;
                                 config.lan_active.store(false, Ordering::SeqCst);
                                 if let Err(error) = result {
                                     let _ = config.messages.send(format!(
@@ -210,7 +222,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let Ok(mut socket) = accept_authorized(stream, &config).await else { return false; };
+            let Ok((mut socket, key)) = accept_authorized(stream, &config).await else { return false; };
             // Exercise real encrypted WebSocket traffic after READY, without a Relay.
             // This is a transport integration test, not desktop input injection.
             let request = tokio::time::timeout(Duration::from_secs(5), socket.next())
@@ -265,6 +277,7 @@ mod tests {
         let (kind, contents) = protocol::decrypt(&key, &ack).unwrap();
         assert_eq!(kind, READY);
         assert_eq!(contents, transcript(READY_PAYLOAD, &client, server));
+        let key = business_key(&key, &client, server);
         viewer.send(Message::Binary(protocol::encrypt(&key, protocol::PING,
             &42u64.to_be_bytes()).unwrap())).await.unwrap();
         let reply = tokio::time::timeout(Duration::from_secs(5), viewer.next())
@@ -307,6 +320,19 @@ mod tests {
         let last = tampered.len() - 1;
         tampered[last] ^= 1;
         assert!(!authorized_hello(&key, &tampered));
+    }
+
+    #[test]
+    fn old_business_ciphertext_rejected_under_new_connection_key() {
+        let root = [7;32];
+        let first = business_key(&root, &[1;32], &[2;32]);
+        let second = business_key(&root, &[1;32], &[3;32]);
+        assert_ne!(first, second);
+        assert_ne!(first, root);
+        let packet = protocol::encrypt(&first, protocol::CONTROL, b"command").unwrap();
+        assert!(protocol::decrypt(&first, &packet).is_ok());
+        assert!(protocol::decrypt(&second, &packet).is_err());
+        assert!(protocol::decrypt(&root, &packet).is_err());
     }
 
     #[test]

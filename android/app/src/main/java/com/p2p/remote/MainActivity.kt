@@ -74,6 +74,8 @@ class MainActivity : ComponentActivity() {
     private val client = OkHttpClient.Builder().readTimeout(0,TimeUnit.MILLISECONDS).pingInterval(20,TimeUnit.SECONDS).build()
     private var socket: WebSocket? = null
     private var secret: ByteArray? = null
+    @Volatile private var lanBusinessKey: ByteArray? = null
+    private fun businessKey(): ByteArray? = if (usingLan) lanBusinessKey else secret
     private val decoding = AtomicBoolean(false)
     private var online by mutableStateOf(false)
     private var requested by mutableStateOf(false)
@@ -740,6 +742,7 @@ class MainActivity : ComponentActivity() {
         val tryLan = !lanAttempted && lanEndpoint.isNotEmpty()
         if (tryLan) lanAttempted = true
         usingLan = tryLan
+        lanBusinessKey = null
         lanVerified = false
         transport = if(tryLan) "局域网加密直连 · 验证中" else "VPS WSS 中转"
         status = if(tryLan) "尝试局域网直连..." else
@@ -831,6 +834,7 @@ class MainActivity : ComponentActivity() {
                                         webSocket.cancel()
                                     }
                                 } else if (state.acceptReady(payload)) {
+                                    lanBusinessKey = state.businessKey(key)
                                     lanVerified = true
                                     online = true
                                     receivingFrames = false
@@ -847,7 +851,7 @@ class MainActivity : ComponentActivity() {
                 }
                 if (!decoding.compareAndSet(false, true)) return
                 try {
-                    val key = secret ?: return
+                    val key = (if (tryLan) lanBusinessKey else secret) ?: return
                     val packet = bytes.toByteArray()
                     val original = decryptPacket(key, packet)
                     if (tryLan && !lanVerified) return
@@ -1120,7 +1124,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendPing() {
-        val currentKey = secret ?: return
+        val currentKey = businessKey() ?: return
         val ws = socket ?: return
         if(!requested || !online) return
         val nonce = SecureRandom().nextLong()
@@ -1152,6 +1156,7 @@ class MainActivity : ComponentActivity() {
 
     private fun disconnect() {
         requested = false
+        lanBusinessKey = null
         udpProbe?.stop()
         udpProbe = null
         udpAttempted = false
@@ -1217,7 +1222,7 @@ class MainActivity : ComponentActivity() {
         send(JSONObject().put("type","key").put("key",name))
     }
     private fun send(data:JSONObject){
-        val s=secret ?:return
+        val s=businessKey() ?:return
         val ws=socket?:return
         if(!online)return
         try{ws.send(encryptPacket(s,2,data.toString().toByteArray()).toByteString())}catch(_:Exception){}

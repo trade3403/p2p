@@ -4,7 +4,23 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LanHandshakeTest {
-    private fun prefix(kind: String) = "P2P-LAN-$kind-v2".toByteArray(Charsets.UTF_8)
+    private fun prefix(kind: String) = "P2P-LAN-$kind-v3".toByteArray(Charsets.UTF_8)
+
+    @Test fun businessKeyChangesWithEachHostChallenge() {
+        val root = ByteArray(32) { 7 }
+        val client = ByteArray(32) { 1 }
+        fun key(host: ByteArray): ByteArray {
+            val state = LanHandshake(client)
+            assertNotNull(state.acceptChallenge(prefix("CHALLENGE") + client + host))
+            assertTrue(state.acceptReady(prefix("READY") + client + host))
+            return state.businessKey(root)
+        }
+        val first = key(ByteArray(32) { 2 })
+        assertEquals(32, first.size)
+        assertArrayEquals(first, key(ByteArray(32) { 2 }))
+        assertFalse(first.contentEquals(key(ByteArray(32) { 3 })))
+        assertFalse(first.contentEquals(root))
+    }
 
     @Test fun freshTranscriptRejectsReplayAndLegacyReady() {
         val client = ByteArray(32) { 1 }
