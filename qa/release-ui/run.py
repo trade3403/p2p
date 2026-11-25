@@ -518,6 +518,56 @@ def recovery_step(baseline):
     snapshot(android_capture,"05c-recovered-remote-text")
     evidence["remote_text_verified"]=True
     passed("Exact post-reconnect remote text independently verified by Windows")
+    return verified
+
+def stability_step():
+    """Five-minute minimum continuous real AVC observation after reconnect."""
+    baseline=read_avc_metrics()
+    evidence={"scope":"300-second minimum continuous post-recovery release UI observation; sampled diagnostics, not continuous photon measurements or 24h proof",
+              "minimum_elapsed_seconds":300,"baseline":baseline,"samples":[]}
+    REPORT["avc_stability"]=evidence
+    started=time.monotonic()
+    previous=baseline
+    # The same connection and native counters must survive the entire interval.
+    # Poll at 30s cadence using monotonic deadlines, not frame count or MP4 duration.
+    for index in range(1,11):
+        scheduled=started+30*index
+        time.sleep(max(0,scheduled-time.monotonic()))
+        sample=read_avc_metrics()
+        elapsed=time.monotonic()-started
+        evidence["samples"].append({"elapsed_seconds":round(elapsed,3),**sample})
+        require(sample["relay_socket_opens"]==baseline["relay_socket_opens"] and
+                sample["relay_retry_events"]==baseline["relay_retry_events"],
+                "Unexpected reconnect during continuous AVC stability interval")
+        require(sample["frames"]>previous["frames"] and sample["host_encoded_frames"]>previous["host_encoded_frames"],
+                "No real AVC frame progress in stability interval")
+        require(sample["fps"]>0 and sample["bps"]>0 and sample["rtt"]>=0,
+                "No valid live throughput/RTT in stability interval")
+        require(sample["drops"]>=previous["drops"],"Decoder drop counter unexpectedly reset")
+        previous=sample
+        send("stability_progress",index=index,frames=sample["frames"])
+    elapsed=time.monotonic()-started
+    require(elapsed>=300 and len(evidence["samples"])==10,"Stability interval too short")
+    evidence["elapsed_seconds"]=round(elapsed,3)
+    evidence["rendered_frame_delta"]=previous["frames"]-baseline["frames"]
+    evidence["observed_average_render_fps"]=evidence["rendered_frame_delta"]/elapsed
+    evidence["decoder_drop_delta"]=previous["drops"]-baseline["drops"]
+    evidence["rtt_min_ms"]=min(m["rtt"] for m in evidence["samples"])
+    evidence["rtt_max_ms"]=max(m["rtt"] for m in evidence["samples"])
+    snapshot(android_capture,"05d-stability-complete")
+    passed("Five-minute continuous AVC observation without additional WSS retry")
+    send("stability_ready",elapsed_seconds=evidence["elapsed_seconds"])
+    target=await_message("stability_target",seconds=45)
+    b=find_android("p2p_remote_video",enabled=False)
+    adb("shell","input","tap",*remote_point(b,target["edit"]))
+    android_tap("远程输入文字")
+    android_field("远程文字内容","-STABLE",identifier="p2p_remote_text")
+    android_tap("发送远程文字")
+    send("stability_text_sent")
+    await_message("stability_text_ok",seconds=45)
+    snapshot(android_capture,"05e-stability-remote-text")
+    evidence["remote_text_verified"]=True
+    passed("Exact remote text after continuous AVC observation verified by Windows")
 
 def android():
     global STAGE
@@ -620,6 +670,8 @@ def android():
         restored=weak_network_step(second)
         STAGE="avc_recovery"
         recovery_step(restored)
+        STAGE="avc_stability"
+        stability_step()
         STAGE="disconnect"
         android_tap("断开连接")
         find_android("请求连接",enabled=False,seconds=30,scroll=True)
@@ -909,6 +961,29 @@ def windows():
         REPORT["avc_recovery_text_verified"]=True
         send("recovery_text_ok")
         passed("Exact post-reconnect remote text independently read from Notepad")
+        STAGE="avc_stability"
+        stable=await_message("stability_ready",seconds=540)
+        require(stable["elapsed_seconds"]>=300,"Peer stability interval too short")
+        require(ctypes.windll.user32.GetForegroundWindow()==note._hWnd,"Notepad lost foreground during stability interval")
+        current=rect(note)
+        send("stability_target",edit=normal(current[0]+int(current[2]*.75),current[1]+int(current[3]*.65)))
+        await_message("stability_text_sent",seconds=60)
+        def stable_readback():
+            if ctypes.windll.user32.GetForegroundWindow()!=note._hWnd: return False
+            pyperclip.copy("")
+            gui.hotkey("ctrl","a")
+            gui.hotkey("ctrl","c")
+            time.sleep(.25)
+            value=pyperclip.paste()
+            pyperclip.copy("")
+            return value.strip()==MARKER+"-RECOVERED-STABLE"
+        wait("Exact post-stability remote text in Notepad",stable_readback,20)
+        gui.press("end")
+        snapshot(capture,"10-stability-notepad-text")
+        REPORT["avc_stability_text_verified"]=True
+        REPORT["peer_stability_elapsed_seconds"]=stable["elapsed_seconds"]
+        send("stability_text_ok")
+        passed("Exact post-stability remote text independently read from Notepad")
         STAGE="host_confirmation"
         await_message("done",seconds=90)
         # Recording must be valid before the peer receives final success.
