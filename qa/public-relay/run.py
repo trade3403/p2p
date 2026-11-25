@@ -159,6 +159,7 @@ def host():
         approved=False
         enabled=False
         offered=False
+        REPORT["pairing_progress"]={"offers":0,"approved":False,"pending_seen":False}
         end=time.monotonic()+32*60
         last=0
         while time.monotonic()<end:
@@ -171,15 +172,24 @@ def host():
             now=time.monotonic()
             if message and message.get("type")=="ready" and not approved:
                 s=bridge.cmd("snapshot")
-                if s.get("pairing_code") and s.get("pairing_expires_at",0)>time.time()+45:
-                    send({"type":"pair","number":s["device_number"],"code":s["pairing_code"]})
+                remaining=int(s.get("pairing_expires_at",0)-time.time())
+                if s.get("pairing_code") and remaining>=75:
+                    send({"type":"pair","number":s["device_number"],"code":s["pairing_code"],
+                          "expires_at":s["pairing_expires_at"]})
                     offered=True
+                    REPORT["pairing_progress"]["offers"]+=1
+                    REPORT["pairing_progress"]["offer_remaining_seconds"]=remaining
+                    STAGE="pairing_offer_sent"
             if offered and not approved and now-last>.5:
                 s=bridge.cmd("snapshot")
+                REPORT["pairing_progress"]["host_running"]=bool(s.get("host_running"))
+                REPORT["pairing_progress"]["window_remaining_seconds"]=max(0,int(s.get("pairing_expires_at",0)-time.time()))
                 if s.get("pending_pairing_request_id"):
+                    REPORT["pairing_progress"]["pending_seen"]=True
                     # Only the fresh CI identity and its privately delivered OTP are approved.
                     bridge.cmd("approvePairingRequest",requestId=s["pending_pairing_request_id"])
                     approved=True
+                    REPORT["pairing_progress"]["approved"]=True
                     STAGE="waiting_for_android"
                 last=now
             if message and message.get("type")=="enable" and approved and not enabled:
@@ -298,10 +308,16 @@ def android():
             last=time.monotonic()
         m=receive()
         if m and m.get("type")=="pair":
+            # Ignore a queued offer that no longer has enough validity for
+            # instrumentation startup, HTTPS proof and explicit approval.
+            if int(m.get("expires_at",0))-time.time()<65:
+                continue
             pair=m
             break
     require(pair,"Host did not provide a current CI pairing window")
-    config={"server":"wss://"+HOST,"token":TOKEN,"number":pair["number"],"code":pair["code"]}
+    REPORT["pairing_offer_remaining_seconds"]=int(pair["expires_at"]-time.time())
+    config={"server":"wss://"+HOST,"token":TOKEN,"number":pair["number"],"code":pair["code"],
+            "expires_at":pair["expires_at"]}
     # Transfer over adb stdin into the disposable app's private directory.
     # Never pass credentials as CLI arguments, test properties or artifacts.
     adb("shell","-T","run-as com.p2p.remote sh -c 'mkdir -p files; cat > files/ci-private.json'",

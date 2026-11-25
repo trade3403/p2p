@@ -391,7 +391,36 @@ class PublicRelayE2eTest {
             assertEquals(true,snap()["token_configured"])
             success("Keystore configuration and disconnected command rejection")
             stage="pairing"
+            val remaining=cfg.getLong("expires_at")-System.currentTimeMillis()/1000L
+            metrics.put("pairing_remaining_seconds_at_submit",remaining)
+            assertTrue("Pairing offer expired or too short before submission",remaining>=50)
             command("requestPairing",mapOf("deviceNumber" to cfg.getString("number"),"pairingCode" to cfg.getString("code")))
+            // Only classify known status strings. Never persist an API error
+            // message, device number, OTP, fingerprint or request ID.
+            val pairingSamples=org.json.JSONArray()
+            metrics.put("pairing_samples",pairingSamples)
+            var lastPhase=""
+            await("authenticated initial Windows video",55_000) {
+                val v=snap()
+                val status=v["viewer_status"] as? String ?: ""
+                val phase=when {
+                    status.startsWith("正在发起") -> "starting"
+                    status.startsWith("正在查询设备") -> "lookup"
+                    status.startsWith("验证码已提交") -> "submitting"
+                    status.startsWith("等待电脑端用户确认") -> "pending"
+                    status.startsWith("电脑端已批准") || status.startsWith("配对成功") -> "approved"
+                    v["viewer_requested"]==true -> "connecting"
+                    v["pairing_active"]==true -> "pairing_other"
+                    else -> "terminal_or_idle"
+                }
+                if(phase!=lastPhase) {
+                    pairingSamples.put(JSONObject().put("phase",phase)
+                        .put("requested",v["viewer_requested"])
+                        .put("connected",v["viewer_connected"]))
+                    lastPhase=phase
+                }
+                lastState.get()=="ready" && v["viewer_connected"]==true
+            }
             frame("ready")
             assertEquals("VPS WSS 中转",snap()["transport"])
             success("Real device pairing, explicit host approval, AES-GCM JPEG over public WSS")
