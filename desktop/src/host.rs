@@ -126,7 +126,12 @@ where
 {
     let (mut outgoing, mut incoming) = socket.split();
     // Only authenticated LAN business packets enter this per-connection guard.
-    let mut lan_replay = protocol::ReplayGuard::new(1_000_000);
+    let mut lan_replay = protocol::ReplayGuard::new(protocol::VIEW_DIRECTION);
+    let mut lan_sender = protocol::SequenceSender::new(protocol::HOST_DIRECTION);
+    let mut encrypt = |kind, bytes: &[u8]| {
+        if is_lan_session { lan_sender.encrypt(&config.secret, kind, bytes) }
+        else { protocol::encrypt(&config.secret, kind, bytes) }
+    };
     #[cfg(windows)]
     let remote_input = start_input_worker(
         config.allow_input.clone(), config.monitor_index.clone(),
@@ -175,9 +180,7 @@ where
             signal = udp_signal_rx.recv() => {
                 if let Some(payload) = signal {
                     if config.running.load(Ordering::SeqCst) {
-                        let packet = protocol::encrypt(
-                            &config.secret, crate::udp_punch::SIGNAL, &payload
-                        )?;
+                        let packet = encrypt(crate::udp_punch::SIGNAL, &payload)?;
                         outgoing.send(Message::Binary(packet)).await?;
                     }
                 }
@@ -193,7 +196,7 @@ where
                     return Err(anyhow!("screen capture worker exited unexpectedly"));
                 };
                 let send_start=std::time::Instant::now();
-                let packet = protocol::encrypt(&config.secret, kind, &bytes)?;
+                let packet = encrypt(kind, &bytes)?;
                 tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
                     .await.context("video send timed out")??;
                 crate::video::VideoStats::record(&video_stats.send_total_us,&video_stats.send_samples,send_start);
@@ -232,7 +235,7 @@ where
                         "yuv_cache_hits": video_stats.yuv_cache_hits.load(Ordering::Relaxed),
                         "host_encoded_frames": video_stats.encode_samples.load(Ordering::Relaxed)
                     }).to_string();
-                    let packet = protocol::encrypt(&config.secret, protocol::MONITORS, info.as_bytes())?;
+                    let packet = encrypt(protocol::MONITORS, info.as_bytes())?;
                     outgoing.send(Message::Binary(packet)).await?;
                 }
             }
@@ -279,7 +282,7 @@ where
                             } else if kind == protocol::PING && bytes.len() == 8 {
                                 // Authenticated application-level ping works on both
                                 // LAN direct and WSS relay; no user data is exposed.
-                                let pong = protocol::encrypt(&config.secret, protocol::PONG, &bytes)?;
+                                let pong = encrypt(protocol::PONG, &bytes)?;
                                 outgoing.send(Message::Binary(pong)).await?;
                             } else if kind == protocol::CONTROL {
                             #[cfg(windows)]
@@ -329,9 +332,7 @@ where
                                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                                 if let Ok(text) = clipboard.get_text() {
                                                     if crate::remote_ops::valid_clipboard_text(&text) {
-                                                        let response = protocol::encrypt(
-                                                            &config.secret, protocol::CLIPBOARD, text.as_bytes()
-                                                        )?;
+                                                        let response = encrypt(protocol::CLIPBOARD, text.as_bytes())?;
                                                         outgoing.send(Message::Binary(response)).await?;
                                                     }
                                                 }

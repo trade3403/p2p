@@ -18,10 +18,10 @@ use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 pub const PORT: u16 = 43821;
 pub const HELLO: u8 = 6;
 pub const READY: u8 = 7;
-const HELLO_PAYLOAD: &[u8] = b"P2P-LAN-HELLO-v3";
-const CHALLENGE_PAYLOAD: &[u8] = b"P2P-LAN-CHALLENGE-v3";
-const PROOF_PAYLOAD: &[u8] = b"P2P-LAN-PROOF-v3";
-const READY_PAYLOAD: &[u8] = b"P2P-LAN-READY-v3";
+const HELLO_PAYLOAD: &[u8] = b"P2P-LAN-HELLO-v4";
+const CHALLENGE_PAYLOAD: &[u8] = b"P2P-LAN-CHALLENGE-v4";
+const PROOF_PAYLOAD: &[u8] = b"P2P-LAN-PROOF-v4";
+const READY_PAYLOAD: &[u8] = b"P2P-LAN-READY-v4";
 const NONCE_LEN: usize = 32;
 
 fn transcript(prefix: &[u8], client: &[u8], server: &[u8]) -> Vec<u8> {
@@ -32,7 +32,7 @@ fn transcript(prefix: &[u8], client: &[u8], server: &[u8]) -> Vec<u8> {
 fn business_key(secret: &[u8;32], client: &[u8], server: &[u8]) -> [u8;32] {
     use hmac::{Hmac, Mac};
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret).expect("32-byte HMAC key");
-    mac.update(b"P2P-LAN-BUSINESS-v3");
+    mac.update(b"P2P-LAN-BUSINESS-v4");
     mac.update(client);
     mac.update(server);
     mac.finalize().into_bytes().into()
@@ -76,7 +76,7 @@ async fn accept_authorized(
         return Err(anyhow!("LAN authorization requires encrypted binary hello"));
     };
     let client_nonce = hello_nonce(&config.secret, &packet)
-        .ok_or_else(|| anyhow!("invalid LAN v3 hello"))?;
+        .ok_or_else(|| anyhow!("invalid LAN v4 hello"))?;
     if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
         return Err(anyhow!("LAN sharing was stopped during authorization"));
     }
@@ -223,20 +223,25 @@ mod tests {
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let Ok((mut socket, key)) = accept_authorized(stream, &config).await else { return false; };
+            let mut sender = protocol::SequenceSender::new(protocol::HOST_DIRECTION);
+            let mut guard = protocol::ReplayGuard::new(protocol::VIEW_DIRECTION);
             // Exercise real encrypted WebSocket traffic after READY, without a Relay.
             // This is a transport integration test, not desktop input injection.
             let request = tokio::time::timeout(Duration::from_secs(5), socket.next())
                 .await.unwrap().unwrap().unwrap().into_data();
             let (kind, payload) = protocol::decrypt(&key, &request).unwrap();
+            assert!(guard.accept(&request));
+            assert!(!guard.accept(&request));
             assert_eq!(kind, protocol::PING);
             assert_eq!(payload, 42u64.to_be_bytes());
-            socket.send(Message::Binary(protocol::encrypt(&key, protocol::PONG, &payload).unwrap()))
+            socket.send(Message::Binary(sender.encrypt(&key, protocol::PONG, &payload).unwrap()))
                 .await.unwrap();
             for expected in [br#"{"type":"move","x":0.5,"y":0.5}"#.as_slice(),
                 br#"{"type":"clipboard_set","text":"LAN test"}"#.as_slice()] {
                 let packet = tokio::time::timeout(Duration::from_secs(5), socket.next())
                     .await.unwrap().unwrap().unwrap().into_data();
                 let (kind, payload) = protocol::decrypt(&key, &packet).unwrap();
+                assert!(guard.accept(&packet));
                 assert_eq!(kind, protocol::CONTROL);
                 assert_eq!(payload.as_slice(), expected);
             }
@@ -245,9 +250,9 @@ mod tests {
             let mut jpeg = Vec::new();
             image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
                 .encode(&pixels, 2, 2, image::ColorType::Rgb8).unwrap();
-            socket.send(Message::Binary(protocol::encrypt(&key, protocol::FRAME, &jpeg).unwrap()))
+            socket.send(Message::Binary(sender.encrypt(&key, protocol::FRAME, &jpeg).unwrap()))
                 .await.unwrap();
-            socket.send(Message::Binary(protocol::encrypt(&key, protocol::CLIPBOARD, b"LAN test").unwrap()))
+            socket.send(Message::Binary(sender.encrypt(&key, protocol::CLIPBOARD, b"LAN test").unwrap()))
                 .await.unwrap();
             true
         });
@@ -278,27 +283,32 @@ mod tests {
         assert_eq!(kind, READY);
         assert_eq!(contents, transcript(READY_PAYLOAD, &client, server));
         let key = business_key(&key, &client, server);
-        viewer.send(Message::Binary(protocol::encrypt(&key, protocol::PING,
+        let mut sender = protocol::SequenceSender::new(protocol::VIEW_DIRECTION);
+        let mut guard = protocol::ReplayGuard::new(protocol::HOST_DIRECTION);
+        viewer.send(Message::Binary(sender.encrypt(&key, protocol::PING,
             &42u64.to_be_bytes()).unwrap())).await.unwrap();
         let reply = tokio::time::timeout(Duration::from_secs(5), viewer.next())
             .await.unwrap().unwrap().unwrap().into_data();
         let (kind, payload) = protocol::decrypt(&key, &reply).unwrap();
+        assert!(guard.accept(&reply));
         assert_eq!(kind, protocol::PONG);
         assert_eq!(payload, 42u64.to_be_bytes());
         for command in [br#"{"type":"move","x":0.5,"y":0.5}"#.as_slice(),
             br#"{"type":"clipboard_set","text":"LAN test"}"#.as_slice()] {
-            viewer.send(Message::Binary(protocol::encrypt(&key, protocol::CONTROL, command).unwrap()))
+            viewer.send(Message::Binary(sender.encrypt(&key, protocol::CONTROL, command).unwrap()))
                 .await.unwrap();
         }
         let packet = tokio::time::timeout(Duration::from_secs(5), viewer.next())
             .await.unwrap().unwrap().unwrap().into_data();
         let (kind, payload) = protocol::decrypt(&key, &packet).unwrap();
+        assert!(guard.accept(&packet));
         assert_eq!(kind, protocol::FRAME);
         let decoded = image::load_from_memory_with_format(&payload, image::ImageFormat::Jpeg).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (2, 2));
         let packet = tokio::time::timeout(Duration::from_secs(5), viewer.next())
             .await.unwrap().unwrap().unwrap().into_data();
         let (kind, payload) = protocol::decrypt(&key, &packet).unwrap();
+        assert!(guard.accept(&packet));
         assert_eq!(kind, protocol::CLIPBOARD);
         assert_eq!(payload.as_slice(), b"LAN test");
         assert!(task.await.unwrap());

@@ -35,26 +35,41 @@ internal class LanHandshake(private val clientNonce: ByteArray = ByteArray(32).a
         check(complete) { "LAN handshake not complete" }
         val mac = javax.crypto.Mac.getInstance("HmacSHA256")
         mac.init(javax.crypto.spec.SecretKeySpec(root, "HmacSHA256"))
-        mac.update("P2P-LAN-BUSINESS-v3".toByteArray(Charsets.UTF_8))
+        mac.update("P2P-LAN-BUSINESS-v4".toByteArray(Charsets.UTF_8))
         mac.update(client)
         return mac.doFinal(requireNotNull(server))
     }
 
-    private fun prefix(kind: String) = "P2P-LAN-$kind-v3".toByteArray(Charsets.UTF_8)
+    private fun prefix(kind: String) = "P2P-LAN-$kind-v4".toByteArray(Charsets.UTF_8)
 }
 
-/** Per-socket authenticated business nonce guard. Called only after AES-GCM
- * verification. No eviction: duplicates remain rejected until disconnect.
- * Compact fixed-width representation avoids retaining frame payloads.
+/** LAN v4: independent directions, fixed-size state, no nonce reuse.
+ * All outgoing messages are serialized on the UI thread.
  */
-internal class LanReplayGuard(private val limit: Int = 1_000_000) {
-    private data class Nonce(val first: Long, val last: Int)
-    private val seen = HashSet<Nonce>()
-    val full: Boolean get() = seen.size >= limit
+internal class LanSequence {
+    private var sent = 0L
+    private var received = 0L
 
-    fun accept(packet: ByteArray): Boolean {
-        if (packet.size < 13 || full) return false
+    @Synchronized fun nextNonce(): ByteArray {
+        check(sent < MAX_SEQUENCE) { "LAN sequence exhausted" }
+        sent++
+        return java.nio.ByteBuffer.allocate(12).putInt(VIEW).putLong(sent).array()
+    }
+
+    // Call only after AES-GCM authentication.
+    @Synchronized fun accept(packet: ByteArray): Boolean {
+        if (packet.size < 13) return false
         val nonce = java.nio.ByteBuffer.wrap(packet, 1, 12)
-        return seen.add(Nonce(nonce.long, nonce.int))
+        if (nonce.int != HOST) return false
+        val sequence = nonce.long
+        if (sequence <= received || sequence > MAX_SEQUENCE) return false
+        received = sequence
+        return true
+    }
+
+    companion object {
+        private const val HOST = 0x484f5354
+        private const val VIEW = 0x56494557
+        private const val MAX_SEQUENCE = 0x7fff_ffffL
     }
 }

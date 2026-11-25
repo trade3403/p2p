@@ -40,6 +40,11 @@ internal class AndroidRemoteEngine(
     private var socket: WebSocket? = null
     private var secret: ByteArray? = null
     @Volatile private var lanBusinessKey: ByteArray? = null
+    private var lanSequence: LanSequence? = null
+    private fun encryptBusiness(key: ByteArray, kind: Int, plain: ByteArray): ByteArray {
+        val nonce = if (usingLan) requireNotNull(lanSequence).nextNonce() else null
+        return encryptPacket(key, kind, plain, nonce)
+    }
     private fun businessKey(): ByteArray? = if (usingLan) lanBusinessKey else secret
     private val decoding = AtomicBoolean(false)
     private var online = false
@@ -432,7 +437,8 @@ internal class AndroidRemoteEngine(
             return
         }
         val handshake = if (tryLan) LanHandshake() else null
-        val replayGuard = if (tryLan) LanReplayGuard() else null
+        val replayGuard = if (tryLan) LanSequence() else null
+        lanSequence = replayGuard
         val ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 main.post {
@@ -524,10 +530,7 @@ internal class AndroidRemoteEngine(
                     val packet = bytes.toByteArray()
                     val original = decryptPacket(key, packet)
                     if (tryLan && !lanVerified) return
-                    if (replayGuard != null && !replayGuard.accept(packet)) {
-                        if (replayGuard.full) webSocket.cancel()
-                        return
-                    }
+                    if (replayGuard != null && !replayGuard.accept(packet)) return
                     when (original.first) {
                         9 -> {
                             if(original.second.size == 8) {
@@ -758,7 +761,7 @@ internal class AndroidRemoteEngine(
         val key=businessKey() ?: return
         val ws=socket ?: return
         if(!requested || !online) return
-        ws.send(encryptPacket(key,2,message.toString().toByteArray()).toByteString())
+        ws.send(encryptBusiness(key,2,message.toString().toByteArray()).toByteString())
     }
 
     private fun startWatchdog() {
@@ -883,7 +886,7 @@ internal class AndroidRemoteEngine(
         lastPingNonce = nonce
         lastPingTimeMs = SystemClock.elapsedRealtime()
         try {
-            ws.send(encryptPacket(currentKey, 8,
+            ws.send(encryptBusiness(currentKey, 8,
                 ByteBuffer.allocate(8).putLong(nonce).array()).toByteString())
         } catch (_: Exception) {}
     }
@@ -909,6 +912,7 @@ internal class AndroidRemoteEngine(
     private fun disconnect() {
         requested = false
         lanBusinessKey = null
+        lanSequence = null
         udpProbe?.stop()
         udpProbe = null
         udpAttempted = false
@@ -984,7 +988,7 @@ internal class AndroidRemoteEngine(
             "clipboard_get", "clipboard_set" ->
                 require(hostAllowsClipboard == true) { "被控端尚未授权剪贴板" }
         }
-        check(ws.send(encryptPacket(s,2,data.toString().toByteArray()).toByteString())) { "控制指令发送失败" }
+        check(ws.send(encryptBusiness(s,2,data.toString().toByteArray()).toByteString())) { "控制指令发送失败" }
     }
     fun close() {
         if (closed) return
@@ -1004,8 +1008,8 @@ private fun decodeKey(hex:String):ByteArray{
 }
 private fun sha256(bytes:ByteArray)=MessageDigest.getInstance("SHA-256").digest(bytes)
 private fun ByteArray.toHex():String=joinToString("") {"%02x".format(it.toInt() and 0xff)}
-private fun encryptPacket(key:ByteArray,kind:Int,plain:ByteArray):ByteArray{
-    val nonce=ByteArray(12).also {SecureRandom().nextBytes(it)}
+private fun encryptPacket(key:ByteArray,kind:Int,plain:ByteArray, suppliedNonce:ByteArray? = null):ByteArray{
+    val nonce=suppliedNonce ?: ByteArray(12).also {SecureRandom().nextBytes(it)}
     val cipher=javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(javax.crypto.Cipher.ENCRYPT_MODE,javax.crypto.spec.SecretKeySpec(key,"AES"),javax.crypto.spec.GCMParameterSpec(128,nonce))
     cipher.updateAAD(byteArrayOf(kind.toByte()))

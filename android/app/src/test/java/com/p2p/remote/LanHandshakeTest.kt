@@ -4,7 +4,26 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LanHandshakeTest {
-    private fun prefix(kind: String) = "P2P-LAN-$kind-v3".toByteArray(Charsets.UTF_8)
+    private fun prefix(kind: String) = "P2P-LAN-$kind-v4".toByteArray(Charsets.UTF_8)
+
+    @Test fun orderedNoncesRejectReplayAndWrongDirection() {
+        val sequence = LanSequence()
+        val first = java.nio.ByteBuffer.wrap(sequence.nextNonce())
+        assertEquals(0x56494557, first.int)
+        assertEquals(1L, first.long)
+        val second = java.nio.ByteBuffer.wrap(sequence.nextNonce())
+        assertEquals(0x56494557, second.int)
+        assertEquals(2L, second.long)
+        fun packet(direction: Int, count: Long) =
+            java.nio.ByteBuffer.allocate(13).put(1.toByte()).putInt(direction).putLong(count).array()
+        assertFalse(sequence.accept(packet(0x56494557, 1)))
+        assertTrue(sequence.accept(packet(0x484f5354, 1)))
+        assertFalse(sequence.accept(packet(0x484f5354, 1)))
+        assertTrue(sequence.accept(packet(0x484f5354, 1_000_001)))
+        assertFalse(sequence.accept(packet(0x484f5354, 2)))
+        assertFalse(sequence.accept(packet(0x484f5354, 0x8000_0000L)))
+        assertTrue(sequence.accept(packet(0x484f5354, 1_000_002)))
+    }
 
     @Test fun businessKeyChangesWithEachHostChallenge() {
         val root = ByteArray(32) { 7 }

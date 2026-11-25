@@ -38,9 +38,13 @@ pub fn room_id(secret: &[u8; 32]) -> String {
 }
 
 pub fn encrypt(secret: &[u8; 32], kind: u8, plaintext: &[u8]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(secret).map_err(|_| anyhow!("invalid key"))?;
     let mut nonce = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
+    encrypt_with_nonce(secret, kind, plaintext, nonce)
+}
+
+fn encrypt_with_nonce(secret: &[u8;32], kind: u8, plaintext: &[u8], nonce: [u8;12]) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(secret).map_err(|_| anyhow!("invalid key"))?;
     let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: &[kind] })
         .map_err(|_| anyhow!("encryption failed"))?;
     let mut result = Vec::with_capacity(1 + nonce.len() + ciphertext.len());
@@ -58,24 +62,43 @@ pub fn decrypt(secret: &[u8; 32], packet: &[u8]) -> Result<(u8, Vec<u8>)> {
     Ok((packet[0], plaintext))
 }
 
-/// Reject duplicate authenticated packet nonces without evicting old entries.
-/// A full guard fails closed; callers must establish a fresh authorized session.
-pub(crate) struct ReplayGuard {
-    seen: std::collections::HashSet<[u8; 12]>,
-    limit: usize,
+// LAN v4 uses direction-separated GCM nonces and monotonic counters.
+// Never reset these counters without deriving a fresh connection key.
+pub(crate) const HOST_DIRECTION: [u8;4] = *b"HOST";
+pub(crate) const VIEW_DIRECTION: [u8;4] = *b"VIEW";
+const MAX_SEQUENCE: u64 = 0x7fff_ffff;
+
+pub(crate) struct SequenceSender {
+    direction: [u8;4],
+    last: u64,
+}
+impl SequenceSender {
+    pub(crate) fn new(direction: [u8;4]) -> Self { Self { direction, last: 0 } }
+    pub(crate) fn encrypt(&mut self, secret: &[u8;32], kind: u8, bytes: &[u8]) -> Result<Vec<u8>> {
+        anyhow::ensure!(self.last < MAX_SEQUENCE, "LAN sequence exhausted");
+        self.last += 1;
+        let mut nonce = [0u8;12];
+        nonce[..4].copy_from_slice(&self.direction);
+        nonce[4..].copy_from_slice(&self.last.to_be_bytes());
+        encrypt_with_nonce(secret, kind, bytes, nonce)
+    }
 }
 
+/// Call only after GCM authentication. WebSocket preserves packet ordering;
+/// gaps are allowed because a decoder may intentionally skip video packets.
+pub(crate) struct ReplayGuard {
+    direction: [u8;4],
+    last: u64,
+}
 impl ReplayGuard {
-    pub(crate) fn new(limit: usize) -> Self {
-        Self { seen: std::collections::HashSet::new(), limit }
-    }
-
+    pub(crate) fn new(direction: [u8;4]) -> Self { Self { direction, last: 0 } }
     pub(crate) fn accept(&mut self, packet: &[u8]) -> bool {
-        let Some(nonce) = packet.get(1..13).and_then(|bytes| <[u8; 12]>::try_from(bytes).ok()) else {
-            return false;
-        };
-        if self.seen.len() >= self.limit { return false; }
-        self.seen.insert(nonce)
+        let Some(nonce) = packet.get(1..13) else { return false; };
+        if nonce[..4] != self.direction { return false; }
+        let sequence = u64::from_be_bytes(nonce[4..].try_into().unwrap());
+        if sequence <= self.last || sequence > MAX_SEQUENCE { return false; }
+        self.last = sequence;
+        true
     }
 }
 
@@ -94,19 +117,26 @@ mod tests {
         assert!(decrypt(&secret, &packet).is_err());
     }
     #[test]
-    fn replay_guard_rejects_duplicates_and_fails_closed_at_capacity() {
+    fn ordered_nonce_guard_rejects_replays_and_wrong_direction() {
         let key = new_secret();
-        let a = encrypt(&key, CONTROL, b"first").unwrap();
-        let b = encrypt(&key, CONTROL, b"second").unwrap();
-        let c = encrypt(&key, CONTROL, b"third").unwrap();
-        let mut guard = ReplayGuard::new(2);
+        let mut tx = SequenceSender::new(VIEW_DIRECTION);
+        let mut guard = ReplayGuard::new(VIEW_DIRECTION);
+        let a = tx.encrypt(&key, CONTROL, b"first").unwrap();
+        let b = tx.encrypt(&key, CONTROL, b"second").unwrap();
+        let c = tx.encrypt(&key, CONTROL, b"third").unwrap();
+        let reflected = SequenceSender::new(HOST_DIRECTION).encrypt(&key, CONTROL, b"other").unwrap();
         assert!(!guard.accept(&[]));
         assert!(decrypt(&key, &a).is_ok());
         assert!(guard.accept(&a));
         assert!(!guard.accept(&a));
-        assert!(guard.accept(&b));
+        assert!(!guard.accept(&reflected));
+        assert!(guard.accept(&c));
+        assert!(!guard.accept(&b));
         assert!(!guard.accept(&c));
-        assert!(!guard.accept(&a));
+        let mut near = SequenceSender { direction: VIEW_DIRECTION, last: MAX_SEQUENCE-1 };
+        let last = near.encrypt(&key, CONTROL, b"last").unwrap();
+        assert!(guard.accept(&last));
+        assert!(near.encrypt(&key, CONTROL, b"overflow").is_err());
     }
 
     #[test]
