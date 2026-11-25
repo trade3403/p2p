@@ -87,7 +87,29 @@ class PublicRelayE2eTest {
         private var business: ByteArray? = null
         private var received = 0L
         private val pongCount = AtomicLong()
+        private val codecRequests = AtomicLong()
+        private val sentVideo = AtomicLong()
+        private val avcStarted = java.util.concurrent.atomic.AtomicBoolean(false)
         val authenticatedPongs: Long get() = pongCount.get()
+        val authenticatedCodecRequests: Long get() = codecRequests.get()
+        val sentVideoPackets: Long get() = sentVideo.get()
+        val failureType: String? get() = error.get()?.javaClass?.simpleName
+
+        private fun startVideo(ws: WebSocket, key: ByteArray) {
+            if (!avcStarted.compareAndSet(false,true)) return
+            var index = 0
+            // Do not emit catch-up bursts after the emulator or worker stalls.
+            worker.scheduleWithFixedDelay({
+                try {
+                    if (avc.isEmpty()) sendBusiness(ws,key,1,jpeg)
+                    else {
+                        sendBusiness(ws,key,5,avc[index])
+                        index=(index+1)%avc.size
+                    }
+                    sentVideo.incrementAndGet()
+                } catch (failure: Throwable) { error.compareAndSet(null,failure) }
+            }, 200, if(avc.isEmpty()) 200 else 100, TimeUnit.MILLISECONDS)
+        }
 
         // Serializes the nonce allocation AND WebSocket enqueue order across
         // the video worker and the listener's authenticated PONG replies.
@@ -129,16 +151,26 @@ class PublicRelayE2eTest {
                         // does not implement remote control or claim LAN input.
                         if (bytes.size == 0) return
                         val packet = bytes.toByteArray()
-                        if (packet[0] == 8.toByte()) {
+                        if (packet[0] == 8.toByte() || packet[0] == 2.toByte()) {
                             val key = requireNotNull(business)
-                            val ping = decode(key,packet)
+                            val body = decode(key,packet)
                             val nonce = ByteBuffer.wrap(packet,1,12)
                             require(nonce.int == 0x56494557)
                             val n = nonce.long
-                            require(n > received && n <= 0x7fff_ffffL && ping.size == 8)
+                            require(n > received && n <= 0x7fff_ffffL)
                             received = n
-                            sendBusiness(webSocket,key,9,ping)
-                            pongCount.incrementAndGet()
+                            if (packet[0] == 8.toByte()) {
+                                require(body.size == 8)
+                                sendBusiness(webSocket,key,9,body)
+                                pongCount.incrementAndGet()
+                            } else {
+                                val control=JSONObject(body.toString(Charsets.UTF_8))
+                                if (control.optString("type")=="video_codec" &&
+                                    control.optString("codec")=="h264") {
+                                    codecRequests.incrementAndGet()
+                                    if(avc.isNotEmpty()) startVideo(webSocket,key)
+                                }
+                            }
                             return
                         }
                         if (packet[0] != 6.toByte()) return
@@ -158,16 +190,9 @@ class PublicRelayE2eTest {
                             val key = mac.doFinal("P2P-LAN-BUSINESS-v4".toByteArray(Charsets.UTF_8)+current+host)
                             business = key
                             check(webSocket.send(encode(root,7,prefix("READY")+current+host)))
-                            var index = 0
-                            worker.scheduleAtFixedRate({
-                                try {
-                                    if (avc.isEmpty()) sendBusiness(webSocket,key,1,jpeg)
-                                    else {
-                                        sendBusiness(webSocket,key,5,avc[index])
-                                        index=(index+1)%avc.size
-                                    }
-                                } catch (failure: Throwable) { error.compareAndSet(null,failure) }
-                            }, 200, if(avc.isEmpty()) 200 else 100, TimeUnit.MILLISECONDS)
+                            // JPEG compatibility starts immediately. AVC starts
+                            // only after authenticated viewer codec negotiation.
+                            if(avc.isEmpty()) startVideo(webSocket,key)
                         }
                     } catch (failure: Throwable) {
                         error.compareAndSet(null,failure)
@@ -566,11 +591,39 @@ class PublicRelayE2eTest {
                 val beforeAvc=(snap()["avc_rendered_frames"] as Number).toLong()
                 main { connect.invoke(engine,cfg.getString("server"),cfg.getString("token"),hex,lan.address) }
                 stage="lan_avc_decode"
+                val startup=org.json.JSONArray()
+                metrics.put("lan_avc_startup_samples",startup)
+                val startupAt=SystemClock.elapsedRealtime()
+                var lastStartup=0L
                 await("real MediaCodec LAN surface output",30_000) {
                     val v=snap()
+                    val now=SystemClock.elapsedRealtime()
+                    if(now-lastStartup>=500) {
+                        startup.put(JSONObject()
+                            .put("elapsed_ms",now-startupAt)
+                            .put("transport",v["transport"])
+                            .put("connected",v["viewer_connected"])
+                            .put("h264_active",v["h264_active"])
+                            .put("width",v["frame_width"]).put("height",v["frame_height"])
+                            .put("rendered",v["avc_rendered_frames"])
+                            .put("avc_received_bytes",v["avc_received_bytes"])
+                            .put("surface_consumed",consumer.frames)
+                            .put("surface_errors",consumer.errors)
+                            .put("decoder",v["avc_decoder"])
+                            .put("decoder_drops",v["avc_decoder_drops"])
+                            .put("lan_video_bytes",v["viewer_lan_video_bytes"])
+                            .put("relay_opens",v["relay_socket_opens"])
+                            .put("rtt_ms",v["rtt_ms"] ?: JSONObject.NULL)
+                            .put("fixture_sent",lan.sentVideoPackets)
+                            .put("fixture_codec_requests",lan.authenticatedCodecRequests)
+                            .put("fixture_pongs",lan.authenticatedPongs)
+                            .put("fixture_error",lan.failureType ?: JSONObject.NULL))
+                        lastStartup=now
+                    }
                     v["transport"]=="局域网 P2P 直连" && v["h264_active"]==true &&
                         v["viewer_connected"]==true && (v["avc_rendered_frames"] as Number).toLong()>beforeAvc &&
-                        consumer.frames>0 && v["rtt_ms"] is Number
+                        consumer.frames>0 && v["rtt_ms"] is Number &&
+                        lan.authenticatedCodecRequests>0 && lan.failureType==null
                 }
                 val initial=snap()
                 val startSurface=consumer.frames
