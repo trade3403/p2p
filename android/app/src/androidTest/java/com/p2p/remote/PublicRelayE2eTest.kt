@@ -3,6 +3,10 @@ package com.p2p.remote
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.SurfaceTexture
+import android.os.Handler
+import android.os.Looper
+import android.view.Surface
 import android.os.SystemClock
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -66,7 +70,8 @@ class PublicRelayE2eTest {
 
     // A test-only LAN peer using real TCP/WebSocket and v4 AES-GCM. The JPEG
     // is a previously received Windows frame, NOT a live Windows LAN capture.
-    private class LanPeer(private val root: ByteArray, private val jpeg: ByteArray) : AutoCloseable {
+    private class LanPeer(private val root: ByteArray, private val jpeg: ByteArray,
+        private val avc: List<ByteArray> = emptyList()) : AutoCloseable {
         private val server = MockWebServer()
         private val worker = Executors.newSingleThreadScheduledExecutor()
         private val peer = AtomicReference<WebSocket>()
@@ -149,11 +154,16 @@ class PublicRelayE2eTest {
                             val key = mac.doFinal("P2P-LAN-BUSINESS-v4".toByteArray(Charsets.UTF_8)+current+host)
                             business = key
                             check(webSocket.send(encode(root,7,prefix("READY")+current+host)))
+                            var index = 0
                             worker.scheduleAtFixedRate({
                                 try {
-                                    sendBusiness(webSocket,key,1,jpeg)
+                                    if (avc.isEmpty()) sendBusiness(webSocket,key,1,jpeg)
+                                    else {
+                                        sendBusiness(webSocket,key,5,avc[index])
+                                        index=(index+1)%avc.size
+                                    }
                                 } catch (failure: Throwable) { error.compareAndSet(null,failure) }
-                            }, 200, 200, TimeUnit.MILLISECONDS)
+                            }, 200, if(avc.isEmpty()) 200 else 100, TimeUnit.MILLISECONDS)
                         }
                     } catch (failure: Throwable) {
                         error.compareAndSet(null,failure)
@@ -194,7 +204,7 @@ class PublicRelayE2eTest {
         configFile.delete()
         require(cfg.getString("server") == "wss://p2ptest.aikissgo.com")
         val out = File(ctx.filesDir,"e2e").apply { deleteRecursively(); mkdirs() }
-        val report = JSONObject().put("scope","actual AndroidRemoteEngine and native Windows Host via public WSS; LAN peer is an emulator-local encrypted fixture, not a physical Windows LAN host")
+        val report = JSONObject().put("scope","actual AndroidRemoteEngine and native Windows Host via public WSS; LAN peer is an emulator-local encrypted fixture (received JPEG and FFmpeg AVC test pattern), not a physical Windows LAN host")
         val metrics = JSONObject()
         val steps = org.json.JSONArray()
         val lastState = AtomicReference("")
@@ -204,6 +214,7 @@ class PublicRelayE2eTest {
         var recorded = 0
         var stage = "initialize"
         var engine: AndroidRemoteEngine? = null
+        var avcTexture: SurfaceTexture? = null
         fun success(name: String) { steps.put(name) }
         fun invoke(method: String, args: Map<String,Any?> = emptyMap()) =
             main { engine!!.invoke(method,args) }
@@ -410,6 +421,79 @@ class PublicRelayE2eTest {
             success("Real Windows keyboard, click and clipboard restored after LAN fallback")
             stage="fallback_performance_sample"
             sampleTransport("fallback_live_windows","VPS WSS 中转",false)
+            // Independent AVC session, after every live Windows/JPEG assertion.
+            // This is an encoded test pattern, not a physical LAN host capture.
+            stage="lan_avc_setup"
+            val fixtureFile=File(ctx.filesDir,"ci-lan-avc.bin")
+            val fixture=ByteBuffer.wrap(fixtureFile.readBytes())
+            fixtureFile.delete()
+            val units=mutableListOf<ByteArray>()
+            while(fixture.hasRemaining()) {
+                val size=fixture.int
+                require(size in 9..fixture.remaining())
+                val unit=ByteArray(size)
+                fixture.get(unit)
+                requireNotNull(AvcPayload.parse(unit))
+                units.add(unit)
+            }
+            assertEquals(20,units.size)
+            command("disconnectViewer")
+            val surfaceFrames=AtomicLong()
+            main {
+                val texture=SurfaceTexture(false)
+                texture.setDefaultBufferSize(320,240)
+                texture.setOnFrameAvailableListener({ surfaceFrames.incrementAndGet() },
+                    Handler(Looper.getMainLooper()))
+                avcTexture=texture
+                engine!!.attachVideoSurface(Surface(texture))
+            }
+            LanPeer(root,jpeg,units).use { lan ->
+                val connect=AndroidRemoteEngine::class.java.getDeclaredMethod("connect",
+                    String::class.java,String::class.java,String::class.java,String::class.java).apply { isAccessible=true }
+                val hex=root.joinToString("") { "%02x".format(it.toInt() and 255) }
+                val beforeAvc=(snap()["avc_rendered_frames"] as Number).toLong()
+                main { connect.invoke(engine,cfg.getString("server"),cfg.getString("token"),hex,lan.address) }
+                stage="lan_avc_decode"
+                await("real MediaCodec LAN surface output",30_000) {
+                    val v=snap()
+                    v["transport"]=="局域网 P2P 直连" && v["h264_active"]==true &&
+                        v["viewer_connected"]==true && (v["avc_rendered_frames"] as Number).toLong()>beforeAvc &&
+                        surfaceFrames.get()>0 && v["rtt_ms"] is Number
+                }
+                val initial=snap()
+                val startSurface=surfaceFrames.get()
+                val started=SystemClock.elapsedRealtime()
+                stage="lan_avc_performance"
+                repeat(20) {
+                    Thread.sleep(500)
+                    val v=snap()
+                    assertEquals("局域网 P2P 直连",v["transport"])
+                    assertEquals(true,v["h264_active"])
+                    assertEquals(true,v["viewer_connected"])
+                    assertEquals(0L,(v["relay_socket_opens"] as Number).toLong())
+                    assertEquals(0L,(v["viewer_relay_video_bytes"] as Number).toLong())
+                }
+                val last=snap()
+                val elapsed=SystemClock.elapsedRealtime()-started
+                fun delta(key:String)=(last[key] as Number).toLong()-(initial[key] as Number).toLong()
+                val rendered=delta("avc_rendered_frames")
+                val bytes=delta("viewer_lan_video_bytes")
+                val callbacks=surfaceFrames.get()-startSurface
+                assertTrue(rendered>0 && bytes>0 && callbacks>0 && lan.authenticatedPongs>=2)
+                assertTrue((last["avc_decoder"] as String).isNotBlank())
+                metrics.put("lan_avc_fixture",JSONObject()
+                    .put("elapsed_ms",elapsed).put("rendered_avc_frames",rendered)
+                    .put("rendered_fps",rendered*1000.0/elapsed)
+                    .put("encrypted_video_bytes",bytes).put("encrypted_video_bps",bytes*8000.0/elapsed)
+                    .put("surface_frame_callbacks",callbacks).put("authenticated_rtt_ms",last["rtt_ms"])
+                    .put("decoder",last["avc_decoder"]).put("decoder_hardware",last["avc_decoder_hardware"] ?: JSONObject.NULL)
+                    .put("relay_video_bytes",0).put("relay_socket_opens",0)
+                    .put("source","FFmpeg synthetic test pattern; emulator-local LAN, not physical Windows capture"))
+                stage="lan_avc_disconnect"
+                command("disconnectViewer")
+                success("Real MediaCodec AVC surface output via encrypted LAN fixture, no viewer relay opens or video")
+            }
+            root.fill(0)
             stage="disconnect"
             command("disconnectViewer")
             await("manual disconnect") { snap()["viewer_requested"]==false && snap()["viewer_connected"]==false }
@@ -423,6 +507,7 @@ class PublicRelayE2eTest {
             throw AssertionError("Public relay E2E failed at "+stage)
         } finally {
             engine?.let { main { it.close() } }
+            avcTexture?.let { main { it.release() } }
             metrics.put("verified_frames",frames.get()).put("recorded_frames",recorded)
             report.put("metrics",metrics).put("steps",steps)
             File(out,"report.json").writeText(report.toString(2))

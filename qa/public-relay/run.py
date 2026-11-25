@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import struct
 from pathlib import Path
 import secrets
 import subprocess
@@ -220,6 +222,28 @@ def encode_evidence(expected_frames):
         frame.unlink()
 
 
+def make_lan_avc_fixture(ffmpeg):
+    # Real encoded test pattern, not Windows capture or measured host performance.
+    # AUD starts each access unit; closed GOPs repeat SPS/PPS for safe looping.
+    result=subprocess.run([ffmpeg,"-hide_banner","-loglevel","error","-f","lavfi",
+        "-i","testsrc2=size=320x240:rate=10","-frames:v","20",
+        "-c:v","libx264","-preset","ultrafast","-tune","zerolatency",
+        "-pix_fmt","yuv420p","-x264-params","aud=1:repeat-headers=1:keyint=10:min-keyint=10:scenecut=0:open-gop=0:bframes=0",
+        "-f","h264","pipe:1"],capture_output=True,check=True)
+    raw=result.stdout
+    starts=list(re.finditer(rb"\x00\x00(?:\x00)?\x01",raw))
+    aud=[m.start() for m in starts if m.end()<len(raw) and raw[m.end()]&31==9]
+    require(len(aud)==20 and aud[0]==0,"Unexpected AVC fixture access unit boundaries")
+    units=[raw[a:b] for a,b in zip(aud,aud[1:]+[len(raw)])]
+    for index in (0,10):
+        nals=[units[index][m.end()]&31 for m in re.finditer(rb"\x00\x00(?:\x00)?\x01",units[index])
+              if m.end()<len(units[index])]
+        require(all(n in nals for n in (7,8,5)),"AVC fixture GOP lacks SPS/PPS/IDR")
+    payload=b"".join(struct.pack(">IHH",len(unit)+4,320,240)+unit for unit in units)
+    require(len(payload)<2*1024*1024,"AVC fixture unexpectedly large")
+    return payload
+
+
 def android():
     global STAGE,WS
     STAGE="video_encoder_preflight"
@@ -229,6 +253,9 @@ def android():
     STAGE="install"
     adb("install","-r","android/app/build/outputs/apk/debug/app-debug.apk")
     adb("install","-r","android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk")
+    STAGE="lan_avc_fixture"
+    fixture=make_lan_avc_fixture(imageio_ffmpeg.get_ffmpeg_exe())
+    adb("shell","-T","run-as com.p2p.remote sh -c 'mkdir -p files; cat > files/ci-lan-avc.bin'",data=fixture)
     STAGE="rendezvous"
     WS=rendezvous("viewer")
     until=time.monotonic()+20*60
