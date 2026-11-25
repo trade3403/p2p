@@ -220,6 +220,23 @@ mod tests {
             assert_eq!(payload, 42u64.to_be_bytes());
             socket.send(Message::Binary(protocol::encrypt(&key, protocol::PONG, &payload).unwrap()))
                 .await.unwrap();
+            for expected in [br#"{"type":"move","x":0.5,"y":0.5}"#.as_slice(),
+                br#"{"type":"clipboard_set","text":"LAN test"}"#.as_slice()] {
+                let packet = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                    .await.unwrap().unwrap().unwrap().into_data();
+                let (kind, payload) = protocol::decrypt(&key, &packet).unwrap();
+                assert_eq!(kind, protocol::CONTROL);
+                assert_eq!(payload.as_slice(), expected);
+            }
+            // Encode actual JPEG bytes rather than a fabricated video payload.
+            let pixels = [255u8, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+                .encode(&pixels, 2, 2, image::ColorType::Rgb8).unwrap();
+            socket.send(Message::Binary(protocol::encrypt(&key, protocol::FRAME, &jpeg).unwrap()))
+                .await.unwrap();
+            socket.send(Message::Binary(protocol::encrypt(&key, protocol::CLIPBOARD, b"LAN test").unwrap()))
+                .await.unwrap();
             true
         });
         let (mut viewer, _) = connect_async(format!("ws://{address}/direct")).await.unwrap();
@@ -255,6 +272,22 @@ mod tests {
         let (kind, payload) = protocol::decrypt(&key, &reply).unwrap();
         assert_eq!(kind, protocol::PONG);
         assert_eq!(payload, 42u64.to_be_bytes());
+        for command in [br#"{"type":"move","x":0.5,"y":0.5}"#.as_slice(),
+            br#"{"type":"clipboard_set","text":"LAN test"}"#.as_slice()] {
+            viewer.send(Message::Binary(protocol::encrypt(&key, protocol::CONTROL, command).unwrap()))
+                .await.unwrap();
+        }
+        let packet = tokio::time::timeout(Duration::from_secs(5), viewer.next())
+            .await.unwrap().unwrap().unwrap().into_data();
+        let (kind, payload) = protocol::decrypt(&key, &packet).unwrap();
+        assert_eq!(kind, protocol::FRAME);
+        let decoded = image::load_from_memory_with_format(&payload, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        let packet = tokio::time::timeout(Duration::from_secs(5), viewer.next())
+            .await.unwrap().unwrap().unwrap().into_data();
+        let (kind, payload) = protocol::decrypt(&key, &packet).unwrap();
+        assert_eq!(kind, protocol::CLIPBOARD);
+        assert_eq!(payload.as_slice(), b"LAN test");
         assert!(task.await.unwrap());
     }
 
