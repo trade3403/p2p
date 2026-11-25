@@ -237,6 +237,7 @@ impl Default for App {
                 target_fps: app.target_fps.clone(),
                 sent_frames: app.sent_frames.clone(),
                 dropped_frames: app.dropped_frames.clone(),
+                transport_video: Arc::new(host::TransportVideoStats::default()),
                 messages: app.tx.clone(),
             });
         }
@@ -719,6 +720,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                 target_fps: state.target_fps.clone(),
                 sent_frames: state.sent_frames.clone(),
                 dropped_frames: state.dropped_frames.clone(),
+                transport_video: Arc::new(host::TransportVideoStats::default()),
                 messages: state.tx.clone(),
             };
             state.running.store(true, Ordering::SeqCst);

@@ -5,6 +5,25 @@ use serde::Deserialize;
 use std::{sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Arc, mpsc::Sender}, time::Duration};
 use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, http::HeaderValue, Message}};
 
+/// Successful encrypted WebSocket video sends only; excludes handshake,
+/// metadata, UDP, TLS and TCP overhead. Shared across LAN and WSS workers.
+#[derive(Default)]
+pub struct TransportVideoStats {
+    pub lan_bytes: AtomicU64,
+    pub relay_bytes: AtomicU64,
+    pub lan_frames: AtomicU64,
+    pub relay_frames: AtomicU64,
+    pub relay_suppressed_frames: AtomicU64,
+}
+impl TransportVideoStats {
+    fn record(&self, lan: bool, bytes: usize) {
+        let (total, frames) = if lan { (&self.lan_bytes, &self.lan_frames) }
+            else { (&self.relay_bytes, &self.relay_frames) };
+        total.fetch_add(bytes as u64, Ordering::Relaxed);
+        frames.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 #[derive(Clone)]
 pub struct HostConfig {
     pub server: String,
@@ -23,6 +42,7 @@ pub struct HostConfig {
     pub target_fps: Arc<AtomicU32>,
     pub sent_frames: Arc<AtomicU64>,
     pub dropped_frames: Arc<AtomicU64>,
+    pub transport_video: Arc<TransportVideoStats>,
     pub messages: Sender<String>,
 }
 
@@ -190,15 +210,20 @@ where
                     || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
                 // When an authenticated LAN viewer is active, do not waste
                 // uplink bandwidth relaying frames to the VPS.
-                if !is_lan_session && (config.lan_active.load(Ordering::SeqCst)
-                    || config.udp_active.load(Ordering::SeqCst)) { continue; }
                 let Some((kind, bytes)) = frame else {
                     return Err(anyhow!("screen capture worker exited unexpectedly"));
                 };
+                if !is_lan_session && config.lan_active.load(Ordering::SeqCst) {
+                    config.transport_video.relay_suppressed_frames.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                if !is_lan_session && config.udp_active.load(Ordering::SeqCst) { continue; }
                 let send_start=std::time::Instant::now();
                 let packet = encrypt(kind, &bytes)?;
+                let encrypted_len = packet.len();
                 tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
                     .await.context("video send timed out")??;
+                config.transport_video.record(is_lan_session, encrypted_len);
                 crate::video::VideoStats::record(&video_stats.send_total_us,&video_stats.send_samples,send_start);
                 config.sent_frames.fetch_add(1, Ordering::Relaxed);
             }
@@ -704,5 +729,21 @@ mod win_input {
             }}})?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod transport_video_tests {
+    use super::*;
+    #[test]
+    fn video_counters_separate_lan_and_relay() {
+        let stats = TransportVideoStats::default();
+        stats.record(false, 100);
+        stats.record(true, 200);
+        stats.record(true, 300);
+        assert_eq!(stats.relay_bytes.load(Ordering::Relaxed), 100);
+        assert_eq!(stats.lan_bytes.load(Ordering::Relaxed), 500);
+        assert_eq!(stats.relay_frames.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.lan_frames.load(Ordering::Relaxed), 2);
     }
 }

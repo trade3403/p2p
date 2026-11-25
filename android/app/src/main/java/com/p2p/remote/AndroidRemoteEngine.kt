@@ -20,6 +20,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Viewer-side Android remote engine shared by the Flutter Android UI.
@@ -59,6 +60,19 @@ internal class AndroidRemoteEngine(
     private var transport = "未连接"
     private var activeToken = ""
     private var retryAttempt = 0
+    // Counters cover authenticated video packets admitted past the decoder
+    // gate, not all wire traffic or necessarily displayed video frames.
+    private class TransportVideo {
+        val lanBytes = AtomicLong()
+        val relayBytes = AtomicLong()
+        val lanFrames = AtomicLong()
+        val relayFrames = AtomicLong()
+        fun record(lan: Boolean, bytes: Int) {
+            (if (lan) lanBytes else relayBytes).addAndGet(bytes.toLong())
+            (if (lan) lanFrames else relayFrames).incrementAndGet()
+        }
+    }
+    private var transportVideo = TransportVideo()
     private var relaySocketOpens = 0L
     private var relayRetryEvents = 0L
     private var retryTask: Runnable? = null
@@ -200,6 +214,10 @@ internal class AndroidRemoteEngine(
         "transport" to transport,
         "rtt_ms" to rttMs,
         "relay_socket_opens" to relaySocketOpens,
+        "viewer_lan_video_bytes" to transportVideo.lanBytes.get(),
+        "viewer_relay_video_bytes" to transportVideo.relayBytes.get(),
+        "viewer_lan_video_frames" to transportVideo.lanFrames.get(),
+        "viewer_relay_video_frames" to transportVideo.relayFrames.get(),
         "relay_retry_events" to relayRetryEvents,
         "udp_report" to udpReport,
         "stun_report" to stunReport,
@@ -399,6 +417,7 @@ internal class AndroidRemoteEngine(
         transport = "连接中"
         activeToken = relayToken
         secret = key
+        transportVideo = TransportVideo()
         relaySocketOpens = 0L
         relayRetryEvents = 0L
         requested = true
@@ -443,6 +462,7 @@ internal class AndroidRemoteEngine(
         val handshake = if (tryLan) LanHandshake() else null
         val replayGuard = if (tryLan) LanSequence() else null
         lanSequence = replayGuard
+        val videoCounters = transportVideo
         val ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 main.post {
@@ -528,6 +548,8 @@ internal class AndroidRemoteEngine(
                     val original = decryptPacket(key, packet)
                     if (tryLan && !lanVerified) return
                     if (replayGuard != null && !replayGuard.accept(packet)) return
+                    if (socket !== webSocket) return
+                    if (original.first == 1 || original.first == 5) videoCounters.record(tryLan, packet.size)
                     when (original.first) {
                         9 -> {
                             if(original.second.size == 8) {

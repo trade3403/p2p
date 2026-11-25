@@ -159,6 +159,14 @@ def host():
             if message and message.get("type")=="done":
                 require(approved and enabled and counts=={"clicks":3,"keys":2},
                         "Host did not observe exactly three remote clicks and two keys")
+                stats=bridge.cmd("snapshot")
+                REPORT["video_transport"]={key:stats[key] for key in (
+                    "host_lan_video_bytes","host_relay_video_bytes","host_lan_video_frames",
+                    "host_relay_video_frames","host_relay_suppressed_frames")}
+                require(REPORT["video_transport"]["host_relay_video_bytes"]>0,
+                        "Host did not record encrypted relay video sends")
+                require(REPORT["video_transport"]["host_lan_video_bytes"]==0,
+                        "Unexpected real host LAN video in emulator-local fixture test")
                 REPORT["observed_input"]=counts
                 REPORT["passed"]=True
                 send({"type":"ack"})

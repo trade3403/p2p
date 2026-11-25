@@ -301,7 +301,13 @@ class PublicRelayE2eTest {
                     s["transport"]=="局域网 P2P 直连" && s["viewer_connected"]==true &&
                         lastState.get()=="recovered" && (s["relay_socket_opens"] as Number).toLong()==0L
                 }
-                success("Actual encrypted LAN socket and fixture JPEG; zero viewer relay opens")
+                val lanStats = snap()
+                assertTrue((lanStats["viewer_lan_video_bytes"] as Number).toLong() > 0)
+                assertTrue((lanStats["viewer_lan_video_frames"] as Number).toLong() > 0)
+                assertEquals(0L,(lanStats["viewer_relay_video_bytes"] as Number).toLong())
+                metrics.put("fixture_lan_video_bytes",(lanStats["viewer_lan_video_bytes"] as Number).toLong())
+                metrics.put("fixture_relay_video_bytes",0)
+                success("Actual encrypted LAN socket and fixture JPEG; zero viewer relay opens and zero admitted relay video bytes")
                 lastState.set("")
                 start=SystemClock.elapsedRealtime()
                 stage="lan_fixture_close"
@@ -314,6 +320,9 @@ class PublicRelayE2eTest {
                         s["viewer_allow_clipboard"]==true && (s["relay_socket_opens"] as Number).toLong()>=1L
                 }
                 metrics.put("lan_close_to_public_verified_frame_ms",SystemClock.elapsedRealtime()-start)
+                val fallbackStats = snap()
+                assertTrue((fallbackStats["viewer_relay_video_bytes"] as Number).toLong() > 0)
+                metrics.put("fallback_relay_video_bytes",(fallbackStats["viewer_relay_video_bytes"] as Number).toLong())
                 success("LAN fixture close automatically falls back to real Windows WSS video")
                 stage="lan_fixture_cleanup"
             }

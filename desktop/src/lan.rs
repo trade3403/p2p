@@ -215,6 +215,7 @@ mod tests {
             target_fps: Arc::new(AtomicU32::new(6)),
             sent_frames: Arc::new(AtomicU64::new(0)),
             dropped_frames: Arc::new(AtomicU64::new(0)),
+            transport_video: Arc::new(host::TransportVideoStats::default()),
             messages,
         };
         let running = config.running.clone();

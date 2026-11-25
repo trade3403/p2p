@@ -122,6 +122,7 @@ struct HostHandle {
     allow_clipboard: Arc<AtomicBool>,
     monitor_index: Arc<AtomicUsize>,
     pairing_decisions: Sender<PairingDecision>,
+    transport_video: Arc<crate::host::TransportVideoStats>,
 }
 
 struct ViewerHandle {
@@ -197,6 +198,14 @@ impl Engine {
         let mut value = serde_json::to_value(&shared.snapshot).unwrap_or_else(|_| json!({}));
         value["viewer_requested"] = json!(self.viewer.as_ref().is_some_and(|v| v.active.load(Ordering::SeqCst)));
         value["host_running"] = json!(self.host.as_ref().is_some_and(|h| h.running.load(Ordering::SeqCst)));
+        if let Some(host) = &self.host {
+            let stats = &host.transport_video;
+            value["host_lan_video_bytes"] = json!(stats.lan_bytes.load(Ordering::Relaxed));
+            value["host_relay_video_bytes"] = json!(stats.relay_bytes.load(Ordering::Relaxed));
+            value["host_lan_video_frames"] = json!(stats.lan_frames.load(Ordering::Relaxed));
+            value["host_relay_video_frames"] = json!(stats.relay_frames.load(Ordering::Relaxed));
+            value["host_relay_suppressed_frames"] = json!(stats.relay_suppressed_frames.load(Ordering::Relaxed));
+        }
         value
     }
 
@@ -327,6 +336,7 @@ impl Engine {
         let monitor_index = Arc::new(AtomicUsize::new(0));
         let (messages, message_rx) = mpsc::channel::<String>();
         let (decision_tx, decision_rx) = mpsc::channel::<PairingDecision>();
+        let transport_video = Arc::new(crate::host::TransportVideoStats::default());
         let config = HostConfig {
             server: profile.relay_url.clone(),
             relay_token: profile.relay_token.clone(),
@@ -345,6 +355,7 @@ impl Engine {
             target_fps: Arc::new(AtomicU32::new(30)),
             sent_frames: Arc::new(AtomicU64::new(0)),
             dropped_frames: Arc::new(AtomicU64::new(0)),
+            transport_video: transport_video.clone(),
             messages,
         };
         host_pairing::start(config, identity, decision_rx);
@@ -396,6 +407,7 @@ impl Engine {
             allow_clipboard,
             monitor_index,
             pairing_decisions: decision_tx,
+            transport_video,
         });
         {
             let mut shared = shared_lock(&self.shared);
