@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import queue
 import secrets
 import shlex
 import subprocess
@@ -36,6 +37,10 @@ REPORT={"role":ROLE,"scope":"actual release client UI on dedicated GitHub runner
 STAGE="initialization"
 WS=None
 KEY=None
+COORD_INBOX=queue.Queue(maxsize=256)
+COORD_STOP=threading.Event()
+COORD_READER=None
+COORD_ERROR=None
 MARKER="P2P-V021-PUBLIC-UI-"+os.environ.get("GITHUB_RUN_ID","local")
 PACKAGE="com.p2p.remote.p2p_remote_ui"
 
@@ -55,7 +60,7 @@ def wait(label,predicate,seconds=40):
     raise AssertionError("Timed out: "+label)
 
 def rendezvous(role):
-    global KEY,WS
+    global KEY,WS,COORD_READER
     require(os.environ.get("GITHUB_ACTIONS")=="true","Dedicated CI runner only")
     require(32<=len(TOKEN)<=512,"Missing RELAY_ACCESS_TOKEN secret")
     with urllib.request.urlopen("https://"+HOST+"/healthz",timeout=15) as r:
@@ -65,8 +70,35 @@ def rendezvous(role):
     KEY=hmac.digest(TOKEN.encode(),ctx.encode(),"sha256")
     room=hashlib.sha256(b"p2p-release-ui:"+KEY).hexdigest()
     WS=websocket.create_connection("wss://"+HOST+"/relay?room="+room+"&role="+role,
-        header=["Authorization: Bearer "+TOKEN],timeout=15)
+        header=["Authorization: Bearer "+TOKEN],timeout=15,enable_multithread=True)
     WS.settimeout(.3)
+    # The Relay's read deadline is refreshed only by a PONG. websocket-client
+    # processes server PING and sends PONG while reading, not while UI sampling.
+    # One reader owns the socket for the entire test, including recordings and
+    # weak-network sampling. The UI thread consumes only authenticated messages.
+    COORD_READER=threading.Thread(target=coordinator_reader,name="coordinator-reader",daemon=True)
+    COORD_READER.start()
+
+def coordinator_reader():
+    global COORD_ERROR
+    try:
+        while not COORD_STOP.is_set():
+            try:
+                packet=WS.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            if packet=="" or packet==b"":
+                if not COORD_STOP.is_set():
+                    COORD_ERROR="Coordinator closed"
+                return
+            if not isinstance(packet,bytes) or len(packet)<29:
+                continue
+            result=json.loads(AESGCM(KEY).decrypt(packet[:12],packet[12:],b"release-ui-v1"))
+            COORD_INBOX.put_nowait(result)
+    except Exception as exc:
+        if not COORD_STOP.is_set():
+            # Record only exception class; never log connection/credential details.
+            COORD_ERROR=type(exc).__name__
 
 def send(kind,**payload):
     nonce=secrets.token_bytes(12)
@@ -74,12 +106,13 @@ def send(kind,**payload):
 
 def recv():
     try:
-        packet=WS.recv()
-    except websocket.WebSocketTimeoutException:
+        result=COORD_INBOX.get(timeout=.3)
+    except queue.Empty:
+        if COORD_ERROR:
+            raise AssertionError("Test coordinator reader failed: "+COORD_ERROR)
         return None
-    if not isinstance(packet,bytes) or len(packet)<29: return None
-    result=json.loads(AESGCM(KEY).decrypt(packet[:12],packet[12:],b"release-ui-v1"))
-    if result.get("type")=="failed": raise AssertionError("Peer UI test failed: "+str(result.get("stage","unknown")))
+    if result.get("type")=="failed":
+        raise AssertionError("Peer UI test failed: "+str(result.get("stage","unknown")))
     return result
 
 def await_message(kind,seconds=90,repeat=None):
@@ -91,9 +124,6 @@ def await_message(kind,seconds=90,repeat=None):
             last=time.monotonic()
         m=recv()
         if m and m.get("type")==kind: return m
-        if not repeat and time.monotonic()-last>20:
-            WS.ping()
-            last=time.monotonic()
     raise AssertionError("Timed out waiting for "+kind)
 
 # Low-resolution fingerprints of actual OS screenshots. These are only used
@@ -812,9 +842,14 @@ except Exception as exc:
         try: send("failed",stage=STAGE)
         except Exception: pass
 finally:
+    COORD_STOP.set()
     if WS:
         try: WS.close()
         except Exception: pass
+    if COORD_READER:
+        COORD_READER.join(timeout=3)
+    if COORD_ERROR:
+        REPORT["coordinator_reader_error"]=COORD_ERROR
     (OUT/"report.json").write_text(json.dumps(REPORT,indent=2,ensure_ascii=False),encoding="utf-8")
     print("PASS" if REPORT["passed"] else "FAILED",ROLE,flush=True)
 sys.exit(0 if REPORT["passed"] else 1)
