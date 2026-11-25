@@ -33,3 +33,19 @@ internal class LanHandshake(private val clientNonce: ByteArray = ByteArray(32).a
 
     private fun prefix(kind: String) = "P2P-LAN-$kind-v2".toByteArray(Charsets.UTF_8)
 }
+
+/** Per-socket authenticated business nonce guard. Called only after AES-GCM
+ * verification. No eviction: duplicates remain rejected until disconnect.
+ * Compact fixed-width representation avoids retaining frame payloads.
+ */
+internal class LanReplayGuard(private val limit: Int = 1_000_000) {
+    private data class Nonce(val first: Long, val last: Int)
+    private val seen = HashSet<Nonce>()
+    val full: Boolean get() = seen.size >= limit
+
+    fun accept(packet: ByteArray): Boolean {
+        if (packet.size < 13 || full) return false
+        val nonce = java.nio.ByteBuffer.wrap(packet, 1, 12)
+        return seen.add(Nonce(nonce.long, nonce.int))
+    }
+}

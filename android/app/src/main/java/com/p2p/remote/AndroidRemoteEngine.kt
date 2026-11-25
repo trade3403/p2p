@@ -429,6 +429,7 @@ internal class AndroidRemoteEngine(
             return
         }
         val handshake = if (tryLan) LanHandshake() else null
+        val replayGuard = if (tryLan) LanReplayGuard() else null
         val ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 main.post {
@@ -516,8 +517,13 @@ internal class AndroidRemoteEngine(
                 if (!decoding.compareAndSet(false, true)) return
                 try {
                     val key = secret ?: return
-                    val original = decryptPacket(key, bytes.toByteArray())
+                    val packet = bytes.toByteArray()
+                    val original = decryptPacket(key, packet)
                     if (tryLan && !lanVerified) return
+                    if (replayGuard != null && !replayGuard.accept(packet)) {
+                        if (replayGuard.full) webSocket.cancel()
+                        return
+                    }
                     when (original.first) {
                         9 -> {
                             if(original.second.size == 8) {
