@@ -43,6 +43,10 @@ COORD_READER=None
 COORD_ERROR=None
 MARKER="P2P-V021-PUBLIC-UI-"+os.environ.get("GITHUB_RUN_ID","local")
 PACKAGE="com.p2p.remote.p2p_remote_ui"
+STABILITY_SECONDS=int(os.environ.get("P2P_STABILITY_SECONDS","300"))
+if STABILITY_SECONDS not in (300,1800):
+    raise ValueError("Stability duration must be 300 or 1800 seconds")
+REPORT["requested_stability_seconds"]=STABILITY_SECONDS
 
 def require(value,reason):
     if not value: raise AssertionError(reason)
@@ -521,21 +525,23 @@ def recovery_step(baseline):
     return verified
 
 def stability_step():
-    """Five-minute minimum continuous real AVC observation after reconnect."""
+    """Continuous real AVC observation after reconnect; default 5 min, extended 30 min."""
     baseline=read_avc_metrics()
-    evidence={"scope":"300-second minimum continuous post-recovery release UI observation; sampled diagnostics, not continuous photon measurements or 24h proof",
-              "minimum_elapsed_seconds":300,"baseline":baseline,"samples":[]}
+    intervals=STABILITY_SECONDS//30
+    evidence={"scope":"Continuous post-recovery release UI observation; sampled diagnostics, not continuous photon measurements or 24h proof",
+              "minimum_elapsed_seconds":STABILITY_SECONDS,"expected_samples":intervals,"baseline":baseline,"samples":[]}
     REPORT["avc_stability"]=evidence
     started=time.monotonic()
     previous=baseline
     # The same connection and native counters must survive the entire interval.
     # Poll at 30s cadence using monotonic deadlines, not frame count or MP4 duration.
-    for index in range(1,11):
+    for index in range(1,intervals+1):
         scheduled=started+30*index
         time.sleep(max(0,scheduled-time.monotonic()))
         sample=read_avc_metrics()
         elapsed=time.monotonic()-started
         evidence["samples"].append({"elapsed_seconds":round(elapsed,3),**sample})
+        print("STABILITY",index,"/",intervals,"elapsed_s",round(elapsed,1),"frames",sample["frames"],"fps",sample["fps"],"rtt_ms",sample["rtt"],flush=True)
         require(sample["relay_socket_opens"]==baseline["relay_socket_opens"] and
                 sample["relay_retry_events"]==baseline["relay_retry_events"],
                 "Unexpected reconnect during continuous AVC stability interval")
@@ -547,7 +553,7 @@ def stability_step():
         previous=sample
         send("stability_progress",index=index,frames=sample["frames"])
     elapsed=time.monotonic()-started
-    require(elapsed>=300 and len(evidence["samples"])==10,"Stability interval too short")
+    require(elapsed>=STABILITY_SECONDS and len(evidence["samples"])==intervals,"Stability interval too short")
     evidence["elapsed_seconds"]=round(elapsed,3)
     evidence["rendered_frame_delta"]=previous["frames"]-baseline["frames"]
     evidence["observed_average_render_fps"]=evidence["rendered_frame_delta"]/elapsed
@@ -555,8 +561,8 @@ def stability_step():
     evidence["rtt_min_ms"]=min(m["rtt"] for m in evidence["samples"])
     evidence["rtt_max_ms"]=max(m["rtt"] for m in evidence["samples"])
     snapshot(android_capture,"05d-stability-complete")
-    passed("Five-minute continuous AVC observation without additional WSS retry")
-    send("stability_ready",elapsed_seconds=evidence["elapsed_seconds"])
+    passed(f"{STABILITY_SECONDS//60}-minute continuous AVC observation without additional WSS retry")
+    send("stability_ready",elapsed_seconds=evidence["elapsed_seconds"],sample_count=len(evidence["samples"]),requested_seconds=STABILITY_SECONDS)
     target=await_message("stability_target",seconds=45)
     b=find_android("p2p_remote_video",enabled=False)
     adb("shell","input","tap",*remote_point(b,target["edit"]))
@@ -682,7 +688,7 @@ def android():
         rec=None
         STAGE="host_confirmation"
         send("done")
-        await_message("ack")
+        await_message("ack",seconds=300)
         success=True
         REPORT["passed"]=True
     finally:
@@ -962,8 +968,9 @@ def windows():
         send("recovery_text_ok")
         passed("Exact post-reconnect remote text independently read from Notepad")
         STAGE="avc_stability"
-        stable=await_message("stability_ready",seconds=540)
-        require(stable["elapsed_seconds"]>=300,"Peer stability interval too short")
+        stable=await_message("stability_ready",seconds=STABILITY_SECONDS+300)
+        require(stable["requested_seconds"]==STABILITY_SECONDS and stable["elapsed_seconds"]>=STABILITY_SECONDS
+                and stable["sample_count"]==STABILITY_SECONDS//30,"Peer stability interval or sample count incorrect")
         require(ctypes.windll.user32.GetForegroundWindow()==note._hWnd,"Notepad lost foreground during stability interval")
         current=rect(note)
         send("stability_target",edit=normal(current[0]+int(current[2]*.75),current[1]+int(current[3]*.65)))
@@ -982,10 +989,11 @@ def windows():
         snapshot(capture,"10-stability-notepad-text")
         REPORT["avc_stability_text_verified"]=True
         REPORT["peer_stability_elapsed_seconds"]=stable["elapsed_seconds"]
+        REPORT["peer_stability_sample_count"]=stable["sample_count"]
         send("stability_text_ok")
         passed("Exact post-stability remote text independently read from Notepad")
         STAGE="host_confirmation"
-        await_message("done",seconds=90)
+        await_message("done",seconds=300)
         # Recording must be valid before the peer receives final success.
         rec.finish(True)
         rec=None

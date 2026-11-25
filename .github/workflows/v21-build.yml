@@ -12,13 +12,19 @@ on:
       - 'flutter_app/**'
       - '.github/workflows/v21-build.yml'
   workflow_dispatch:
+    inputs:
+      stability_minutes:
+        description: Continuous AVC stability observation (minutes)
+        type: choice
+        options: ['5', '30']
+        default: '5'
 
 permissions:
   contents: read
 
 concurrency:
   group: p2p-v21-build
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   windows:
@@ -424,7 +430,7 @@ jobs:
     needs: [windows, android]
     if: github.ref == 'refs/heads/feature/v0.21-h264-performance'
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -439,6 +445,7 @@ jobs:
       - name: Install and drive actual release Windows app
         env:
           RELAY_ACCESS_TOKEN: ${{ secrets.RELAY_ACCESS_TOKEN }}
+          P2P_STABILITY_SECONDS: ${{ ((github.event_name == 'workflow_dispatch' && inputs.stability_minutes == '30') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[soak-30]'))) && '1800' || '300' }}
         run: python qa/release-ui/run.py windows
       - uses: actions/upload-artifact@v4
         if: always()
@@ -453,7 +460,7 @@ jobs:
     needs: [windows, android]
     if: github.ref == 'refs/heads/feature/v0.21-h264-performance'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -474,6 +481,7 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         env:
           RELAY_ACCESS_TOKEN: ${{ secrets.RELAY_ACCESS_TOKEN }}
+          P2P_STABILITY_SECONDS: ${{ ((github.event_name == 'workflow_dispatch' && inputs.stability_minutes == '30') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[soak-30]'))) && '1800' || '300' }}
         with:
           api-level: 35
           arch: x86_64
