@@ -210,7 +210,17 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            accept_authorized(stream, &config).await.is_ok()
+            let Ok(mut socket) = accept_authorized(stream, &config).await else { return false; };
+            // Exercise real encrypted WebSocket traffic after READY, without a Relay.
+            // This is a transport integration test, not desktop input injection.
+            let request = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await.unwrap().unwrap().unwrap().into_data();
+            let (kind, payload) = protocol::decrypt(&key, &request).unwrap();
+            assert_eq!(kind, protocol::PING);
+            assert_eq!(payload, 42u64.to_be_bytes());
+            socket.send(Message::Binary(protocol::encrypt(&key, protocol::PONG, &payload).unwrap()))
+                .await.unwrap();
+            true
         });
         let (mut viewer, _) = connect_async(format!("ws://{address}/direct")).await.unwrap();
         let client = protocol::new_secret();
@@ -238,6 +248,13 @@ mod tests {
         let (kind, contents) = protocol::decrypt(&key, &ack).unwrap();
         assert_eq!(kind, READY);
         assert_eq!(contents, transcript(READY_PAYLOAD, &client, server));
+        viewer.send(Message::Binary(protocol::encrypt(&key, protocol::PING,
+            &42u64.to_be_bytes()).unwrap())).await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), viewer.next())
+            .await.unwrap().unwrap().unwrap().into_data();
+        let (kind, payload) = protocol::decrypt(&key, &reply).unwrap();
+        assert_eq!(kind, protocol::PONG);
+        assert_eq!(payload, 42u64.to_be_bytes());
         assert!(task.await.unwrap());
     }
 
