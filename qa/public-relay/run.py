@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import os
+import queue
+import threading
 import re
 import struct
 from pathlib import Path
@@ -27,13 +29,17 @@ REPORT = {"role": ROLE, "passed": False}
 STAGE = "setup"
 WS = None
 KEY = None
+COORD_INBOX = queue.Queue(maxsize=256)
+COORD_STOP = threading.Event()
+COORD_READER = None
+COORD_ERROR = None
 
 def require(ok, reason):
     if not ok:
         raise AssertionError(reason)
 
 def rendezvous(role):
-    global KEY
+    global KEY, COORD_READER
     require(os.environ.get("GITHUB_ACTIONS") == "true", "CI only")
     require(32 <= len(TOKEN) <= 512, "Configure RELAY_ACCESS_TOKEN repository Actions Secret")
     with urllib.request.urlopen("https://" + HOST + "/healthz", timeout=15) as response:
@@ -43,22 +49,47 @@ def rendezvous(role):
     KEY = hmac.digest(TOKEN.encode(),context.encode(),"sha256")
     room = hashlib.sha256(b"p2p-ci-coordination:"+KEY).hexdigest()
     ws = websocket.create_connection("wss://"+HOST+"/relay?room="+room+"&role="+role,
-                                     header=["Authorization: Bearer "+TOKEN],timeout=12)
+                                     header=["Authorization: Bearer "+TOKEN],timeout=12,
+                                      enable_multithread=True)
     ws.settimeout(.2)
+    # The server renews its read deadline on PONG. Keep reading even during
+    # instrumentation, ADB evidence collection and video encoding.
+    COORD_READER=threading.Thread(target=coordinator_reader,args=(ws,),
+                                  name="public-ci-coordinator",daemon=True)
+    COORD_READER.start()
     return ws
 
 def send(value):
     nonce = secrets.token_bytes(12)
     WS.send_binary(nonce + AESGCM(KEY).encrypt(nonce,json.dumps(value).encode(),b"p2p-ci-v1"))
 
+def coordinator_reader(ws):
+    global COORD_ERROR
+    try:
+        while not COORD_STOP.is_set():
+            try:
+                raw=ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            if raw=="" or raw==b"":
+                if not COORD_STOP.is_set():
+                    COORD_ERROR="Coordinator closed"
+                return
+            if not isinstance(raw,bytes) or len(raw)<29:
+                continue
+            value=json.loads(AESGCM(KEY).decrypt(raw[:12],raw[12:],b"p2p-ci-v1"))
+            COORD_INBOX.put_nowait(value)
+    except Exception as exc:
+        if not COORD_STOP.is_set():
+            COORD_ERROR=type(exc).__name__
+
 def receive():
     try:
-        raw=WS.recv()
-    except websocket.WebSocketTimeoutException:
+        return COORD_INBOX.get(timeout=.2)
+    except queue.Empty:
+        if COORD_ERROR:
+            raise AssertionError("Test coordinator reader failed: "+COORD_ERROR)
         return None
-    if not isinstance(raw,bytes) or len(raw)<29:
-        return None
-    return json.loads(AESGCM(KEY).decrypt(raw[:12],raw[12:],b"p2p-ci-v1"))
 
 class Bridge:
     def __init__(self):
@@ -309,13 +340,17 @@ def android():
     encode_evidence(native["metrics"]["recorded_frames"])
     STAGE="host_confirmation"
     end=time.monotonic()+15
+    last=0
     while time.monotonic()<end:
-        send({"type":"done"})
-        m=receive()
+        # Drain an already received acknowledgement before resending. The host
+        # may close immediately after its authenticated final acknowledgement.
+        m=receive() if last else None
         if m and m.get("type")=="ack":
             REPORT["passed"]=True
             return
-        time.sleep(.5)
+        if time.monotonic()-last>=2:
+            send({"type":"done"})
+            last=time.monotonic()
     raise AssertionError("Host did not confirm observed input")
 
 try:
@@ -330,9 +365,15 @@ except Exception as exc:
         except Exception: pass
     print("FAIL",ROLE,STAGE,REPORT.get("error",REPORT["error_type"]),flush=True)
 finally:
+    COORD_STOP.set()
     if WS:
+        # Give the sole receiver time to leave its short timeout before close.
+        if COORD_READER:
+            COORD_READER.join(timeout=1)
         try: WS.close()
         except Exception: pass
+    if COORD_ERROR and not REPORT["passed"]:
+        REPORT["coordinator_error"]=COORD_ERROR
     (OUT/"job-report.json").write_text(json.dumps(REPORT,indent=2),encoding="utf-8")
     print("PASS" if REPORT["passed"] else "FAILED",ROLE,flush=True)
 sys.exit(0 if REPORT["passed"] else 1)
