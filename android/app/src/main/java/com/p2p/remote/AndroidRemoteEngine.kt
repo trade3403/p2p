@@ -52,6 +52,8 @@ internal class AndroidRemoteEngine(
     private var transport = "未连接"
     private var activeToken = ""
     private var retryAttempt = 0
+    private var relaySocketOpens = 0L
+    private var relayRetryEvents = 0L
     private var retryTask: Runnable? = null
     private var watchdogTask: Runnable? = null
     private var lastFrameAtMs = 0L
@@ -190,6 +192,8 @@ internal class AndroidRemoteEngine(
         "clipboard_text" to clipboardResult,
         "transport" to transport,
         "rtt_ms" to rttMs,
+        "relay_socket_opens" to relaySocketOpens,
+        "relay_retry_events" to relayRetryEvents,
         "udp_report" to udpReport,
         "stun_report" to stunReport,
         "udp_attempted" to udpAttempted,
@@ -388,6 +392,8 @@ internal class AndroidRemoteEngine(
         transport = "连接中"
         activeToken = relayToken
         secret = key
+        relaySocketOpens = 0L
+        relayRetryEvents = 0L
         requested = true
         hostAllowsInput = null
         retryAttempt = 0
@@ -447,6 +453,7 @@ internal class AndroidRemoteEngine(
                                 }, 4000L)
                             }
                         }else{
+                            relaySocketOpens++
                             online = true
                             transport = "VPS WSS 中转"
                             status = "已连接中转服务器，等待家庭电脑画面"
@@ -687,6 +694,7 @@ internal class AndroidRemoteEngine(
 
     private fun scheduleRetry(reason: String) {
         if (!requested) return
+        relayRetryEvents++
         retryTask?.let { main.removeCallbacks(it) }
         val waitMs = ReconnectPolicy.delayMs(retryAttempt)
         retryAttempt = (retryAttempt + 1).coerceAtMost(31)

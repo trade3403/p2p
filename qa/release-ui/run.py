@@ -379,7 +379,7 @@ def visual_click_trials(rec):
     REPORT["visual_feedback_scope"]="Android monotonic tap dispatch to completion of first matched real OS screenshot; includes ADB and sampling overhead; not precise glass-to-glass or input-to-photon"
     passed("Real Notepad maximize and restore verified in Android screenshot samples")
 
-def read_avc_metrics():
+def read_avc_metrics(strict=True):
     android_tap("视频性能")
     def extract():
         fields=[]
@@ -388,15 +388,17 @@ def read_avc_metrics():
         for field in fields:
             if "codec=" in field and "decoder_mode=" in field:
                 items=dict(re.findall(r"(?m)^([a-z_]+)=([^\n]+)",field))
-                if all(k in items for k in ("codec","frames","fps","bps","rtt","target_bps","target_fps","drops","encoder","decoder","decoder_mode",
+                if all(k in items for k in ("codec","frames","fps","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","encoder","decoder","decoder_mode",
                         "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames")):
                     return items
         return None
     data=wait("Actual release video diagnostic data",extract,25)
     android_tap("关闭性能数据")
-    for key in ("frames","bps","rtt","target_bps","target_fps","drops","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames"):
+    for key in ("frames","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames"):
         data[key]=int(data[key])
     data["fps"]=float(data["fps"])
+    if not strict:
+        return data
     require(data["codec"]=="H264" and data["frames"]>0,"Actual MediaCodec AVC playback not verified")
     require(data["encoder"] in ("OpenH264 software","Media Foundation hardware","Media Foundation D3D11 texture") and data["decoder"] not in ("","unknown"),"Actual encoder and decoder not reported")
     require(data["decoder_mode"] in ("hardware","software","unknown"),"Invalid decoder classification")
@@ -445,6 +447,66 @@ def weak_network_step(baseline):
             shaped[-1]["target_fps"]<=baseline["target_fps"],
             "Congestion increased video target")
     passed("Actual Relay egress impairment and restored AVC rendering")
+    return restored[-1]
+
+def recovery_step(baseline):
+    """Real egress blackout; observe native retry, new WSS, and new AVC output."""
+    from network_shape import shape_relay_egress
+    evidence={"baseline":baseline,"scope":"Actual Relay egress blackout and automatic reconnect in installed release APK; observation time includes UI automation"}
+    REPORT["avc_recovery"]=evidence
+    require(baseline["relay_socket_opens"]>=1,"Actual initial WSS open not reported")
+    coordinator_port=WS.sock.getsockname()[1]
+    with shape_relay_egress(HOST,coordinator_port,evidence,outage=True):
+        outage_started=time.monotonic()
+        deadline=outage_started+80
+        while time.monotonic()<deadline:
+            time.sleep(5)
+            sample=read_avc_metrics(strict=False)
+            if sample["relay_retry_events"]>baseline["relay_retry_events"] and sample["codec"]!="H264":
+                evidence["interrupted"]=sample
+                snapshot(android_capture,"05a-network-interrupted")
+                break
+        else:
+            raise AssertionError("No actual native reconnect event observed during blackout")
+        evidence["blackout_observed_ms"]=round((time.monotonic()-outage_started)*1000)
+    restored_at=time.monotonic()
+    require(sum(x.get("netem_drops",0) for x in evidence["interfaces"])>0,
+            "No actual Relay packets dropped in blackout")
+    require(all(x.get("restored") for x in evidence["interfaces"]),"Blackout qdisc not cleaned up")
+    deadline=restored_at+120
+    samples=[]
+    while time.monotonic()<deadline:
+        time.sleep(3)
+        sample=read_avc_metrics(strict=False)
+        samples.append(sample)
+        evidence["recovery_samples"]=samples
+        if (sample["relay_socket_opens"]>baseline["relay_socket_opens"] and
+            sample["relay_retry_events"]>baseline["relay_retry_events"] and
+            sample["codec"]=="H264" and sample["frames"]>evidence["interrupted"]["frames"]
+            and sample["fps"]>0 and sample["bps"]>0 and sample["rtt"]>=0):
+            evidence["restore_to_observed_avc_ms"]=round((time.monotonic()-restored_at)*1000)
+            break
+    else:
+        raise AssertionError("No authenticated live AVC on a newly opened WSS after blackout")
+    time.sleep(6)
+    verified=read_avc_metrics()
+    evidence["verified"]=verified
+    require(verified["frames"]>sample["frames"] and verified["fps"]>0 and verified["bps"]>0,
+            "Recovered AVC did not continue rendering")
+    snapshot(android_capture,"05b-network-recovered")
+    passed("Actual Relay blackout, automatic WSS reconnect and sustained AVC rendering")
+    send("recovery_ready")
+    target=await_message("recovery_target",seconds=45)
+    b=find_android("p2p_remote_video",enabled=False)
+    adb("shell","input","tap",*remote_point(b,target["edit"]))
+    android_tap("远程输入文字")
+    android_field("远程文字内容","-RECOVERED",identifier="p2p_remote_text")
+    android_tap("发送远程文字")
+    send("recovery_text_sent")
+    await_message("recovery_text_ok",seconds=45)
+    snapshot(android_capture,"05c-recovered-remote-text")
+    evidence["remote_text_verified"]=True
+    passed("Exact post-reconnect remote text independently verified by Windows")
 
 def android():
     global STAGE
@@ -544,7 +606,9 @@ def android():
             "scope":"MediaCodec rendered output, received AVC payload bitrate, authenticated RTT; no synthetic data"}
         passed("Live AVC rendering, actual throughput and RTT measured in landscape release APK")
         STAGE="weak_network_step"
-        weak_network_step(second)
+        restored=weak_network_step(second)
+        STAGE="avc_recovery"
+        recovery_step(restored)
         STAGE="disconnect"
         android_tap("断开连接")
         find_android("请求连接",enabled=False,seconds=30,scroll=True)
@@ -811,8 +875,31 @@ def windows():
             require(observed["trial"]==trial,"Android did not verify actual window state")
             REPORT["visual_clicks"].append({"trial":trial,"before":before_rect,"after":after_rect})
         passed("Remote maximize and restore independently verified by native window state")
+        STAGE="avc_recovery"
+        await_message("recovery_ready",seconds=420)
+        require(ctypes.windll.user32.GetForegroundWindow()==note._hWnd,"Notepad no longer foreground after network recovery")
+        # Click inside the actual editor, after the existing text. The local
+        # Host never injects the recovery suffix; only the Android UI sends it.
+        current=rect(note)
+        send("recovery_target",edit=normal(current[0]+int(current[2]*.75),current[1]+int(current[3]*.65)))
+        await_message("recovery_text_sent",seconds=60)
+        def recovery_readback():
+            if ctypes.windll.user32.GetForegroundWindow()!=note._hWnd: return False
+            pyperclip.copy("")
+            gui.hotkey("ctrl","a")
+            gui.hotkey("ctrl","c")
+            time.sleep(.25)
+            value=pyperclip.paste()
+            pyperclip.copy("")
+            return value.strip()==MARKER+"-RECOVERED"
+        wait("Exact post-recovery remote text in actual Notepad",recovery_readback,20)
+        gui.press("end")
+        snapshot(capture,"09-recovered-notepad-text")
+        REPORT["avc_recovery_text_verified"]=True
+        send("recovery_text_ok")
+        passed("Exact post-reconnect remote text independently read from Notepad")
         STAGE="host_confirmation"
-        await_message("done",seconds=300)
+        await_message("done",seconds=90)
         # Recording must be valid before the peer receives final success.
         rec.finish(True)
         rec=None

@@ -36,14 +36,14 @@ def routes(host):
     return found
 
 @contextmanager
-def shape_relay_egress(host,coordinator_port,evidence):
+def shape_relay_egress(host,coordinator_port,evidence,*,outage=False):
     if os.environ.get("GITHUB_ACTIONS")!="true" or os.environ.get("RUNNER_ENVIRONMENT")!="github-hosted" or os.environ.get("RUNNER_OS")!="Linux":
         raise AssertionError("Traffic shaping restricted to disposable GitHub-hosted Linux runners")
     if not 1<=coordinator_port<=65535:
         raise AssertionError("Unable to exclude test coordinator connection")
     targets=routes(host)
     evidence["mechanism"]="Linux host tc prio + netem; Relay TCP/443 egress only"
-    evidence["profile"]={"egress_delay_ms":350,"egress_rate_kbps":1000}
+    evidence["profile"]={"egress_loss_percent":100} if outage else {"egress_delay_ms":350,"egress_rate_kbps":1000}
     evidence["interfaces"]=[]
     installed=[]
     try:
@@ -57,7 +57,8 @@ def shape_relay_egress(host,coordinator_port,evidence):
             evidence["interfaces"].append(item)
             tc("qdisc","replace","dev",dev,"root","handle","1:","prio","bands","3","priomap",*["0"]*16)
             installed.append(dev)
-            tc("qdisc","add","dev",dev,"parent","1:3","handle","30:","netem","delay","350ms","rate","1000kbit","limit","1000")
+            options=["loss","100%"] if outage else ["delay","350ms","rate","1000kbit","limit","1000"]
+            tc("qdisc","add","dev",dev,"parent","1:3","handle","30:","netem",*options)
             # The Python rendezvous socket is not part of the AVC session.
             for family in ("ip","ipv6"):
                 if any((":" in ip)==(family=="ipv6") for ip in ips):

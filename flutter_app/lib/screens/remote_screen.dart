@@ -523,6 +523,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
         'fps=${s['rendered_fps'] ?? 0}\n'
         'bps=${s['measured_video_bps'] ?? 0}\n'
         'rtt=${s['rtt_ms'] ?? -1}\n'
+        'relay_socket_opens=${s['relay_socket_opens'] ?? 0}\n'
+        'relay_retry_events=${s['relay_retry_events'] ?? 0}\n'
         'target_bps=${s['video_target_bps'] ?? 0}\n'
         'target_fps=${s['video_target_fps'] ?? 0}\n'
         'drops=${s['avc_decoder_drops'] ?? 0}\n'
