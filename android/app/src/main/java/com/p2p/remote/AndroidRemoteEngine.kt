@@ -916,7 +916,7 @@ internal class AndroidRemoteEngine(
     }
     private fun sendControlText(text:String){
         // Text injection is explicit; never forward private IME/clipboard contents.
-        require(text.isNotBlank() && text.codePointCount(0,text.length) in 1..250) { "文字长度无效" }
+        require(text.isNotEmpty() && text.codePointCount(0,text.length) in 1..250) { "文字长度无效" }
         send(JSONObject().put("type","text").put("text",text))
         status="文字指令已发送，等待远端执行"
     }

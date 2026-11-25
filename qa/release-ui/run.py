@@ -678,6 +678,29 @@ def android():
         recovery_step(restored)
         STAGE="avc_stability"
         stability_step()
+        STAGE="direct_keyboard"
+        android_tap("键盘")
+        find_android("收起键盘",seconds=15)
+        # Use actual Android IME/editor input, without the legacy send form.
+        wait("Android system IME visible",lambda: b"mInputShown=true" in
+             adb("shell","dumpsys","input_method").stdout,15)
+        find_android("p2p_remote_video",enabled=False,seconds=15)
+        snapshot(android_capture,"05f-direct-keyboard-visible")
+        android_type("-LIVE9")
+        send("direct_text_typed")
+        await_message("direct_text_ok",seconds=45)
+        android_tap("退格")
+        android_tap("空格")
+        android_type("OK")
+        android_tap("回车")
+        android_type("NEXT")
+        send("direct_edit_typed")
+        await_message("direct_edit_ok",seconds=45)
+        snapshot(android_capture,"05g-direct-keyboard-typed")
+        android_tap("收起键盘")
+        find_android("键盘",seconds=15)
+        REPORT["direct_keyboard_verified"]=True
+        passed("Direct Android keyboard text and editing without send form verified by Windows")
         STAGE="disconnect"
         android_tap("断开连接")
         find_android("请求连接",enabled=False,seconds=30,scroll=True)
@@ -992,6 +1015,27 @@ def windows():
         REPORT["peer_stability_sample_count"]=stable["sample_count"]
         send("stability_text_ok")
         passed("Exact post-stability remote text independently read from Notepad")
+        STAGE="direct_keyboard"
+        def direct_readback(expected):
+            if ctypes.windll.user32.GetForegroundWindow()!=note._hWnd: return False
+            pyperclip.copy("")
+            gui.hotkey("ctrl","a")
+            gui.hotkey("ctrl","c")
+            time.sleep(.25)
+            value=pyperclip.paste().replace("\r\n","\n")
+            pyperclip.copy("")
+            gui.press("end")
+            return value==expected
+        await_message("direct_text_typed",seconds=60)
+        prefix=MARKER+"-RECOVERED-STABLE"
+        wait("Direct typing arrived without send",lambda: direct_readback(prefix+"-LIVE9"),25)
+        send("direct_text_ok")
+        await_message("direct_edit_typed",seconds=60)
+        wait("Direct keyboard Backspace Space Enter and typing",lambda: direct_readback(prefix+"-LIVE OK\nNEXT"),25)
+        snapshot(capture,"11-direct-keyboard-notepad")
+        REPORT["direct_keyboard_verified"]=True
+        send("direct_edit_ok")
+        passed("Exact live typing and editing independently read from Notepad")
         STAGE="host_confirmation"
         await_message("done",seconds=300)
         # Recording must be valid before the peer receives final success.

@@ -7,6 +7,7 @@ import 'package:material_ui/material_ui.dart';
 import '../app_theme.dart';
 import '../services/remote_controller.dart';
 import '../widgets/p2p_widgets.dart';
+import '../widgets/remote_keyboard.dart';
 
 class RemoteScreen extends StatefulWidget {
   const RemoteScreen({super.key});
@@ -494,6 +495,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       ),
                     ],
                   ),
+                  RemoteKeyboard(controller: _controller),
                   Text(_controller.viewerStatus, style: const TextStyle(fontSize: 12)),
                   Expanded(child: LayoutBuilder(
                     builder: (context, constraints) => _videoSurface(
