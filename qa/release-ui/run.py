@@ -387,13 +387,22 @@ def read_avc_metrics(strict=True):
             fields.extend([node.get("text",""),node.get("content-desc","")])
         for field in fields:
             if "codec=" in field and "decoder_mode=" in field:
-                items=dict(re.findall(r"(?m)^([a-z_]+)=([^\n]+)",field))
+                # Disconnected native sessions legitimately expose an empty decoder.
+                # Keep the field present; strict live AVC validation below
+                # still rejects blank/unknown encoder and decoder names.
+                items=dict(re.findall(r"(?m)^([a-z_]+)=([^\r\n]*)",field))
                 if all(k in items for k in ("codec","frames","fps","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","encoder","decoder","decoder_mode",
                         "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames")):
                     return items
         return None
-    data=wait("Actual release video diagnostic data",extract,25)
-    android_tap("关闭性能数据")
+    try:
+        data=wait("Actual release video diagnostic data",extract,25)
+    except AssertionError:
+        # Save actual diagnostic dialog only (contains no connection secret).
+        snapshot(android_capture,"diagnostic-read-failed-"+str(time.monotonic_ns()))
+        raise
+    finally:
+        android_tap("关闭性能数据")
     for key in ("frames","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames"):
         data[key]=int(data[key])
     data["fps"]=float(data["fps"])
@@ -459,9 +468,11 @@ def recovery_step(baseline):
     with shape_relay_egress(HOST,coordinator_port,evidence,outage=True):
         outage_started=time.monotonic()
         deadline=outage_started+80
+        evidence["outage_samples"]=[]
         while time.monotonic()<deadline:
             time.sleep(5)
             sample=read_avc_metrics(strict=False)
+            evidence["outage_samples"].append(sample)
             if sample["relay_retry_events"]>baseline["relay_retry_events"] and sample["codec"]!="H264":
                 evidence["interrupted"]=sample
                 snapshot(android_capture,"05a-network-interrupted")
