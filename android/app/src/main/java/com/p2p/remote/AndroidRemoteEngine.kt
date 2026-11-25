@@ -37,7 +37,7 @@ internal class AndroidRemoteEngine(
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
-    private var socket: WebSocket? = null
+    @Volatile private var socket: WebSocket? = null
     private var secret: ByteArray? = null
     @Volatile private var lanBusinessKey: ByteArray? = null
     private var lanSequence: LanSequence? = null
@@ -53,9 +53,9 @@ internal class AndroidRemoteEngine(
     private var receivedFrames = 0L
     private var activeEndpoint = ""
     private var lanEndpoint = ""
-    private var lanAttempted = false
+    private val lanAttempt = LanAttemptPolicy()
     private var usingLan = false
-    private var lanVerified = false
+    @Volatile private var lanVerified = false
     private var transport = "未连接"
     private var activeToken = ""
     private var retryAttempt = 0
@@ -393,7 +393,7 @@ internal class AndroidRemoteEngine(
         val room = sha256("p2p-v02-room:".toByteArray(Charsets.UTF_8) + key).toHex()
         activeEndpoint = "$normalized/relay?room=$room&role=viewer"
         lanEndpoint = LanEndpoint.url(lanIp) ?: ""
-        lanAttempted = false
+        lanAttempt.reset()
         usingLan = false
         lanVerified = false
         transport = "连接中"
@@ -411,9 +411,10 @@ internal class AndroidRemoteEngine(
     }
 
     private fun openConnection() {
-        if (!requested) return
-        val tryLan = !lanAttempted && lanEndpoint.isNotEmpty()
-        if (tryLan) lanAttempted = true
+        if (!LanAttemptPolicy.canOpen(requested, socket != null)) return
+        retryTask?.let { main.removeCallbacks(it) }
+        retryTask = null
+        val tryLan = lanAttempt.take(lanEndpoint)
         usingLan = tryLan
         lanBusinessKey = null
         lanVerified = false
@@ -426,10 +427,13 @@ internal class AndroidRemoteEngine(
             builder.build()
         } catch (_: Exception) {
             status = "连接地址无效"
-            if(tryLan){
+            if(tryLan && lanAttempt.canFallback(activeToken)){
                 usingLan=false
                 openConnection()
             }else{
+                usingLan=false
+                lanBusinessKey=null
+                lanSequence=null
                 requested = false
                 secret = null
                 activeToken = ""
@@ -455,13 +459,6 @@ internal class AndroidRemoteEngine(
                                 )
                             ) {
                                 webSocket.cancel()
-                            } else {
-                                main.postDelayed({
-                                    if(socket === webSocket && requested && !lanVerified) {
-                                        status = "局域网验证超时，准备切换 VPS"
-                                        webSocket.cancel()
-                                    }
-                                }, 4000L)
                             }
                         }else{
                             relaySocketOpens++
@@ -639,6 +636,8 @@ internal class AndroidRemoteEngine(
                 main.post {
                     if (socket !== webSocket || !requested) return@post
                     socket = null
+                    lanBusinessKey = null
+                    lanSequence = null
                     online = false
                     hostAllowsInput = null
                     hostAllowsClipboard = null
@@ -659,7 +658,7 @@ internal class AndroidRemoteEngine(
                         usingLan = false
                         transport = "局域网不可达，已切换 VPS"
                         status = "局域网直连失败，改走 VPS 中转"
-                        if(activeToken.length >= 32){
+                        if(lanAttempt.canFallback(activeToken)){
                             openConnection()
                         }else{
                             requested=false
@@ -678,10 +677,18 @@ internal class AndroidRemoteEngine(
                 }
             }
 
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                // Complete the peer's close handshake instead of leaving the
+                // client waiting for a watchdog timeout.
+                if (!webSocket.close(1000, null)) webSocket.cancel()
+            }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 main.post {
                     if (socket !== webSocket || !requested) return@post
                     socket = null
+                    lanBusinessKey = null
+                    lanSequence = null
                     online = false
                     hostAllowsInput = null
                     hostAllowsClipboard = null
@@ -702,7 +709,7 @@ internal class AndroidRemoteEngine(
                         usingLan = false
                         transport = "局域网已断开，切换 VPS"
                         status = "局域网连接断开，改走 VPS 中转"
-                        if(activeToken.length >= 32){
+                        if(lanAttempt.canFallback(activeToken)){
                             openConnection()
                         }else{
                             requested=false
@@ -718,13 +725,16 @@ internal class AndroidRemoteEngine(
         })
         socket = ws
         if (tryLan) main.postDelayed({
-            if (socket === ws && requested && !lanVerified) ws.cancel()
-        }, 4000L)
+            if (socket === ws && requested && !lanVerified) {
+                status = "局域网连接或验证超时，准备切换 VPS"
+                ws.cancel()
+            }
+        }, LanAttemptPolicy.CONNECT_TIMEOUT_MS)
     }
 
     // One attempt per session. Never probe arbitrary or off-subnet addresses.
     private fun tryAdvertisedLan(current: WebSocket, candidate: String) {
-        if (!requested || socket !== current || usingLan || lanAttempted) return
+        if (!requested || socket !== current || usingLan || lanAttempt.attempted) return
         val endpoint = LanEndpoint.url(candidate) ?: return
         if (!LanEndpoint.isOnLocalSubnet(candidate)) return
         lanEndpoint = endpoint
@@ -740,6 +750,9 @@ internal class AndroidRemoteEngine(
         hostAllowsInput = null
         hostAllowsClipboard = null
         h264Active = false
+        frame = null
+        rttMs = null
+        lastPingTimeMs = 0L
         avcDecoder.reset()
         openConnection()
     }
@@ -751,9 +764,12 @@ internal class AndroidRemoteEngine(
         val waitMs = ReconnectPolicy.delayMs(retryAttempt)
         retryAttempt = (retryAttempt + 1).coerceAtMost(31)
         status = "$reason · ${waitMs / 1000} 秒后重连"
-        retryTask = Runnable {
-            retryTask = null
-            if (requested) openConnection()
+        retryTask = object : Runnable {
+            override fun run() {
+                if (retryTask !== this) return
+                retryTask = null
+                if (LanAttemptPolicy.canOpen(requested, socket != null)) openConnection()
+            }
         }.also { main.postDelayed(it, waitMs) }
     }
 
@@ -942,7 +958,7 @@ internal class AndroidRemoteEngine(
         activeToken = ""
         activeEndpoint = ""
         lanEndpoint = ""
-        lanAttempted = false
+        lanAttempt.reset()
         usingLan = false
         lanVerified = false
         transport = "未连接"
