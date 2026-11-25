@@ -125,6 +125,8 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (mut outgoing, mut incoming) = socket.split();
+    // Only authenticated LAN business packets enter this per-connection guard.
+    let mut lan_replay = protocol::ReplayGuard::new(1_000_000);
     #[cfg(windows)]
     let remote_input = start_input_worker(
         config.allow_input.clone(), config.monitor_index.clone(),
@@ -245,6 +247,7 @@ where
                 match next {
                     Some(Ok(Message::Binary(packet))) => {
                         if let Ok((kind, bytes)) = protocol::decrypt(&config.secret, &packet) {
+                            if is_lan_session && !lan_replay.accept(&packet) { continue; }
                             if kind == crate::udp_punch::SIGNAL && !is_lan_session
                                 && config.allow_udp_probe.load(Ordering::SeqCst)
                             {

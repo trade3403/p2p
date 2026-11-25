@@ -58,6 +58,27 @@ pub fn decrypt(secret: &[u8; 32], packet: &[u8]) -> Result<(u8, Vec<u8>)> {
     Ok((packet[0], plaintext))
 }
 
+/// Reject duplicate authenticated packet nonces without evicting old entries.
+/// A full guard fails closed; callers must establish a fresh authorized session.
+pub(crate) struct ReplayGuard {
+    seen: std::collections::HashSet<[u8; 12]>,
+    limit: usize,
+}
+
+impl ReplayGuard {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self { seen: std::collections::HashSet::new(), limit }
+    }
+
+    pub(crate) fn accept(&mut self, packet: &[u8]) -> bool {
+        let Some(nonce) = packet.get(1..13).and_then(|bytes| <[u8; 12]>::try_from(bytes).ok()) else {
+            return false;
+        };
+        if self.seen.len() >= self.limit { return false; }
+        self.seen.insert(nonce)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +93,22 @@ mod tests {
         *packet.last_mut().unwrap() ^= 1;
         assert!(decrypt(&secret, &packet).is_err());
     }
+    #[test]
+    fn replay_guard_rejects_duplicates_and_fails_closed_at_capacity() {
+        let key = new_secret();
+        let a = encrypt(&key, CONTROL, b"first").unwrap();
+        let b = encrypt(&key, CONTROL, b"second").unwrap();
+        let c = encrypt(&key, CONTROL, b"third").unwrap();
+        let mut guard = ReplayGuard::new(2);
+        assert!(!guard.accept(&[]));
+        assert!(decrypt(&key, &a).is_ok());
+        assert!(guard.accept(&a));
+        assert!(!guard.accept(&a));
+        assert!(guard.accept(&b));
+        assert!(!guard.accept(&c));
+        assert!(!guard.accept(&a));
+    }
+
     #[test]
     fn numeric_device_label_is_stable_and_not_credential() {
         let a = [0x52u8;32];
