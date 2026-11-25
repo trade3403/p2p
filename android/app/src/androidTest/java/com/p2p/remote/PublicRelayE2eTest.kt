@@ -132,7 +132,8 @@ class PublicRelayE2eTest {
                         }
                     } catch (failure: Throwable) {
                         error.compareAndSet(null,failure)
-                        webSocket.cancel()
+                        // Server-side RealWebSocket has no client Call to cancel.
+                        webSocket.close(1011, "LAN fixture handshake failed")
                     }
                 }
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -150,8 +151,14 @@ class PublicRelayE2eTest {
         }
         override fun close() {
             worker.shutdownNow()
-            peer.get()?.cancel()
-            server.shutdown()
+            // The server-side socket has no OkHttp client Call. cancel()
+            // dereferences that absent Call; use a close handshake and let
+            // MockWebServer own the underlying TCP socket shutdown.
+            try {
+                peer.get()?.close(1000, null)
+            } finally {
+                server.shutdown()
+            }
         }
     }
 
@@ -308,6 +315,7 @@ class PublicRelayE2eTest {
                 }
                 metrics.put("lan_close_to_public_verified_frame_ms",SystemClock.elapsedRealtime()-start)
                 success("LAN fixture close automatically falls back to real Windows WSS video")
+                stage="lan_fixture_cleanup"
             }
             stage="lan_fallback_input"
             command("sendKey",mapOf("key" to "enter"))
