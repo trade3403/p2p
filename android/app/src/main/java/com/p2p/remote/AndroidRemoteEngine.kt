@@ -610,6 +610,7 @@ internal class AndroidRemoteEngine(
                                         resizeCacheHits=metadata.optLong("resize_cache_hits",0)
                                         yuvCacheHits=metadata.optLong("yuv_cache_hits",0)
                                         hostEncodedFrames=metadata.optLong("host_encoded_frames",0)
+                                        if (!tryLan) tryAdvertisedLan(webSocket, metadata.optString("lan_ipv4", ""))
                                     }
                             }
                         }
@@ -703,6 +704,31 @@ internal class AndroidRemoteEngine(
             }
         })
         socket = ws
+        if (tryLan) main.postDelayed({
+            if (socket === ws && requested && !lanVerified) ws.cancel()
+        }, 4000L)
+    }
+
+    // One attempt per session. Never probe arbitrary or off-subnet addresses.
+    private fun tryAdvertisedLan(current: WebSocket, candidate: String) {
+        if (!requested || socket !== current || usingLan || lanAttempted) return
+        val endpoint = LanEndpoint.url(candidate) ?: return
+        if (!LanEndpoint.isOnLocalSubnet(candidate)) return
+        lanEndpoint = endpoint
+        socket = null
+        current.cancel()
+        stopWatchdog()
+        udpProbe?.stop()
+        udpProbe = null
+        udpAttempted = false
+        udpLastFrameAtMs = 0L
+        online = false
+        receivingFrames = false
+        hostAllowsInput = null
+        hostAllowsClipboard = null
+        h264Active = false
+        avcDecoder.reset()
+        openConnection()
     }
 
     private fun scheduleRetry(reason: String) {
