@@ -396,7 +396,8 @@ def read_avc_metrics(strict=True):
                 # still rejects blank/unknown encoder and decoder names.
                 items=dict(re.findall(r"(?m)^([a-z_]+)=([^\r\n]*)",field))
                 if all(k in items for k in ("codec","frames","fps","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","encoder","decoder","decoder_mode",
-                        "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames")):
+                        "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames",
+                        "transport","viewer_lan_video_bytes","viewer_relay_video_bytes","host_lan_video_bytes","host_relay_video_bytes","host_relay_suppressed_frames")):
                     return items
         return None
     try:
@@ -407,7 +408,8 @@ def read_avc_metrics(strict=True):
         raise
     finally:
         android_tap("关闭性能数据")
-    for key in ("frames","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames"):
+    for key in ("frames","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames",
+                "viewer_lan_video_bytes","viewer_relay_video_bytes","host_lan_video_bytes","host_relay_video_bytes","host_relay_suppressed_frames"):
         data[key]=int(data[key])
     data["fps"]=float(data["fps"])
     if not strict:
@@ -665,6 +667,14 @@ def android():
         require(second["frames"]>first["frames"] and second["fps"]>0 and second["bps"]>0
                 and second["rtt"]>=0,"No measured live AVC progress")
         require(second["host_encoded_frames"]>first["host_encoded_frames"],"Host encoded frame count did not progress")
+        require(second["transport"]=="VPS WSS 中转" and first["transport"]=="VPS WSS 中转",
+                "Public release test must use actual WSS transport")
+        require(second["viewer_relay_video_bytes"]>first["viewer_relay_video_bytes"]>=0
+                and second["host_relay_video_bytes"]>first["host_relay_video_bytes"]>=0,
+                "Actual release AVC relay video bytes did not progress on both ends")
+        require(first["viewer_lan_video_bytes"]==second["viewer_lan_video_bytes"]==0
+                and first["host_lan_video_bytes"]==second["host_lan_video_bytes"]==0,
+                "Unexpected LAN video bytes in public release test")
         if second["capture_backend"]=="DXGI" and second["encoder"]!="Media Foundation D3D11 texture" and second["reused_frames"]>0:
             require(second["resize_cache_hits"]>0,"Idle DXGI frames did not use scaled pixel cache")
         if second["encoder"]=="OpenH264 software" and second["resize_cache_hits"]>0:

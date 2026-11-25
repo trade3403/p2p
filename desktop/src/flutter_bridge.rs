@@ -123,6 +123,7 @@ struct HostHandle {
     monitor_index: Arc<AtomicUsize>,
     pairing_decisions: Sender<PairingDecision>,
     transport_video: Arc<crate::host::TransportVideoStats>,
+    lan_active: Arc<AtomicBool>,
 }
 
 struct ViewerHandle {
@@ -200,6 +201,7 @@ impl Engine {
         value["host_running"] = json!(self.host.as_ref().is_some_and(|h| h.running.load(Ordering::SeqCst)));
         if let Some(host) = &self.host {
             let stats = &host.transport_video;
+            value["host_lan_active"] = json!(host.lan_active.load(Ordering::SeqCst));
             value["host_lan_video_bytes"] = json!(stats.lan_bytes.load(Ordering::Relaxed));
             value["host_relay_video_bytes"] = json!(stats.relay_bytes.load(Ordering::Relaxed));
             value["host_lan_video_frames"] = json!(stats.lan_frames.load(Ordering::Relaxed));
@@ -337,6 +339,7 @@ impl Engine {
         let (messages, message_rx) = mpsc::channel::<String>();
         let (decision_tx, decision_rx) = mpsc::channel::<PairingDecision>();
         let transport_video = Arc::new(crate::host::TransportVideoStats::default());
+        let lan_active = Arc::new(AtomicBool::new(false));
         let config = HostConfig {
             server: profile.relay_url.clone(),
             relay_token: profile.relay_token.clone(),
@@ -347,7 +350,7 @@ impl Engine {
             monitor_index: monitor_index.clone(),
             // The pairing coordinator starts the listener only after local approval.
             lan_direct: Arc::new(AtomicBool::new(true)),
-            lan_active: Arc::new(AtomicBool::new(false)),
+            lan_active: lan_active.clone(),
             allow_udp_probe: Arc::new(AtomicBool::new(false)),
             allow_udp_preview: Arc::new(AtomicBool::new(false)),
             udp_active: Arc::new(AtomicBool::new(false)),
@@ -408,6 +411,7 @@ impl Engine {
             monitor_index,
             pairing_decisions: decision_tx,
             transport_video,
+            lan_active,
         });
         {
             let mut shared = shared_lock(&self.shared);

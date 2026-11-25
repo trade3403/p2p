@@ -165,6 +165,9 @@ class _RemoteScreenState extends State<RemoteScreen> {
                     const Text('请先在网络连接中保存 Relay 访问口令。'),
                   if (requested || connected)
                     Text('${_controller.transport} · RTT ${_controller.rttMs?.toString() ?? "待测"} ms'),
+                  if (connected && _controller.isAndroid)
+                    Text('LAN ${_controller.snapshot['viewer_lan_video_bytes'] ?? '待测'} B · VPS ${_controller.snapshot['viewer_relay_video_bytes'] ?? '待测'} B',
+                      style: const TextStyle(fontSize: 11, color: P2PColors.muted)),
                   if (!_controller.bridgeAvailable)
                     Padding(
                       padding: const EdgeInsets.only(top: 7),
@@ -541,7 +544,13 @@ class _RemoteScreenState extends State<RemoteScreen> {
         'reused_frames=${s['reused_frames'] ?? 0}\n'
         'resize_cache_hits=${s['resize_cache_hits'] ?? 0}\n'
         'yuv_cache_hits=${s['yuv_cache_hits'] ?? 0}\n'
-        'host_encoded_frames=${s['host_encoded_frames'] ?? 0}';
+        'host_encoded_frames=${s['host_encoded_frames'] ?? 0}\n'
+        'transport=${_controller.transport}\n'
+        'viewer_lan_video_bytes=${s['viewer_lan_video_bytes'] ?? -1}\n'
+        'viewer_relay_video_bytes=${s['viewer_relay_video_bytes'] ?? -1}\n'
+        'host_lan_video_bytes=${s['host_lan_video_bytes'] ?? -1}\n'
+        'host_relay_video_bytes=${s['host_relay_video_bytes'] ?? -1}\n'
+        'host_relay_suppressed_frames=${s['host_relay_suppressed_frames'] ?? -1}';
     await showDialog<void>(
       context: routeContext,
       builder: (dialogContext) => AlertDialog(

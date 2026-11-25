@@ -258,7 +258,10 @@ where
                         "reused_frames": video_stats.reused_frames.load(Ordering::Relaxed),
                         "resize_cache_hits": video_stats.resize_cache_hits.load(Ordering::Relaxed),
                         "yuv_cache_hits": video_stats.yuv_cache_hits.load(Ordering::Relaxed),
-                        "host_encoded_frames": video_stats.encode_samples.load(Ordering::Relaxed)
+                        "host_encoded_frames": video_stats.encode_samples.load(Ordering::Relaxed),
+                        "host_lan_video_bytes": config.transport_video.lan_bytes.load(Ordering::Relaxed),
+                        "host_relay_video_bytes": config.transport_video.relay_bytes.load(Ordering::Relaxed),
+                        "host_relay_suppressed_frames": config.transport_video.relay_suppressed_frames.load(Ordering::Relaxed)
                     }).to_string();
                     let packet = encrypt(protocol::MONITORS, info.as_bytes())?;
                     outgoing.send(Message::Binary(packet)).await?;

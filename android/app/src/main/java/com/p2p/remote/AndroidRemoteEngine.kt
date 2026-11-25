@@ -106,6 +106,9 @@ internal class AndroidRemoteEngine(
     private var resizeCacheHits = 0L
     private var yuvCacheHits = 0L
     private var hostEncodedFrames = 0L
+    private var hostLanVideoBytes: Long? = null
+    private var hostRelayVideoBytes: Long? = null
+    private var hostRelaySuppressedFrames: Long? = null
     private var sampleAt = 0L
     private var sampleFrames = 0L
     private var sampleDrops = 0L
@@ -244,6 +247,9 @@ internal class AndroidRemoteEngine(
         "resize_cache_hits" to resizeCacheHits,
         "yuv_cache_hits" to yuvCacheHits,
         "host_encoded_frames" to hostEncodedFrames,
+        "host_lan_video_bytes" to hostLanVideoBytes,
+        "host_relay_video_bytes" to hostRelayVideoBytes,
+        "host_relay_suppressed_frames" to hostRelaySuppressedFrames,
         "pairing_status" to if (pairingActive) status else "",
         "vault_error" to null,
     )
@@ -434,6 +440,9 @@ internal class AndroidRemoteEngine(
         retryTask?.let { main.removeCallbacks(it) }
         retryTask = null
         val tryLan = lanAttempt.take(lanEndpoint)
+        hostLanVideoBytes = null
+        hostRelayVideoBytes = null
+        hostRelaySuppressedFrames = null
         usingLan = tryLan
         lanBusinessKey = null
         lanVerified = false
@@ -642,6 +651,9 @@ internal class AndroidRemoteEngine(
                                         resizeCacheHits=metadata.optLong("resize_cache_hits",0)
                                         yuvCacheHits=metadata.optLong("yuv_cache_hits",0)
                                         hostEncodedFrames=metadata.optLong("host_encoded_frames",0)
+                                        hostLanVideoBytes=metadata.optLong("host_lan_video_bytes",-1).takeIf { it >= 0 }
+                                        hostRelayVideoBytes=metadata.optLong("host_relay_video_bytes",-1).takeIf { it >= 0 }
+                                        hostRelaySuppressedFrames=metadata.optLong("host_relay_suppressed_frames",-1).takeIf { it >= 0 }
                                         if (!tryLan) tryAdvertisedLan(webSocket, metadata.optString("lan_ipv4", ""))
                                     }
                             }
@@ -948,6 +960,9 @@ internal class AndroidRemoteEngine(
     }
 
     private fun disconnect() {
+        hostLanVideoBytes = null
+        hostRelayVideoBytes = null
+        hostRelaySuppressedFrames = null
         requested = false
         lanBusinessKey = null
         lanSequence = null

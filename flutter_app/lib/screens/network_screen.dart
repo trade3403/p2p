@@ -18,11 +18,17 @@ class _NetworkScreenState extends State<NetworkScreen> {
   final _server = TextEditingController(text: 'wss://p2ptest.aikissgo.com');
   final _token = TextEditingController();
   bool _saving = false;
+  Timer? _hostMetricsTimer;
 
   @override
   void initState() {
     super.initState();
     final controller = P2PRemoteController.instance;
+    _hostMetricsTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (controller.bridgeAvailable && controller.hostRunning && !controller.isAndroid) {
+        unawaited(controller.refreshSnapshot());
+      }
+    });
     unawaited(controller.initialize().then((_) {
       if (mounted && _server.text == 'wss://p2ptest.aikissgo.com') {
         _server.text = controller.relayUrl;
@@ -33,6 +39,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
 
   @override
   void dispose() {
+    _hostMetricsTimer?.cancel();
     _server.dispose();
     _token.dispose();
     super.dispose();
@@ -155,16 +162,35 @@ class _NetworkScreenState extends State<NetworkScreen> {
               ),
             ),
             const SizedBox(height: 15),
-            const PanelCard(
+            PanelCard(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('当前连接策略', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                  SizedBox(height: 10),
-                  Text(
-                    '当前正式连接路径使用 WSS Relay、AES-256-GCM 和数字配对。新版 Flutter Host 尚未开放 LAN / UDP 直连，STUN 仅用于诊断。',
+                  const Text('当前连接策略', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '数字配对经 WSS 完成。同一局域网尝试加密 LAN 直连，失败或断线时自动回退 VPS。直连期间仍可保留中转连接用于恢复；视频数据不应持续经 VPS 发送。',
                     style: TextStyle(color: P2PColors.muted, fontSize: 12, height: 1.55),
                   ),
+                  if (controller.hostRunning) ...[
+                    _NetworkStatusRow(icon: Icons.lan_rounded, title: '本机 LAN 会话',
+                      value: controller.snapshot['host_lan_active'] == true ? '已验证直连' : '未激活'),
+                    _NetworkStatusRow(icon: Icons.swap_vert, title: 'LAN 视频发送',
+                      value: _bytes(controller.snapshot['host_lan_video_bytes'])),
+                    _NetworkStatusRow(icon: Icons.cloud_done_rounded, title: 'VPS 视频发送',
+                      value: _bytes(controller.snapshot['host_relay_video_bytes'])),
+                    _NetworkStatusRow(icon: Icons.info_outline, title: '抑制 VPS 视频包',
+                      value: controller.snapshot['host_relay_suppressed_frames']?.toString() ?? '待测'),
+                  ],
+                  if (controller.viewerRequested) ...[
+                    _NetworkStatusRow(icon: Icons.lan_rounded, title: '当前控制端传输', value: controller.transport),
+                    _NetworkStatusRow(icon: Icons.swap_vert, title: 'LAN 视频接收',
+                      value: _bytes(controller.snapshot['viewer_lan_video_bytes'])),
+                    _NetworkStatusRow(icon: Icons.cloud_done_rounded, title: 'VPS 视频接收',
+                      value: _bytes(controller.snapshot['viewer_relay_video_bytes'])),
+                  ],
+                  const Text('累计加密视频包字节，不含 TCP/TLS、握手和元数据；并非网卡总流量。',
+                    style: TextStyle(color: P2PColors.muted, fontSize: 11)),
                 ],
               ),
             ),
@@ -172,6 +198,11 @@ class _NetworkScreenState extends State<NetworkScreen> {
         );
       },
     );
+  }
+
+  String _bytes(Object? value) {
+    if (value is! num || value < 0) return '待测';
+    return '${value.toInt()} B';
   }
 
   Future<void> _saveConfiguration() async {
