@@ -165,9 +165,6 @@ class _RemoteScreenState extends State<RemoteScreen> {
                     const Text('请先在网络连接中保存 Relay 访问口令。'),
                   if (requested || connected)
                     Text('${_controller.transport} · RTT ${_controller.rttMs?.toString() ?? "待测"} ms'),
-                  if (connected && _controller.isAndroid)
-                    Text('LAN ${_controller.snapshot['viewer_lan_video_bytes'] ?? '待测'} B · VPS ${_controller.snapshot['viewer_relay_video_bytes'] ?? '待测'} B',
-                      style: const TextStyle(fontSize: 11, color: P2PColors.muted)),
                   if (!_controller.bridgeAvailable)
                     Padding(
                       padding: const EdgeInsets.only(top: 7),
@@ -191,6 +188,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
                       if (connected)
                         Semantics(
                           identifier: 'p2p_remote_fullscreen',
+                          label: '全屏远控',
+                          button: true,
                           child: IconButton(
                             tooltip: '全屏远控',
                             onPressed: _openFullscreen,

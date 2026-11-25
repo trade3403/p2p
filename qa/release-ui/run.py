@@ -276,9 +276,13 @@ def find_android(label,enabled=True,seconds=35,scroll=False,identifier=None):
     attempts=0
     def find():
         nonlocal attempts
-        attempts+=1
         candidates=[]
-        for node in android_tree():
+        nodes=android_tree()
+        # A failed UI dump is not evidence that the control is off-screen.
+        if not nodes:
+            return None
+        attempts+=1
+        for node in nodes:
             a=node.attrib
             if enabled and a.get("enabled")!="true": continue
             fields=[a.get("text",""),a.get("content-desc",""),a.get("resource-id","")]
@@ -298,8 +302,9 @@ def find_android(label,enabled=True,seconds=35,scroll=False,identifier=None):
             return min(candidates,key=lambda item:item[0])[1]
         if scroll:
             w,h=android_capture().size
-            # Reset to the top initially, then scan in modest increments.
-            y1,y2=(.34,.79) if attempts in (1,2) else (.77,.46)
+            # Cycle back toward the top instead of getting stuck at the bottom
+            # while a dynamic control becomes enabled or a UI dump misses it.
+            y1,y2=(.34,.79) if (attempts-1)%6 in (0,1) else (.77,.46)
             adb("shell","input","swipe",str(int(w*.85)),str(int(h*y1)),str(int(w*.85)),str(int(h*y2)),"450")
         return None
     return wait("Android visible UI: "+label,find,seconds)
@@ -616,7 +621,11 @@ def android():
         android_tap("请求连接")
         send("pair_submitted")
         # Full-screen button exists only after native engine receives authenticated video.
-        android_tap("全屏远控",seconds=65,scroll=True,identifier="p2p_remote_fullscreen")
+        try:
+            android_tap("全屏远控",seconds=65,scroll=True,identifier="p2p_remote_fullscreen")
+        except AssertionError:
+            snapshot(android_capture,"fullscreen-entry-failed")
+            raise
         send("connected")
         find_android("远程输入文字",seconds=45)
         find_android("p2p_remote_video",enabled=False)
