@@ -7,6 +7,8 @@ import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'performance_series.dart';
+
 typedef _InitNative = Int32 Function();
 typedef _InitDart = int Function();
 typedef _CommandNative = Pointer<Utf8> Function(Pointer<Utf8>);
@@ -69,6 +71,82 @@ class P2PRemoteController extends ChangeNotifier {
   int frameHeight = 0;
   int _lastFrameVersion = 0;
   String lastEvent = '';
+
+  PerformanceSeries? _performanceSeries;
+  Timer? _performanceTimer;
+  Stopwatch? _performanceClock;
+  bool _performanceReadBusy = false;
+
+  bool get performanceSampling => _performanceSeries?.active == true;
+  int get performanceSampleCount => _performanceSeries?.count ?? 0;
+  String? get performanceSeriesJson => _performanceSeries?.export();
+
+  bool get canStartPerformanceSampling =>
+      bridgeAvailable && (isAndroid ? viewerRequested : hostRunning);
+
+  void startPerformanceSampling() {
+    if (performanceSampling || !canStartPerformanceSampling ||
+        _performanceReadBusy) return;
+    final series = PerformanceSeries(host: !isAndroid, startedAt: DateTime.now().toUtc());
+    final clock = Stopwatch()..start();
+    _performanceSeries = series;
+    _performanceClock = clock;
+    _performanceTimer = Timer.periodic(
+      const Duration(milliseconds: PerformanceSeries.intervalMs),
+      (_) => unawaited(_samplePerformance(series, clock)),
+    );
+    unawaited(_samplePerformance(series, clock));
+    notifyListeners();
+  }
+
+  void stopPerformanceSampling([String reason = 'user_stop']) {
+    _performanceTimer?.cancel();
+    _performanceTimer = null;
+    _performanceClock?.stop();
+    _performanceClock = null;
+    _performanceSeries?.stop(reason);
+    notifyListeners();
+  }
+
+  Future<void> _samplePerformance(PerformanceSeries series, Stopwatch clock) async {
+    if (!identical(series, _performanceSeries) || !series.active ||
+        _performanceReadBusy) return;
+    if (!canStartPerformanceSampling) {
+      stopPerformanceSampling('session_inactive');
+      return;
+    }
+    _performanceReadBusy = true;
+    try {
+      final response = await _invoke(const <String, Object?>{'method': 'snapshot'});
+      if (!identical(series, _performanceSeries) || !series.active) return;
+      final raw = response['snapshot'];
+      if (response['ok'] != true || raw is! Map) {
+        stopPerformanceSampling('snapshot_failed');
+        return;
+      }
+      final snapshot = Map<String, dynamic>.from(raw);
+      final active = series.host
+          ? snapshot['host_running'] == true
+          : snapshot['viewer_requested'] == true;
+      if (!active) {
+        stopPerformanceSampling('session_inactive');
+        return;
+      }
+      series.add(snapshot, elapsedMs: clock.elapsedMilliseconds,
+          capturedAt: DateTime.now().toUtc());
+      if (!series.active) {
+        stopPerformanceSampling('sample_limit');
+      } else {
+        notifyListeners();
+      }
+    } catch (_) {
+      if (identical(series, _performanceSeries) && series.active) {
+        stopPerformanceSampling('snapshot_failed');
+      }
+    } finally {
+      _performanceReadBusy = false;
+    }
+  }
 
   bool get isAndroid => Platform.isAndroid;
   bool get hostRunning => _snapshot['host_running'] == true;
@@ -310,8 +388,10 @@ class P2PRemoteController extends ChangeNotifier {
   Future<bool> startHost() async =>
       (await _invoke(const <String, Object?>{'method': 'startHost'}))['ok'] == true;
 
-  Future<bool> stopHost() async =>
-      (await _invoke(const <String, Object?>{'method': 'stopHost'}))['ok'] == true;
+  Future<bool> stopHost() async {
+    if (performanceSampling && !isAndroid) stopPerformanceSampling('host_stop');
+    return (await _invoke(const <String, Object?>{'method': 'stopHost'}))['ok'] == true;
+  }
 
   Future<bool> setRemoteInputAllowed(bool allowed) async =>
       (await _invoke(<String, Object?>{
@@ -353,8 +433,10 @@ class P2PRemoteController extends ChangeNotifier {
         'sessionKey': sessionKey,
       }))['ok'] == true;
 
-  Future<bool> disconnectViewer() async =>
-      (await _invoke(const <String, Object?>{'method': 'disconnectViewer'}))['ok'] == true;
+  Future<bool> disconnectViewer() async {
+    if (performanceSampling && isAndroid) stopPerformanceSampling('viewer_disconnect');
+    return (await _invoke(const <String, Object?>{'method': 'disconnectViewer'}))['ok'] == true;
+  }
 
   Future<bool> sendPointer(String kind, double x, double y) async =>
       (await _invoke(<String, Object?>{
@@ -452,6 +534,9 @@ class P2PRemoteController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _performanceTimer?.cancel();
+    _performanceClock?.stop();
+    _performanceSeries?.stop('controller_disposed');
     _eventTimer?.cancel();
     _frameTimer?.cancel();
     _androidEventSubscription?.cancel();

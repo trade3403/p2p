@@ -27,7 +27,8 @@ class _NetworkScreenState extends State<NetworkScreen> {
     super.initState();
     final controller = P2PRemoteController.instance;
     _hostMetricsTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      if (controller.bridgeAvailable && controller.hostRunning && !controller.isAndroid) {
+      if (controller.bridgeAvailable && controller.hostRunning && !controller.isAndroid &&
+          !controller.performanceSampling) {
         unawaited(controller.refreshSnapshot());
       }
     });
@@ -228,6 +229,26 @@ class _NetworkScreenState extends State<NetworkScreen> {
                     _NetworkStatusRow(icon: Icons.cloud_done_rounded, title: 'VPS 视频接收',
                       value: _bytes(controller.snapshot['viewer_relay_video_bytes'])),
                   ],
+                  const SizedBox(height: 12),
+                  const Text('连续性能采样（约每2秒，最多300份；仅本机内存，离开本页仍可采样）'),
+                  Text('已采样 ${controller.performanceSampleCount} 份'),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      OutlinedButton(
+                        onPressed: controller.performanceSampling
+                            ? () => controller.stopPerformanceSampling()
+                            : controller.canStartPerformanceSampling
+                                ? controller.startPerformanceSampling : null,
+                        child: Text(controller.performanceSampling ? '停止采样' : '开始采样'),
+                      ),
+                      OutlinedButton(
+                        onPressed: controller.performanceSampleCount > 0
+                            ? () => _copyPerformanceSeries(controller) : null,
+                        child: const Text('复制采样 JSON'),
+                      ),
+                    ],
+                  ),
                   const Text('WebSocket 已连接不代表对端已经接收画面。累计加密视频包字节不含 TCP/TLS、握手和元数据；并非网卡总流量。',
                     style: TextStyle(color: P2PColors.muted, fontSize: 11)),
                 ],
@@ -248,6 +269,23 @@ class _NetworkScreenState extends State<NetworkScreen> {
   String _bytes(Object? value) {
     if (value is! num || value < 0) return '待测';
     return '${value.toInt()} B';
+  }
+
+  Future<void> _copyPerformanceSeries(P2PRemoteController controller) async {
+    final json = controller.performanceSeriesJson;
+    if (json == null) return;
+    try {
+      await Clipboard.setData(ClipboardData(text: json));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('采样 JSON 已复制到本机剪贴板')),
+      );
+    } on PlatformException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法写入本机剪贴板')),
+      );
+    }
   }
 
   Future<void> _copyHostMetrics(P2PRemoteController controller) async {
