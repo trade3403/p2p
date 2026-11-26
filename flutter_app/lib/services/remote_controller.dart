@@ -86,7 +86,9 @@ class P2PRemoteController extends ChangeNotifier {
 
   void startPerformanceSampling() {
     if (performanceSampling || !canStartPerformanceSampling ||
-        _performanceReadBusy) return;
+        _performanceReadBusy) {
+      return;
+    }
     final series = PerformanceSeries(host: !isAndroid, startedAt: DateTime.now().toUtc());
     final clock = Stopwatch()..start();
     _performanceSeries = series;
@@ -110,7 +112,9 @@ class P2PRemoteController extends ChangeNotifier {
 
   Future<void> _samplePerformance(PerformanceSeries series, Stopwatch clock) async {
     if (!identical(series, _performanceSeries) || !series.active ||
-        _performanceReadBusy) return;
+        _performanceReadBusy) {
+      return;
+    }
     if (!canStartPerformanceSampling) {
       stopPerformanceSampling('session_inactive');
       return;
