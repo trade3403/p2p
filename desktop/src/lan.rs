@@ -110,15 +110,25 @@ async fn accept_authorized(
 // Ownership is scoped to the authorized session future, including error,
 // cancellation and unwinding paths. A failed acquisition cannot clear a
 // different session's flag.
-struct ActiveLan<'a>(&'a std::sync::atomic::AtomicBool);
+struct ActiveLan<'a> {
+    active: &'a std::sync::atomic::AtomicBool,
+    gate: &'a host::ControlGate,
+}
 impl<'a> ActiveLan<'a> {
-    fn acquire(active: &'a std::sync::atomic::AtomicBool) -> Option<Self> {
-        active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .ok().map(|_| Self(active))
+    fn acquire(active: &'a std::sync::atomic::AtomicBool, gate: &'a host::ControlGate) -> Option<Self> {
+        let mut state = gate.lock();
+        if active.load(Ordering::SeqCst) { return None; }
+        state.advance();
+        active.store(true, Ordering::SeqCst);
+        Some(Self { active, gate })
     }
 }
 impl Drop for ActiveLan<'_> {
-    fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+    fn drop(&mut self) {
+        let mut state = self.gate.lock();
+        state.advance();
+        self.active.store(false, Ordering::SeqCst);
+    }
 }
 
 // Shared by the real listener and the Windows loopback integration test.
@@ -134,7 +144,7 @@ async fn serve_authorized_session(
     }
     // The production listener serializes handshakes, but also enforce exclusive
     // ownership here so a competing caller cannot overwrite or clear it.
-    let Some(_active) = ActiveLan::acquire(&config.lan_active) else { return; };
+    let Some(_active) = ActiveLan::acquire(&config.lan_active, &config.control_gate) else { return; };
     let _ = config.messages.send(format!("局域网直连已验证 · 对端 {}", address));
     let mut lan_config = config.clone();
     lan_config.secret = key;
@@ -199,13 +209,14 @@ mod tests {
     #[test]
     fn active_lan_lease_is_exclusive_and_releases_on_drop() {
         let flag = std::sync::atomic::AtomicBool::new(false);
-        let owner = ActiveLan::acquire(&flag).unwrap();
+        let gate = host::ControlGate::default();
+        let owner = ActiveLan::acquire(&flag, &gate).unwrap();
         assert!(flag.load(Ordering::SeqCst));
-        assert!(ActiveLan::acquire(&flag).is_none());
+        assert!(ActiveLan::acquire(&flag, &gate).is_none());
         assert!(flag.load(Ordering::SeqCst));
         drop(owner);
         assert!(!flag.load(Ordering::SeqCst));
-        let next = ActiveLan::acquire(&flag).unwrap();
+        let next = ActiveLan::acquire(&flag, &gate).unwrap();
         drop(next);
         assert!(!flag.load(Ordering::SeqCst));
     }
@@ -243,6 +254,7 @@ mod tests {
             monitor_index: Arc::new(AtomicUsize::new(0)),
             lan_direct: Arc::new(AtomicBool::new(true)),
             lan_active: Arc::new(AtomicBool::new(false)),
+            control_gate: Arc::new(host::ControlGate::default()),
             allow_udp_probe: Arc::new(AtomicBool::new(false)),
             allow_udp_preview: Arc::new(AtomicBool::new(false)),
             udp_active: Arc::new(AtomicBool::new(false)),

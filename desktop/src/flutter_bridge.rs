@@ -351,6 +351,7 @@ impl Engine {
             // The pairing coordinator starts the listener only after local approval.
             lan_direct: Arc::new(AtomicBool::new(true)),
             lan_active: lan_active.clone(),
+            control_gate: Arc::new(crate::host::ControlGate::default()),
             allow_udp_probe: Arc::new(AtomicBool::new(false)),
             allow_udp_preview: Arc::new(AtomicBool::new(false)),
             udp_active: Arc::new(AtomicBool::new(false)),

@@ -24,6 +24,61 @@ impl TransportVideoStats {
     }
 }
 
+// Shared by both transports of one approved Host. No lock is held across
+// network awaits. OS input and the LAN ownership transition use the same lock.
+#[derive(Default)]
+pub struct ControlGate {
+    state: std::sync::Mutex<ControlState>,
+}
+#[derive(Default)]
+pub(crate) struct ControlState {
+    epoch: u64,
+    next_id: u64,
+    relay: Option<u64>,
+    lan: Option<u64>,
+    held: Option<u64>,
+}
+impl ControlState {
+    fn slot(&self, lan: bool) -> Option<u64> {
+        if lan { self.lan } else { self.relay }
+    }
+    fn register(&mut self, lan: bool) -> u64 {
+        if let Some(old) = self.slot(lan) { self.release_for(old); }
+        self.next_id = self.next_id.checked_add(1).expect("input session id exhausted");
+        let id = self.next_id;
+        if lan { self.lan = Some(id); } else { self.relay = Some(id); }
+        id
+    }
+    fn current(&self, lan: bool, id: u64, epoch: u64, active: bool) -> bool {
+        self.slot(lan) == Some(id) && self.epoch == epoch && lan == active
+    }
+    fn retire(&mut self, lan: bool, id: u64) {
+        self.release_for(id);
+        if self.slot(lan) == Some(id) {
+            if lan { self.lan = None; } else { self.relay = None; }
+        }
+    }
+    fn release_for(&mut self, id: u64) {
+        if self.held == Some(id) {
+            #[cfg(windows)]
+            let _ = win_input::mouse_button(false, false);
+            self.held = None;
+        }
+    }
+    // Call under the gate lock before publishing a transport transition.
+    // Every queued command from the previous epoch becomes invalid even if
+    // the connection switches away and back before its worker wakes up.
+    pub(crate) fn advance(&mut self) {
+        if let Some(id) = self.held { self.release_for(id); }
+        self.epoch = self.epoch.checked_add(1).expect("input epoch exhausted");
+    }
+}
+impl ControlGate {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, ControlState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
 #[derive(Clone)]
 pub struct HostConfig {
     pub server: String,
@@ -35,6 +90,7 @@ pub struct HostConfig {
     pub monitor_index: Arc<AtomicUsize>,
     pub lan_direct: Arc<AtomicBool>,
     pub lan_active: Arc<AtomicBool>,
+    pub control_gate: Arc<ControlGate>,
     pub allow_udp_probe: Arc<AtomicBool>,
     pub allow_udp_preview: Arc<AtomicBool>,
     pub udp_active: Arc<AtomicBool>,
@@ -153,10 +209,7 @@ where
         else { protocol::encrypt(&config.secret, kind, bytes) }
     };
     #[cfg(windows)]
-    let remote_input = start_input_worker(
-        config.allow_input.clone(), config.monitor_index.clone(),
-        config.messages.clone()
-    );
+    let remote_input = InputWorker::start(config.clone(), is_lan_session);
     // Each connection begins in JPEG compatibility mode; AVC is negotiated
     // only by an authenticated viewer with an attached decoding surface.
     let force_jpeg = Arc::new(AtomicBool::new(true));
@@ -357,44 +410,46 @@ where
                                             }
                                         }
                                         "monitor" => {
-                                            if let Some(index) = command.index {
-                                                if screenshots::Screen::all()
-                                                    .map(|screens| crate::remote_ops::valid_monitor_index(index, screens.len()))
-                                                    .unwrap_or(false)
-                                                {
-                                                    config.monitor_index.store(index, Ordering::SeqCst);
-                                                }
-                                            }
-                                        }
-                                        "clipboard_get" if config.allow_clipboard.load(Ordering::SeqCst) => {
-                                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                                if let Ok(text) = clipboard.get_text() {
-                                                    if crate::remote_ops::valid_clipboard_text(&text) {
-                                                        let response = encrypt(protocol::CLIPBOARD, text.as_bytes())?;
-                                                        tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(response)))
-                                                            .await.context("clipboard send timed out")??;
+                                            remote_input.with_current(|| {
+                                                if let Some(index) = command.index {
+                                                    if screenshots::Screen::all()
+                                                        .map(|screens| crate::remote_ops::valid_monitor_index(index, screens.len()))
+                                                        .unwrap_or(false)
+                                                    {
+                                                        config.monitor_index.store(index, Ordering::SeqCst);
                                                     }
                                                 }
+                                            });
+                                        }
+                                        "clipboard_get" if config.allow_clipboard.load(Ordering::SeqCst) => {
+                                            let text = remote_input.with_current(|| {
+                                                if !config.allow_clipboard.load(Ordering::SeqCst) { return None; }
+                                                let mut clipboard = arboard::Clipboard::new().ok()?;
+                                                let text = clipboard.get_text().ok()?;
+                                                crate::remote_ops::valid_clipboard_text(&text).then_some(text)
+                                            }).flatten();
+                                            if let Some(text) = text {
+                                                let response = encrypt(protocol::CLIPBOARD, text.as_bytes())?;
+                                                tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(response)))
+                                                    .await.context("clipboard send timed out")??;
                                             }
                                         }
                                         "clipboard_set" if config.allow_clipboard.load(Ordering::SeqCst) => {
-                                            if let Some(value) = &command.text {
-                                                if crate::remote_ops::valid_clipboard_text(value) {
-                                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                                        let _ = clipboard.set_text(value.as_str());
+                                            remote_input.with_current(|| {
+                                                if !config.allow_clipboard.load(Ordering::SeqCst) { return; }
+                                                if let Some(value) = &command.text {
+                                                    if crate::remote_ops::valid_clipboard_text(value) {
+                                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                                            let _ = clipboard.set_text(value.as_str());
+                                                        }
                                                     }
                                                 }
-                                            }
+                                            });
                                         }
                                         _ if config.allow_input.load(Ordering::SeqCst) => {
-                                            // Preserve mouse-button state on one dedicated OS
-                                            // input thread instead of rebuilding Enigo per packet.
-                                            // The queue is bounded to avoid accumulating stale moves.
-                                            if command.kind == "move" {
-                                                let _ = remote_input.try_send(command);
-                                            } else {
-                                                let _ = remote_input.send(command);
-                                            }
+                                            // Bounded generation-tagged queue. A saturated
+                                            // non-move queue fails closed instead of losing an up.
+                                            remote_input.enqueue(command).await?;
                                         }
                                         _ => {}
                                     }
@@ -411,6 +466,8 @@ where
         }
     }
     drop(udp_probe);
+    #[cfg(windows)]
+    drop(remote_input);
     let _ = tokio::time::timeout(Duration::from_secs(2), outgoing.close()).await;
     let _ = config.messages.send("连接已断开".into());
     Ok(())
@@ -490,61 +547,183 @@ mod adaptive_tests {
 }
 
 #[cfg(windows)]
-fn start_input_worker(
-    allowed: Arc<AtomicBool>,
-    monitor: Arc<AtomicUsize>,
-    messages: Sender<String>,
-) -> std::sync::mpsc::SyncSender<Control> {
-    use std::sync::mpsc::{self, RecvTimeoutError};
-    let (tx, rx) = mpsc::sync_channel::<Control>(128);
-    std::thread::spawn(move || {
-        let _ = messages.send("Windows 原生 SendInput 输入线程已启动".into());
-        let mut held = false;
-        let mut last_action = std::time::Instant::now();
-        loop {
-            if !allowed.load(Ordering::SeqCst) && held {
-                let _ = win_input::mouse_button(false, false);
-                held = false;
-            }
-            let command = match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(command) => command,
-                Err(RecvTimeoutError::Timeout) => {
-                    if held && last_action.elapsed() > Duration::from_secs(20) {
-                        let _ = win_input::mouse_button(false, false);
-                        held = false;
+struct InputWorker {
+    config: HostConfig,
+    lan: bool,
+    id: u64,
+    tx: std::sync::mpsc::SyncSender<(u64, Control)>,
+}
+#[cfg(windows)]
+impl InputWorker {
+    fn start(config: HostConfig, lan: bool) -> Self {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        let (tx, rx) = mpsc::sync_channel::<(u64, Control)>(128);
+        let id = config.control_gate.lock().register(lan);
+        let worker = config.clone();
+        std::thread::spawn(move || {
+            let _ = worker.messages.send("Windows 原生 SendInput 输入线程已启动".into());
+            let mut last_action = std::time::Instant::now();
+            loop {
+                {
+                    let mut state = worker.control_gate.lock();
+                    if state.slot(lan) != Some(id) { break; }
+                    if !input_allowed(&worker, lan)
+                        || last_action.elapsed() > Duration::from_secs(20) {
+                        state.release_for(id);
                     }
+                }
+                let (epoch, command) = match rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(item) => item,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+                // Execute under the same lock as LAN activation/deactivation.
+                // Old queued work cannot execute after a completed handoff.
+                let mut state = worker.control_gate.lock();
+                if !input_allowed(&worker, lan) {
+                    state.release_for(id);
                     continue;
                 }
-                Err(RecvTimeoutError::Disconnected) => break,
-            };
-            if !allowed.load(Ordering::SeqCst) { continue; }
-            last_action = std::time::Instant::now();
-            let result = match command.kind.as_str() {
-                "down" if valid_pointer(&command) => {
-                    if !held {
-                        let result = handle_control(&command, monitor.load(Ordering::SeqCst));
-                        if result.is_ok() { held = true; }
+                if !state.current(lan, id, epoch, worker.lan_active.load(Ordering::SeqCst)) {
+                    // Stale work must not release a current-epoch held button.
+                    continue;
+                }
+                last_action = std::time::Instant::now();
+                let held = state.held == Some(id);
+                let result = match command.kind.as_str() {
+                    "down" if valid_pointer(&command) => {
+                        if !held {
+                            let result = handle_control(&command, worker.monitor_index.load(Ordering::SeqCst));
+                            if result.is_ok() { state.held = Some(id); }
+                            result
+                        } else { Ok(()) }
+                    }
+                    "up" => {
+                        let result = if held { win_input::mouse_button(false, false) } else { Ok(()) };
+                        if result.is_ok() && held { state.held = None; }
                         result
-                    } else { Ok(()) }
+                    }
+                    "right_click" | "move" if valid_pointer(&command) =>
+                        handle_control(&command, worker.monitor_index.load(Ordering::SeqCst)),
+                    "text" | "key" | "scroll" =>
+                        handle_control(&command, worker.monitor_index.load(Ordering::SeqCst)),
+                    _ => Ok(()),
+                };
+                if let Err(error) = result {
+                    let _ = worker.messages.send(format!("远程输入执行失败：{error}"));
                 }
-                "up" => {
-                    let result = if held { win_input::mouse_button(false, false) } else { Ok(()) };
-                    held = false;
-                    result
+            }
+            worker.control_gate.lock().retire(lan, id);
+        });
+        Self { config, lan, id, tx }
+    }
+
+    fn with_current<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
+        let state = self.config.control_gate.lock();
+        if !session_allowed(&self.config, self.lan)
+            || !state.current(self.lan, self.id, state.epoch, self.config.lan_active.load(Ordering::SeqCst)) {
+            return None;
+        }
+        // Keep the guard live across the synchronous side effect.
+        let result = action();
+        drop(state);
+        Some(result)
+    }
+
+    async fn enqueue(&self, command: Control) -> Result<()> {
+        use std::sync::mpsc::TrySendError;
+        let epoch = {
+            let state = self.config.control_gate.lock();
+            if !input_allowed(&self.config, self.lan)
+                || !state.current(self.lan, self.id, state.epoch, self.config.lan_active.load(Ordering::SeqCst)) {
+                return Ok(());
+            }
+            state.epoch
+        };
+        let is_move = command.kind == "move";
+        let mut item = (epoch, command);
+        let started = std::time::Instant::now();
+        loop {
+            match self.tx.try_send(item) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Full(_)) if is_move => return Ok(()),
+                Err(TrySendError::Full(pending)) => {
+                    item = pending;
+                    {
+                        let state = self.config.control_gate.lock();
+                        if !input_allowed(&self.config, self.lan)
+                            || !state.current(self.lan, self.id, epoch, self.config.lan_active.load(Ordering::SeqCst)) {
+                            return Ok(());
+                        }
+                    }
+                    if started.elapsed() >= Duration::from_secs(1) {
+                        return Err(anyhow!("remote input queue saturated"));
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                "right_click" | "move" if valid_pointer(&command) =>
-                    handle_control(&command, monitor.load(Ordering::SeqCst)),
-                "text" | "key" | "scroll" =>
-                    handle_control(&command, monitor.load(Ordering::SeqCst)),
-                _ => Ok(()),
-            };
-            if let Err(error) = result {
-                let _ = messages.send(format!("远程输入执行失败：{error}"));
+                Err(TrySendError::Disconnected(_)) => return Err(anyhow!("remote input worker stopped")),
             }
         }
-        if held { let _ = win_input::mouse_button(false, false); }
-    });
-    tx
+    }
+}
+#[cfg(windows)]
+impl Drop for InputWorker {
+    fn drop(&mut self) {
+        // Invalidate immediately, even when serve_session exits via error or
+        // cancellation. The old worker cannot release a newer owner's mouse.
+        self.config.control_gate.lock().retire(self.lan, self.id);
+    }
+}
+#[cfg(windows)]
+fn session_allowed(config: &HostConfig, lan: bool) -> bool {
+    config.running.load(Ordering::SeqCst)
+        && (!lan || config.lan_direct.load(Ordering::SeqCst))
+}
+#[cfg(windows)]
+fn input_allowed(config: &HostConfig, lan: bool) -> bool {
+    session_allowed(config, lan) && config.allow_input.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod input_gate_tests {
+    use super::*;
+    #[test]
+    fn old_queue_epochs_and_retired_sessions_cannot_execute() {
+        let gate = ControlGate::default();
+        let mut state = gate.lock();
+        let relay = state.register(false);
+        let original = state.epoch;
+        assert!(state.current(false, relay, original, false));
+        state.advance();
+        let lan = state.register(true);
+        let direct = state.epoch;
+        assert!(!state.current(false, relay, original, true));
+        assert!(!state.current(false, relay, direct, true));
+        assert!(state.current(true, lan, direct, true));
+        state.retire(true, lan);
+        state.advance();
+        let resumed = state.epoch;
+        assert!(!state.current(false, relay, original, false));
+        assert!(!state.current(true, lan, direct, false));
+        assert!(state.current(false, relay, resumed, false));
+        let replacement = state.register(false);
+        state.retire(false, relay);
+        assert!(!state.current(false, relay, resumed, false));
+        assert!(state.current(false, replacement, resumed, false));
+    }
+    #[test]
+    fn relay_reconnect_does_not_invalidate_current_lan_queue() {
+        let gate = ControlGate::default();
+        let mut state = gate.lock();
+        let old = state.register(false);
+        state.advance();
+        let lan = state.register(true);
+        let epoch = state.epoch;
+        let new = state.register(false);
+        state.retire(false, old);
+        assert!(state.current(true, lan, epoch, true));
+        assert!(!state.current(false, new, epoch, true));
+    }
 }
 
 #[cfg(windows)]

@@ -133,6 +133,7 @@ async fn windows_real_host_lan_suppresses_relay_video() {
             monitor_index: Arc::new(AtomicUsize::new(0)),
             lan_direct: Arc::new(AtomicBool::new(true)),
             lan_active: Arc::new(AtomicBool::new(false)),
+            control_gate: Arc::new(host::ControlGate::default()),
             allow_udp_probe: Arc::new(AtomicBool::new(false)),
             allow_udp_preview: Arc::new(AtomicBool::new(false)),
             udp_active: Arc::new(AtomicBool::new(false)),
@@ -213,6 +214,28 @@ async fn windows_real_host_lan_suppresses_relay_video() {
         assert!(!blocked.pong && direct.pong && codec_controls == 1);
         assert!(direct.frames >= 2 && direct.bytes > 0);
 
+        // Actual Windows clipboard side effect, tested separately from the
+        // ten-second video sample. Do not read or log pre-existing clipboard data.
+        config.allow_clipboard.store(true, Ordering::SeqCst);
+        {
+            let mut clipboard = arboard::Clipboard::new().expect("test clipboard unavailable");
+            clipboard.set_text("G2b-local-marker").expect("initialize test clipboard");
+        }
+        relay.send(protocol::CONTROL, br#"{"type":"clipboard_set","text":"G2b-blocked-relay"}"#).await;
+        let _ = tokio::join!(relay.sample(3, 99), lan.sample(3, 99));
+        {
+            let mut clipboard = arboard::Clipboard::new().unwrap();
+            assert!(clipboard.get_text().unwrap() == "G2b-local-marker", "inactive relay mutated clipboard");
+        }
+        lan.send(protocol::CONTROL, br#"{"type":"clipboard_set","text":"G2b-authorized-lan"}"#).await;
+        let _ = tokio::join!(relay.sample(3, 99), lan.sample(3, 99));
+        {
+            let mut clipboard = arboard::Clipboard::new().unwrap();
+            assert!(clipboard.get_text().unwrap() == "G2b-authorized-lan", "LAN clipboard command not applied");
+        }
+        config.allow_clipboard.store(false, Ordering::SeqCst);
+        evidence("clipboard_ownership", serde_json::json!({"relay_blocked":true,"lan_applied":true}));
+
         timeout(Duration::from_secs(5), lan.socket.close(None)).await.unwrap().unwrap();
         drop(lan);
         timeout(Duration::from_secs(12), lan_task).await.expect("LAN cleanup timeout").unwrap();
@@ -260,6 +283,7 @@ async fn windows_real_host_lan_exit_cleanup() {
             monitor_index: Arc::new(AtomicUsize::new(0)),
             lan_direct: Arc::new(AtomicBool::new(true)),
             lan_active: Arc::new(AtomicBool::new(false)),
+            control_gate: Arc::new(host::ControlGate::default()),
             allow_udp_probe: Arc::new(AtomicBool::new(false)),
             allow_udp_preview: Arc::new(AtomicBool::new(false)),
             udp_active: Arc::new(AtomicBool::new(false)),
