@@ -56,6 +56,38 @@ pub fn is_lan_address(ip: IpAddr) -> bool {
     }
 }
 
+const MAX_ADVERTISED_IPV4: usize = 16;
+
+fn advertised_ipv4(primary: Option<std::net::Ipv4Addr>, mut candidates: Vec<std::net::Ipv4Addr>) -> Vec<String> {
+    let usable = |ip: &std::net::Ipv4Addr| ip.is_private() && !matches!(ip.octets()[3], 0 | 255);
+    candidates.retain(usable);
+    candidates.sort_unstable();
+    candidates.dedup();
+    if let Some(primary) = primary.filter(usable) {
+        candidates.retain(|ip| *ip != primary);
+        candidates.insert(0, primary);
+    }
+    candidates.into_iter().take(MAX_ADVERTISED_IPV4).map(|ip| ip.to_string()).collect()
+}
+
+// The legacy default-route hint remains first for older viewers. All other
+// candidates come from up interfaces; no remote probing or DNS is needed.
+#[cfg(windows)]
+pub(crate) fn local_ipv4_candidates() -> Vec<String> {
+    extern "C" { fn p2p_lan_ipv4_candidates(output: *mut u32, capacity: u32) -> u32; }
+    let mut raw = [0u32; 64];
+    let count = unsafe { p2p_lan_ipv4_candidates(raw.as_mut_ptr(), raw.len() as u32) } as usize;
+    let candidates = raw[..count.min(raw.len())].iter().copied().map(std::net::Ipv4Addr::from).collect();
+    let primary = std::net::UdpSocket::bind("0.0.0.0:0").ok().and_then(|socket| {
+        socket.connect("1.1.1.1:443").ok()?;
+        match socket.local_addr().ok()?.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            _ => None,
+        }
+    });
+    advertised_ipv4(primary, candidates)
+}
+
 pub fn authorized_hello(secret: &[u8;32], packet: &[u8]) -> bool {
     hello_nonce(secret, packet).is_some()
 }
@@ -219,6 +251,29 @@ mod tests {
         let next = ActiveLan::acquire(&flag, &gate).unwrap();
         drop(next);
         assert!(!flag.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn advertised_candidates_are_private_deduplicated_bounded_and_primary_first() {
+        let primary = Ipv4Addr::new(192,168,9,2);
+        let candidates = vec![Ipv4Addr::new(10,0,0,2), primary, primary,
+            Ipv4Addr::LOCALHOST, Ipv4Addr::new(8,8,8,8), Ipv4Addr::new(192,168,1,255)];
+        assert_eq!(advertised_ipv4(Some(primary), candidates), vec!["192.168.9.2","10.0.0.2"]);
+        let many = (1..=30).map(|i| Ipv4Addr::new(10,0,0,i)).collect();
+        assert_eq!(advertised_ipv4(None, many).len(), MAX_ADVERTISED_IPV4);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn actual_windows_adapter_discovery_returns_only_bounded_private_literals() {
+        let values = local_ipv4_candidates();
+        assert!(values.len() <= MAX_ADVERTISED_IPV4);
+        for value in &values {
+            let ip: Ipv4Addr = value.parse().unwrap();
+            assert!(ip.is_private() && !matches!(ip.octets()[3], 0 | 255));
+        }
+        let unique: std::collections::HashSet<_> = values.iter().collect();
+        assert_eq!(values.len(), unique.len());
+        // Runner topology may have no usable private NIC. Do not invent one.
+        println!("LAN adapter discovery actual private candidate count={}", values.len());
     }
     #[test]
     fn accepts_only_private_ipv4_peers() {

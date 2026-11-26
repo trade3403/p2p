@@ -703,7 +703,16 @@ internal class AndroidRemoteEngine(
                                         hostRelayVideoFrames=metadata.optLong("host_relay_video_frames",-1).takeIf { it >= 0 }
                                         hostRelaySocketOpen=if(metadata.has("host_relay_socket_open")) metadata.optBoolean("host_relay_socket_open") else null
                                         hostRelaySocketOpens=metadata.optLong("host_relay_socket_opens",-1).takeIf { it >= 0 }
-                                        if (!tryLan) tryAdvertisedLan(webSocket, metadata.optString("lan_ipv4", ""))
+                                        if (!tryLan) {
+                                            val advertised = mutableListOf<String>()
+                                            val array = metadata.optJSONArray("lan_ipv4_candidates")
+                                            if (array != null) for (i in 0 until minOf(array.length(),16)) {
+                                                val candidate = array.opt(i)
+                                                if (candidate is String) advertised.add(candidate)
+                                            }
+                                            advertised.add(metadata.optString("lan_ipv4", ""))
+                                            tryAdvertisedLan(webSocket, advertised)
+                                        }
                                     }
                             }
                         }
@@ -824,10 +833,10 @@ internal class AndroidRemoteEngine(
     }
 
     // One attempt per session. Never probe arbitrary or off-subnet addresses.
-    private fun tryAdvertisedLan(current: WebSocket, candidate: String) {
+    private fun tryAdvertisedLan(current: WebSocket, candidates: List<String>) {
         if (!requested || socket !== current || usingLan || lanAttempt.attempted) return
+        val candidate = LanEndpoint.selectAdvertised(candidates) ?: return
         val endpoint = LanEndpoint.url(candidate) ?: return
-        if (!LanEndpoint.isOnLocalSubnet(candidate)) return
         lanEndpoint = endpoint
         socket = null
         current.cancel()

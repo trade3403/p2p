@@ -308,18 +308,11 @@ where
         actual_encoder.clone(),
         video_stats.clone(),
     );
-    // UDP connect selects a local interface without sending a datagram.
-    // The candidate is advertised only inside session-encrypted metadata.
+    // Refresh bounded candidates while sharing, only in encrypted metadata.
     #[cfg(windows)]
-    let lan_ipv4 = if !is_lan_session && config.lan_direct.load(Ordering::SeqCst) {
-        std::net::UdpSocket::bind("0.0.0.0:0").ok().and_then(|socket| {
-            socket.connect("1.1.1.1:443").ok()?;
-            match socket.local_addr().ok()?.ip() {
-                std::net::IpAddr::V4(ip) if ip.is_private() => Some(ip.to_string()),
-                _ => None,
-            }
-        })
-    } else { None };
+    let mut lan_candidates: Vec<String> = Vec::new();
+    #[cfg(windows)]
+    let mut lan_candidates_at: Option<std::time::Instant> = None;
     let mut metadata_tick = tokio::time::interval(Duration::from_secs(2));
     // Stop even when capture is idle and the peer sends no messages.
     let mut shutdown_tick = tokio::time::interval(Duration::from_millis(200));
@@ -376,11 +369,21 @@ where
                     || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
                 #[cfg(windows)]
                 {
+                    if !is_lan_session && config.lan_direct.load(Ordering::SeqCst) {
+                        if lan_candidates_at.map_or(true, |at| at.elapsed() >= Duration::from_secs(10)) {
+                            lan_candidates = crate::lan::local_ipv4_candidates();
+                            lan_candidates_at = Some(std::time::Instant::now());
+                        }
+                    } else {
+                        lan_candidates.clear();
+                        lan_candidates_at = None;
+                    }
                     let count = screenshots::Screen::all().map(|screens| screens.len()).unwrap_or(0);
                     let selected = config.monitor_index.load(Ordering::SeqCst).min(count.saturating_sub(1));
                     let info = serde_json::json!({
                         "count": count.min(16), "selected": selected,
-                        "lan_ipv4": lan_ipv4.as_deref(),
+                        "lan_ipv4": lan_candidates.first(),
+                        "lan_ipv4_candidates": &lan_candidates,
                         "allow_input": config.allow_input.load(Ordering::SeqCst),
                         "allow_clipboard": config.allow_clipboard.load(Ordering::SeqCst),
                         "video_target_bps": bitrate.load(Ordering::Relaxed),

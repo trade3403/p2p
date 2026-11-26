@@ -7,27 +7,48 @@ package com.p2p.remote
 internal object LanEndpoint {
     const val PORT = 43821
 
-    fun isOnLocalSubnet(candidate: String): Boolean {
-        if (url(candidate) == null) return false
-        val target = candidate.trim().split(".").map { it.toInt() }
-            .fold(0L) { acc, octet -> (acc shl 8) or octet.toLong() }
-        return runCatching {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces() ?: return false
-            java.util.Collections.list(interfaces).any { nic ->
-                nic.isUp && !nic.isLoopback && nic.interfaceAddresses.any { entry ->
-                    val address = entry.address as? java.net.Inet4Address
-                    val prefix = entry.networkPrefixLength.toInt()
-                    if (address == null || prefix !in 1..30 || url(address.hostAddress.orEmpty()) == null) false
-                    else {
-                        val local = address.address.fold(0L) { acc, octet ->
-                            (acc shl 8) or (octet.toInt() and 255).toLong()
-                        }
-                        local != target && (local ushr (32 - prefix)) == (target ushr (32 - prefix))
-                    }
-                }
-            }
-        }.getOrDefault(false)
+    internal data class LocalSubnet(val address: String, val prefix: Int)
+
+    private fun number(ip: String): Long? {
+        if (url(ip) == null) return null
+        return ip.trim().split(".").fold(0L) { acc, octet -> (acc shl 8) or octet.toLong() }
     }
+
+    private fun localSubnets(): List<LocalSubnet> = runCatching {
+        val interfaces = java.net.NetworkInterface.getNetworkInterfaces() ?: return emptyList()
+        java.util.Collections.list(interfaces).filter { it.isUp && !it.isLoopback }
+            .flatMap { nic -> nic.interfaceAddresses.mapNotNull { entry ->
+                val address = entry.address as? java.net.Inet4Address ?: return@mapNotNull null
+                LocalSubnet(address.hostAddress.orEmpty(), entry.networkPrefixLength.toInt())
+            } }
+    }.getOrDefault(emptyList())
+
+    // Only advertised literals on a live local RFC1918 subnet are eligible.
+    // Prefer longest matching prefix, then preserve the host's order.
+    internal fun rankedCandidates(candidates: List<String>, subnets: List<LocalSubnet>): List<String> {
+        val local = subnets.mapNotNull { subnet ->
+            if (subnet.prefix !in 1..30) null
+            else number(subnet.address)?.let { it to subnet.prefix }
+        }
+        val own = subnets.mapNotNull { number(it.address) }.toSet()
+        return candidates.take(17).map { it.trim() }.distinct().mapNotNull { candidate ->
+            val target = number(candidate) ?: return@mapNotNull null
+            if (target in own) return@mapNotNull null
+            val prefix = local.mapNotNull { (ip, prefix) ->
+                val hostMask = (1L shl (32-prefix))-1
+                val network = ip and hostMask.inv()
+                if ((target and hostMask.inv()) == network &&
+                    target != network && target != (network or hostMask)) prefix else null
+            }.maxOrNull() ?: return@mapNotNull null
+            candidate to prefix
+        }.sortedByDescending { it.second }.map { it.first }
+    }
+
+    fun selectAdvertised(candidates: List<String>): String? =
+        rankedCandidates(candidates, localSubnets()).firstOrNull()
+
+    fun isOnLocalSubnet(candidate: String): Boolean =
+        selectAdvertised(listOf(candidate)) != null
 
     fun url(ipAddress: String): String? {
         val octets = ipAddress.trim().split(".")
