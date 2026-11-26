@@ -6,6 +6,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../app_theme.dart';
 import '../services/remote_controller.dart';
+import '../services/performance_export.dart';
 import '../widgets/p2p_widgets.dart';
 import '../widgets/remote_keyboard.dart';
 
@@ -519,6 +520,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
 
   Future<void> _showVideoMetrics(BuildContext routeContext) async {
     final s = _controller.snapshot;
+    final capturedAt = DateTime.now().toUtc();
     final codec = s['active_video_codec'] as String? ??
         (_controller.viewerConnected ? (s['h264_active'] == true ? 'H264' : 'JPEG') : 'none');
     final hardware = s['avc_decoder_hardware'] == true
@@ -576,8 +578,23 @@ class _RemoteScreenState extends State<RemoteScreen> {
             child: Text(details, style: const TextStyle(fontSize: 11)),
           ),
         ),
-        actions: [TextButton(onPressed: () => Navigator.of(dialogContext).pop(),
-          child: const Text('关闭性能数据'))],
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(
+                text: exportPerformanceSnapshot(s, capturedAt: capturedAt),
+              ));
+              if (dialogContext.mounted) {
+                ScaffoldMessenger.of(routeContext).showSnackBar(
+                  const SnackBar(content: Text('性能 JSON 已复制到本机剪贴板')),
+                );
+              }
+            },
+            child: const Text('复制性能 JSON'),
+          ),
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭性能数据')),
+        ],
       ),
     );
   }
