@@ -32,6 +32,7 @@ struct Observed {
     bytes: u64,
     frames: u64,
     pong: bool,
+    ws_pings: u64,
 }
 struct Peer<S> {
     socket: WebSocketStream<S>,
@@ -86,6 +87,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Peer<S> {
                         }
                         _ => {}
                     }
+                }
+                Message::Ping(_) => {
+                    result.ws_pings += 1;
+                    timeout(Duration::from_secs(5), self.socket.flush()).await.unwrap().unwrap();
                 }
                 Message::Close(_) => panic!("host closed during observation"),
                 _ => {}
@@ -212,7 +217,7 @@ async fn windows_real_host_lan_suppresses_relay_video() {
         assert!(stable_after.suppressed > stable_before.suppressed);
         assert_eq!((blocked.frames, blocked.bytes), (0, 0));
         assert!(!blocked.pong && direct.pong && codec_controls == 1);
-        assert!(direct.frames >= 2 && direct.bytes > 0);
+        assert!(direct.frames >= 2 && direct.bytes > 0 && direct.ws_pings > 0);
 
         // Actual Windows clipboard side effect, tested separately from the
         // ten-second video sample. Do not read or log pre-existing clipboard data.
@@ -273,7 +278,7 @@ async fn windows_real_host_lan_exit_cleanup() {
         let relay_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let relay_address = relay_listener.local_addr().unwrap();
         let secret = protocol::new_secret();
-        let (messages, _logs) = mpsc::channel();
+        let (messages, logs) = mpsc::channel();
         let config = HostConfig {
             server: format!("ws://{relay_address}"),
             relay_token: "local-test-only".into(), secret,
@@ -304,7 +309,7 @@ async fn windows_real_host_lan_exit_cleanup() {
         assert!(baseline.pong && baseline.frames > 0);
         g2_evidence("baseline", serde_json::json!({"host":snapshot(&config),"relay":baseline}));
 
-        for (i, mode) in ["tcp_drop", "task_cancel", "lan_disable", "sharing_stop"].into_iter().enumerate() {
+        for (i, mode) in ["tcp_drop", "task_cancel", "lan_disable", "silent_peer", "sharing_stop"].into_iter().enumerate() {
             let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let address = listener.local_addr().unwrap();
             let lan_config = config.clone();
@@ -338,6 +343,49 @@ async fn windows_real_host_lan_exit_cleanup() {
             g2_evidence("active", serde_json::json!({"mode":mode,"host":active,"lan":direct,"relay":settle}));
 
             let started = Instant::now();
+            // For the silent-peer case keep the underlying TCP socket open and
+            // drain real bytes without processing WebSocket frames (no Pong).
+            // This is a responsive TCP stack with a silent WebSocket peer,
+            // not a physical network outage or an Android fallback test.
+            if mode == "silent_peer" {
+                use tokio::io::AsyncReadExt;
+                let _ = logs.try_iter().count();
+                let mut raw_bytes = 0u64;
+                let drain = async {
+                    let mut buf = [0u8; 16384];
+                    loop {
+                        match lan.socket.get_mut().read(&mut buf).await {
+                            Ok(0) => break,
+                            Ok(n) => raw_bytes += n as u64,
+                            Err(_) => break,
+                        }
+                    }
+                };
+                let (joined, drained) = tokio::join!(
+                    timeout(Duration::from_secs(25), task),
+                    timeout(Duration::from_secs(26), drain)
+                );
+                joined.expect("silent LAN peer was not expired").unwrap();
+                drained.expect("host did not close silent LAN socket");
+                let released = snapshot(&config);
+                let heartbeat_timeout = logs.try_iter().any(|s| s.contains("LAN heartbeat pong timed out"));
+                g2_evidence("silent_peer_released", serde_json::json!({"host":released,
+                    "observed_cleanup_ms":started.elapsed().as_millis(),
+                    "raw_tcp_bytes_drained":raw_bytes,"heartbeat_timeout":heartbeat_timeout}));
+                assert!(!released.active && heartbeat_timeout && raw_bytes > 0);
+                drop(lan);
+                let ping = 350 + i as u64;
+                relay.send(protocol::PING, &ping.to_be_bytes()).await;
+                let resumed = relay.sample(6, ping).await;
+                let after = snapshot(&config);
+                g2_evidence("resumed", serde_json::json!({"mode":mode,"before":released,
+                    "after":after,"relay":resumed}));
+                assert!(!after.active && resumed.pong && resumed.frames > 0);
+                assert!(after.relay_bytes > released.relay_bytes && after.relay_frames > released.relay_frames);
+                assert_eq!(after.lan_bytes, released.lan_bytes);
+                assert_eq!(after.lan_frames, released.lan_frames);
+                continue;
+            }
             // Drop without WebSocket close, or cancel while the real session
             // owns the active lease. Disable/stop keeps the peer alive until
             // the production shutdown path has completed.

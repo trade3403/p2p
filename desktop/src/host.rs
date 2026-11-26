@@ -190,6 +190,44 @@ pub(crate) async fn run(config: &HostConfig) -> Result<()> {
     serve_session(config, socket, false).await
 }
 
+// LAN-only transport liveness, independent of authenticated application RTT.
+// A fresh unpredictable payload prevents stale/unsolicited Pong from clearing
+// an outstanding probe. This does not grant any business permissions.
+const LAN_PING_INTERVAL: Duration = Duration::from_secs(4);
+const LAN_PONG_TIMEOUT: Duration = Duration::from_secs(12);
+
+struct LanHeartbeat {
+    next: tokio::time::Instant,
+    pending: Option<([u8; 8], tokio::time::Instant)>,
+}
+impl LanHeartbeat {
+    fn new(now: tokio::time::Instant) -> Self {
+        Self { next: now + LAN_PING_INTERVAL, pending: None }
+    }
+    fn poll(&mut self, now: tokio::time::Instant) -> Result<Option<[u8; 8]>> {
+        if let Some((_, deadline)) = self.pending {
+            if now >= deadline { return Err(anyhow!("LAN heartbeat pong timed out")); }
+            return Ok(None);
+        }
+        if now < self.next { return Ok(None); }
+        let mut token = [0u8; 8];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut token);
+        self.pending = Some((token, now + LAN_PONG_TIMEOUT));
+        Ok(Some(token))
+    }
+    fn pong(&mut self, payload: &[u8], now: tokio::time::Instant) -> bool {
+        if let Some((token, deadline)) = self.pending {
+            if now < deadline && payload == token.as_slice() {
+                self.pending = None;
+                self.next = now + LAN_PING_INTERVAL;
+                return true;
+            }
+        }
+        false
+    }
+}
+
 /// Shared authenticated session pump for VPS WSS and opt-in LAN WebSocket.
 /// Only the LAN path performs an additional encrypted HELLO proof before calling this.
 pub(crate) async fn serve_session<S>(
@@ -246,6 +284,7 @@ where
     // Stop even when capture is idle and the peer sends no messages.
     let mut shutdown_tick = tokio::time::interval(Duration::from_millis(200));
     shutdown_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut heartbeat = is_lan_session.then(|| LanHeartbeat::new(tokio::time::Instant::now()));
     let (udp_signal_tx, mut udp_signal_rx) =
         tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let mut udp_probe: Option<crate::udp_punch::Probe> = None;
@@ -253,7 +292,14 @@ where
         if !config.running.load(Ordering::SeqCst)
             || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
         tokio::select! {
-            _ = shutdown_tick.tick() => {}
+            _ = shutdown_tick.tick() => {
+                if let Some(heartbeat) = &mut heartbeat {
+                    if let Some(token) = heartbeat.poll(tokio::time::Instant::now())? {
+                        tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Ping(token.to_vec())))
+                            .await.context("LAN heartbeat ping send timed out")??;
+                    }
+                }
+            }
             signal = udp_signal_rx.recv() => {
                 if let Some(payload) = signal {
                     if config.running.load(Ordering::SeqCst) {
@@ -457,6 +503,16 @@ where
                             }
                             }
                         }
+                    }
+                    Some(Ok(Message::Pong(payload))) => {
+                        if let Some(heartbeat) = &mut heartbeat {
+                            heartbeat.pong(&payload, tokio::time::Instant::now());
+                        }
+                    }
+                    Some(Ok(Message::Ping(_))) if is_lan_session => {
+                        // Tungstenite queues the automatic Pong on read.
+                        tokio::time::timeout(Duration::from_secs(8), outgoing.flush())
+                            .await.context("LAN websocket pong flush timed out")??;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(error)) => return Err(error.into()),
@@ -682,6 +738,37 @@ fn session_allowed(config: &HostConfig, lan: bool) -> bool {
 #[cfg(windows)]
 fn input_allowed(config: &HostConfig, lan: bool) -> bool {
     session_allowed(config, lan) && config.allow_input.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+    #[test]
+    fn matching_pong_only_and_deadline_not_extended_by_unrelated_traffic() {
+        let start = tokio::time::Instant::now();
+        let mut h = LanHeartbeat::new(start);
+        assert!(h.poll(start).unwrap().is_none());
+        let sent = start + LAN_PING_INTERVAL;
+        let token = h.poll(sent).unwrap().unwrap();
+        let mut wrong = token;
+        wrong[0] ^= 1;
+        assert!(!h.pong(&wrong, sent + Duration::from_secs(1)));
+        assert!(h.poll(sent + Duration::from_secs(11)).unwrap().is_none());
+        assert!(!h.pong(&token, sent + LAN_PONG_TIMEOUT));
+        assert!(h.poll(sent + LAN_PONG_TIMEOUT).is_err());
+    }
+    #[test]
+    fn healthy_pong_rearms_and_duplicate_does_not_refresh() {
+        let start = tokio::time::Instant::now();
+        let mut h = LanHeartbeat::new(start);
+        let sent = start + LAN_PING_INTERVAL;
+        let token = h.poll(sent).unwrap().unwrap();
+        let received = sent + Duration::from_secs(1);
+        assert!(h.pong(&token, received));
+        assert!(!h.pong(&token, received + Duration::from_secs(2)));
+        assert!(h.poll(received + Duration::from_secs(3)).unwrap().is_none());
+        assert!(h.poll(received + LAN_PING_INTERVAL).unwrap().is_some());
+    }
 }
 
 #[cfg(test)]
