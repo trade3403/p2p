@@ -85,7 +85,8 @@ class PublicRelayE2eTest {
     // is a previously received Windows frame, NOT a live Windows LAN capture.
     private class LanPeer(private val root: ByteArray, private val jpeg: ByteArray,
         private val avc: List<ByteArray> = emptyList(),
-        private val stallHandshake: Boolean = false) : AutoCloseable {
+        private val stallHandshake: Boolean = false,
+        private val bindAddress: String? = null) : AutoCloseable {
         private val server = MockWebServer()
         private val worker = Executors.newSingleThreadScheduledExecutor()
         private val peer = AtomicReference<WebSocket>()
@@ -151,7 +152,7 @@ class PublicRelayE2eTest {
             return cipher.doFinal(packet.copyOfRange(13,packet.size))
         }
         init {
-            address = Collections.list(NetworkInterface.getNetworkInterfaces())
+            address = bindAddress ?: Collections.list(NetworkInterface.getNetworkInterfaces())
                 .filter { it.isUp && !it.isLoopback }
                 .flatMap { Collections.list(it.inetAddresses) }
                 .filterIsInstance<Inet4Address>()
@@ -704,6 +705,110 @@ class PublicRelayE2eTest {
             success("Real Windows keyboard, click and clipboard restored after LAN fallback")
             stage="fallback_performance_sample"
             sampleTransport("fallback_live_windows","VPS WSS 中转",false)
+            stage="multi_candidate_network_setup"
+            // The disposable emulator runner installs two /32 test addresses
+            // on loopback and a matching /24 on the active interface. The
+            // production auto-discovery excludes own non-loopback addresses.
+            val activeNet=connectivity.activeNetwork
+            val nic=requireNotNull(connectivity.getLinkProperties(activeNet)?.interfaceName)
+            File(out,"candidate-interface.txt").writeText(nic)
+            phase("multi_candidate_setup")
+            await("runner installed isolated test addresses",30_000) {
+                File(out,"candidate-ready.txt").exists()
+            }
+            val firstAddress="10.203.71.2"
+            val secondAddress="10.203.71.3"
+            stage="multi_candidate_ranking"
+            assertEquals(listOf(firstAddress,secondAddress),
+                LanEndpoint.eligibleAdvertised(listOf(firstAddress,firstAddress,secondAddress,"8.8.8.8","10.203.71.1")))
+            val multiEvidence=JSONObject().put("scope","two independent emulator-local IPv4 WebSocket listeners; candidate list injected at authenticated metadata handler boundary")
+            metrics.put("multi_candidate_lan",multiEvidence)
+            try {
+                LanPeer(root,jpeg,stallHandshake=true,bindAddress=firstAddress).use { first ->
+                    LanPeer(root,jpeg,bindAddress=secondAddress).use { second ->
+                        stage="multi_candidate_start"
+                        val oldRelay=main { field.get(engine) as WebSocket }
+                        val baseline=snap()
+                        assertEquals("relay_video",baseline["viewer_transport_phase"])
+                        // This session already used a manual LAN address. Start
+                        // a fresh requested session on WSS with the paired root.
+                        command("disconnectViewer")
+                        val connect=AndroidRemoteEngine::class.java.getDeclaredMethod("connect",
+                            String::class.java,String::class.java,String::class.java,String::class.java).apply { isAccessible=true }
+                        val hex=root.joinToString("") { "%02x".format(it.toInt() and 255) }
+                        main { connect.invoke(engine,cfg.getString("server"),cfg.getString("token"),hex,"") }
+                        await("fresh actual public video before advertised upgrade",45_000) {
+                            val s=snap()
+                            s["viewer_transport_phase"]=="relay_video" && s["viewer_connected"]==true &&
+                                s["host_metadata_current"]==true && s["viewer_allow_input"]==true &&
+                                (s["lan_candidate_attempts"] as Number).toInt()==0 &&
+                                main { field.get(engine)!=null && field.get(engine)!==oldRelay }
+                        }
+                        val relay=main { field.get(engine) as WebSocket }
+                        val prior=snap()
+                        val upgrade=AndroidRemoteEngine::class.java.getDeclaredMethod("tryAdvertisedLan",
+                            WebSocket::class.java,List::class.java).apply { isAccessible=true }
+                        val started=SystemClock.elapsedRealtime()
+                        // Only the metadata source is injected; ranking, socket
+                        // creation, encryption, timeout and retry are production.
+                        main { upgrade.invoke(engine,relay,listOf(firstAddress,secondAddress)) }
+                        stage="multi_candidate_first_stalled"
+                        await("first real candidate authenticated HELLO",8_000) { first.authenticatedHellos==1L }
+                        stage="multi_candidate_second_verified"
+                        await("second real candidate authenticated video",15_000) {
+                            val s=snap()
+                            s["viewer_transport_phase"]=="lan_video" &&
+                                (s["lan_candidate_attempts"] as Number).toInt()==2 &&
+                                second.authenticatedHellos==1L && second.authenticatedPongs>0 &&
+                                (s["viewer_lan_video_bytes"] as Number).toLong()>0
+                        }
+                        val accepted=snap()
+                        assertEquals(0L,first.sentVideoPackets)
+                        assertNull(accepted["lan_fallback_reason"])
+                        assertEquals(false,accepted["lan_fallback_started"])
+                        assertEquals(prior["relay_socket_opens"],accepted["relay_socket_opens"])
+                        assertTrue((accepted["lan_attempt_ms"] as Number).toLong()>=0)
+                        multiEvidence.put("first_authenticated_hello",true)
+                            .put("first_video_packets",first.sentVideoPackets)
+                            .put("second_authenticated_hello",true)
+                            .put("second_authenticated_pongs",second.authenticatedPongs)
+                            .put("candidate_attempts",accepted["lan_candidate_attempts"])
+                            .put("attempt_ms",accepted["lan_attempt_ms"])
+                            .put("observed_upgrade_to_video_ms",SystemClock.elapsedRealtime()-started)
+                            .put("relay_socket_opens_during_batch",0)
+                        Thread.sleep(3000)
+                        val stable=snap()
+                        assertEquals("lan_video",stable["viewer_transport_phase"])
+                        assertEquals(2,(stable["lan_candidate_attempts"] as Number).toInt())
+                        assertEquals(accepted["viewer_relay_video_bytes"],stable["viewer_relay_video_bytes"])
+                        assertTrue((stable["viewer_lan_video_bytes"] as Number).toLong()>
+                            (accepted["viewer_lan_video_bytes"] as Number).toLong())
+                        multiEvidence.put("stable_second_candidate_video",true)
+                        stage="multi_candidate_verified_disconnect"
+                        second.interrupt()
+                        await("verified second candidate closes to real public WSS",45_000) {
+                            val s=snap()
+                            s["viewer_transport_phase"]=="relay_video" && s["viewer_allow_input"]==true &&
+                                s["lan_fallback_first_video_ms"] is Number
+                        }
+                        val recovered=snap()
+                        assertEquals(2,(recovered["lan_candidate_attempts"] as Number).toInt())
+                        assertEquals(1L,first.authenticatedHellos)
+                        assertEquals(1L,second.authenticatedHellos)
+                        assertTrue((recovered["relay_socket_opens"] as Number).toLong()>
+                            (accepted["relay_socket_opens"] as Number).toLong())
+                        multiEvidence.put("verified_candidate_disconnect_recovers_public",true)
+                            .put("fallback_first_video_ms",recovered["lan_fallback_first_video_ms"])
+                        success("First actual candidate stalled authentication; second authenticated and carried video without intermediate WSS; verified close recovered public Windows")
+                        command("disconnectViewer")
+                    }
+                }
+            } finally {
+                phase("multi_candidate_cleanup")
+                await("runner removed isolated test addresses",30_000) {
+                    File(out,"candidate-cleaned.txt").exists()
+                }
+            }
             // Independent AVC session, after every live Windows/JPEG assertion.
             // This is an encoded test pattern, not a physical LAN host capture.
             stage="lan_avc_setup"

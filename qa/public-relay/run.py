@@ -285,6 +285,32 @@ def make_lan_avc_fixture(ffmpeg):
     return payload
 
 
+def candidate_aliases(enable, installed, interface=None):
+    # Root commands are restricted to the disposable hosted emulator; never
+    # touch the Linux host network or a physical Android device.
+    require(os.environ.get("GITHUB_ACTIONS")=="true" and
+            os.environ.get("RUNNER_ENVIRONMENT")=="github-hosted" and
+            os.environ.get("RUNNER_OS")=="Linux","CI emulator alias setup only")
+    require(adb("shell","getprop","ro.kernel.qemu").stdout.strip()==b"1",
+            "Network alias setup requires an emulator")
+    if enable:
+        require(interface and re.fullmatch(r"[A-Za-z0-9_.-]{1,15}",interface) and interface!="lo",
+                "Invalid emulator interface for candidate test")
+        require(adb("shell","su","0","id","-u").stdout.strip()==b"0",
+                "Disposable emulator root shell unavailable")
+        for address,device in (("10.203.71.1/24",interface),("10.203.71.2/32","lo"),
+                               ("10.203.71.3/32","lo")):
+            result=adb("shell","su","0","ip","addr","add",address,"dev",device,check=False)
+            require(result.returncode==0,"Cannot install isolated emulator test IPv4 alias")
+            installed.append((address,device))
+    else:
+        failures=[]
+        for address,device in reversed(installed):
+            result=adb("shell","su","0","ip","addr","del",address,"dev",device,check=False)
+            if result.returncode: failures.append(address)
+        installed.clear()
+        require(not failures,"Cannot remove emulator test IPv4 alias")
+
 def android():
     global STAGE,WS
     STAGE="video_encoder_preflight"
@@ -328,20 +354,36 @@ def android():
             "com.p2p.remote.PublicRelayE2eTest","com.p2p.remote.test/androidx.test.runner.AndroidJUnitRunner"],
             stdout=log,stderr=subprocess.STDOUT)
         # Include mandatory emulator radio outage and bounded recovery.
-        end=time.monotonic()+420
+        end=time.monotonic()+540
+        aliases=[]
+        aliases_ready=False
+        aliases_cleaned=False
         try:
             while process.poll() is None and time.monotonic()<end:
                 phase=adb("shell","run-as","com.p2p.remote","cat","files/e2e/phase.txt",check=False).stdout.strip()
                 if phase==b"enable":
                     send({"type":"enable"})
+                elif phase==b"multi_candidate_setup" and not aliases_ready:
+                    interface=adb("shell","run-as","com.p2p.remote","cat",
+                                  "files/e2e/candidate-interface.txt").stdout.decode().strip()
+                    candidate_aliases(True,aliases,interface)
+                    adb("shell","run-as","com.p2p.remote","touch","files/e2e/candidate-ready.txt")
+                    aliases_ready=True
+                elif phase==b"multi_candidate_cleanup" and not aliases_cleaned:
+                    candidate_aliases(False,aliases)
+                    adb("shell","run-as","com.p2p.remote","touch","files/e2e/candidate-cleaned.txt")
+                    aliases_cleaned=True
                 time.sleep(1)
             require(process.poll() is not None,"Android instrumentation timed out")
         finally:
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=10)
-            STAGE="evidence_collection"
-            pull_evidence()
+            try:
+                if aliases: candidate_aliases(False,aliases)
+            finally:
+                STAGE="evidence_collection"
+                pull_evidence()
     STAGE="native_assertions"
     require((OUT/"report.json").is_file(),"Native report missing; inspect instrumentation.txt")
     native=json.loads((OUT/"report.json").read_text())
@@ -358,6 +400,14 @@ def android():
         "default_network_lost","native_connection_retired","default_network_restored",
         "new_authenticated_video","sustained_video")),
         "Mandatory Android system network outage evidence incomplete")
+    candidate=native.get("metrics",{}).get("multi_candidate_lan",{})
+    require(candidate.get("candidate_attempts")==2 and candidate.get("first_video_packets")==0 and
+            candidate.get("relay_socket_opens_during_batch")==0 and
+            all(candidate.get(key) is True for key in ("first_authenticated_hello",
+                "second_authenticated_hello","stable_second_candidate_video",
+                "verified_candidate_disconnect_recovers_public")),
+            "Mandatory actual multi-candidate evidence incomplete")
+    require(aliases_ready and aliases_cleaned and not aliases,"Candidate alias lifecycle incomplete")
     STAGE="video_encoding"
     encode_evidence(native["metrics"]["recorded_frames"])
     STAGE="host_confirmation"
