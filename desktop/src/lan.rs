@@ -107,6 +107,20 @@ async fn accept_authorized(
     Ok((socket, business_key(&config.secret, &client_nonce, &server_nonce)))
 }
 
+// Ownership is scoped to the authorized session future, including error,
+// cancellation and unwinding paths. A failed acquisition cannot clear a
+// different session's flag.
+struct ActiveLan<'a>(&'a std::sync::atomic::AtomicBool);
+impl<'a> ActiveLan<'a> {
+    fn acquire(active: &'a std::sync::atomic::AtomicBool) -> Option<Self> {
+        active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok().map(|_| Self(active))
+    }
+}
+impl Drop for ActiveLan<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+}
+
 // Shared by the real listener and the Windows loopback integration test.
 // The active flag can only be reached with a socket returned by accept_authorized.
 async fn serve_authorized_session(
@@ -118,13 +132,13 @@ async fn serve_authorized_session(
     if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
         return;
     }
+    // The production listener serializes handshakes, but also enforce exclusive
+    // ownership here so a competing caller cannot overwrite or clear it.
+    let Some(_active) = ActiveLan::acquire(&config.lan_active) else { return; };
     let _ = config.messages.send(format!("局域网直连已验证 · 对端 {}", address));
-    // One authorized LAN viewer per listener; relay remains connected for fallback.
-    config.lan_active.store(true, Ordering::SeqCst);
     let mut lan_config = config.clone();
     lan_config.secret = key;
     let result = host::serve_session(&lan_config, socket, true).await;
-    config.lan_active.store(false, Ordering::SeqCst);
     if let Err(error) = result {
         let _ = config.messages.send(format!("局域网直连断开：{}", error));
     }
@@ -182,6 +196,19 @@ pub fn spawn(config: HostConfig) {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    #[test]
+    fn active_lan_lease_is_exclusive_and_releases_on_drop() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let owner = ActiveLan::acquire(&flag).unwrap();
+        assert!(flag.load(Ordering::SeqCst));
+        assert!(ActiveLan::acquire(&flag).is_none());
+        assert!(flag.load(Ordering::SeqCst));
+        drop(owner);
+        assert!(!flag.load(Ordering::SeqCst));
+        let next = ActiveLan::acquire(&flag).unwrap();
+        drop(next);
+        assert!(!flag.load(Ordering::SeqCst));
+    }
     #[test]
     fn accepts_only_private_ipv4_peers() {
         for ip in [Ipv4Addr::new(192,168,1,5),Ipv4Addr::new(10,0,0,2),Ipv4Addr::new(172,16,3,4),Ipv4Addr::LOCALHOST] {

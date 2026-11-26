@@ -238,3 +238,133 @@ async fn windows_real_host_lan_suppresses_relay_video() {
         evidence("passed", serde_json::json!({"host":snapshot(&config)}));
     }).await;
 }
+
+
+// Separate G2 regression: real authorized sockets, no manual active flag
+// assignment, and no fake video statistics. Exercise abnormal TCP EOF,
+// task cancellation, explicit LAN disable, and sharing stop in sequence.
+#[tokio::test]
+#[ignore = "requires interactive Windows desktop; mandatory G2 CI step"]
+async fn windows_real_host_lan_exit_cleanup() {
+    tokio::task::LocalSet::new().run_until(async {
+        let relay_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let relay_address = relay_listener.local_addr().unwrap();
+        let secret = protocol::new_secret();
+        let (messages, _logs) = mpsc::channel();
+        let config = HostConfig {
+            server: format!("ws://{relay_address}"),
+            relay_token: "local-test-only".into(), secret,
+            running: Arc::new(AtomicBool::new(true)),
+            allow_input: Arc::new(AtomicBool::new(false)),
+            allow_clipboard: Arc::new(AtomicBool::new(false)),
+            monitor_index: Arc::new(AtomicUsize::new(0)),
+            lan_direct: Arc::new(AtomicBool::new(true)),
+            lan_active: Arc::new(AtomicBool::new(false)),
+            allow_udp_probe: Arc::new(AtomicBool::new(false)),
+            allow_udp_preview: Arc::new(AtomicBool::new(false)),
+            udp_active: Arc::new(AtomicBool::new(false)),
+            h264_enabled: Arc::new(AtomicBool::new(false)),
+            target_fps: Arc::new(AtomicU32::new(6)),
+            sent_frames: Arc::new(AtomicU64::new(0)),
+            dropped_frames: Arc::new(AtomicU64::new(0)),
+            transport_video: Arc::new(host::TransportVideoStats::default()),
+            messages,
+        };
+        let relay_config = config.clone();
+        let relay_task = tokio::task::spawn_local(async move { host::run(&relay_config).await });
+        let (stream, _) = timeout(Duration::from_secs(15), relay_listener.accept()).await.unwrap().unwrap();
+        let socket = timeout(Duration::from_secs(10), accept_async(stream)).await.unwrap().unwrap();
+        let mut relay = Peer::new(socket, secret, false);
+        relay.send(protocol::PING, &100u64.to_be_bytes()).await;
+        let baseline = relay.sample(6, 100).await;
+        assert!(baseline.pong && baseline.frames > 0);
+        g2_evidence("baseline", serde_json::json!({"host":snapshot(&config),"relay":baseline}));
+
+        for (i, mode) in ["tcp_drop", "task_cancel", "lan_disable", "sharing_stop"].into_iter().enumerate() {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let lan_config = config.clone();
+            let task = tokio::task::spawn_local(async move {
+                let (stream, address) = listener.accept().await.unwrap();
+                let (socket, key) = accept_authorized(stream, &lan_config).await.unwrap();
+                serve_authorized_session(&lan_config, socket, key, address.ip()).await;
+            });
+            let (mut socket, _) = timeout(Duration::from_secs(10),
+                connect_async(format!("ws://{address}/direct"))).await.unwrap().unwrap();
+            let client = protocol::new_secret();
+            socket.send(Message::Binary(protocol::encrypt(&secret, HELLO,
+                &transcript(HELLO_PAYLOAD, &client, &[])).unwrap())).await.unwrap();
+            let (kind, challenge) = protocol::decrypt(&secret, &binary(&mut socket).await).unwrap();
+            assert_eq!(kind, READY);
+            let prefix = transcript(CHALLENGE_PAYLOAD, &client, &[]);
+            let server = challenge.strip_prefix(prefix.as_slice()).unwrap();
+            assert_eq!(server.len(), NONCE_LEN);
+            assert!(!config.lan_active.load(Ordering::SeqCst));
+            socket.send(Message::Binary(protocol::encrypt(&secret, HELLO,
+                &transcript(PROOF_PAYLOAD, &client, server)).unwrap())).await.unwrap();
+            let (kind, ready) = protocol::decrypt(&secret, &binary(&mut socket).await).unwrap();
+            assert_eq!(kind, READY);
+            assert_eq!(ready, transcript(READY_PAYLOAD, &client, server));
+            let mut lan = Peer::new(socket, business_key(&secret, &client, server), true);
+            let ping = 200 + i as u64;
+            lan.send(protocol::PING, &ping.to_be_bytes()).await;
+            let (settle, direct) = tokio::join!(relay.sample(4, 999), lan.sample(4, ping));
+            let active = snapshot(&config);
+            assert!(active.active && direct.pong && direct.frames > 0);
+            g2_evidence("active", serde_json::json!({"mode":mode,"host":active,"lan":direct,"relay":settle}));
+
+            let started = Instant::now();
+            // Drop without WebSocket close, or cancel while the real session
+            // owns the active lease. Disable/stop keeps the peer alive until
+            // the production shutdown path has completed.
+            let mut lan = Some(lan);
+            match mode {
+                "tcp_drop" => { drop(lan.take()); }
+                "task_cancel" => { task.abort(); drop(lan.take()); }
+                "lan_disable" => config.lan_direct.store(false, Ordering::SeqCst),
+                "sharing_stop" => config.running.store(false, Ordering::SeqCst),
+                _ => unreachable!(),
+            }
+            let joined = timeout(Duration::from_secs(12), task).await.expect("LAN exit timeout");
+            if mode == "task_cancel" {
+                assert!(joined.unwrap_err().is_cancelled());
+            } else {
+                joined.unwrap();
+            }
+            drop(lan);
+            let released = snapshot(&config);
+            assert!(!released.active, "LAN lease stuck after {}", mode);
+            g2_evidence("released", serde_json::json!({"mode":mode,"host":released,
+                "observed_cleanup_ms":started.elapsed().as_millis()}));
+            if mode == "sharing_stop" { break; }
+
+            config.lan_direct.store(true, Ordering::SeqCst);
+            let ping = 300 + i as u64;
+            relay.send(protocol::PING, &ping.to_be_bytes()).await;
+            let resumed = relay.sample(6, ping).await;
+            let after = snapshot(&config);
+            g2_evidence("resumed", serde_json::json!({"mode":mode,"before":released,
+                "after":after,"relay":resumed}));
+            assert!(!after.active && resumed.pong && resumed.frames > 0);
+            assert!(after.relay_bytes > released.relay_bytes);
+            assert!(after.relay_frames > released.relay_frames);
+            assert_eq!(after.lan_bytes, released.lan_bytes);
+            assert_eq!(after.lan_frames, released.lan_frames);
+        }
+        timeout(Duration::from_secs(12), relay_task).await.expect("sharing stop timeout")
+            .unwrap().expect("relay stop failed");
+        drop(relay);
+        g2_evidence("passed", serde_json::json!({"host":snapshot(&config)}));
+    }).await;
+}
+
+fn g2_evidence(stage: &str, data: serde_json::Value) {
+    use std::io::Write;
+    let line = serde_json::json!({"stage":stage,"scope":"windows_runner_loopback_lan_cleanup","data":data}).to_string();
+    eprintln!("{}", line);
+    if let Ok(path) = std::env::var("P2P_G2_REPORT") {
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            .expect("open G2 evidence");
+        writeln!(file, "{}", line).expect("write G2 evidence");
+    }
+}

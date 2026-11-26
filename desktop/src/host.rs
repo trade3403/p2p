@@ -190,6 +190,9 @@ where
         })
     } else { None };
     let mut metadata_tick = tokio::time::interval(Duration::from_secs(2));
+    // Stop even when capture is idle and the peer sends no messages.
+    let mut shutdown_tick = tokio::time::interval(Duration::from_millis(200));
+    shutdown_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (udp_signal_tx, mut udp_signal_rx) =
         tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let mut udp_probe: Option<crate::udp_punch::Probe> = None;
@@ -197,11 +200,13 @@ where
         if !config.running.load(Ordering::SeqCst)
             || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
         tokio::select! {
+            _ = shutdown_tick.tick() => {}
             signal = udp_signal_rx.recv() => {
                 if let Some(payload) = signal {
                     if config.running.load(Ordering::SeqCst) {
                         let packet = encrypt(crate::udp_punch::SIGNAL, &payload)?;
-                        outgoing.send(Message::Binary(packet)).await?;
+                        tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
+                            .await.context("session message send timed out")??;
                     }
                 }
             }
@@ -264,15 +269,19 @@ where
                         "host_relay_suppressed_frames": config.transport_video.relay_suppressed_frames.load(Ordering::Relaxed)
                     }).to_string();
                     let packet = encrypt(protocol::MONITORS, info.as_bytes())?;
-                    outgoing.send(Message::Binary(packet)).await?;
+                    tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
+                            .await.context("session message send timed out")??;
                 }
             }
             next = incoming.next() => {
                 if !config.running.load(Ordering::SeqCst)
                     || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
                 // Never accept two simultaneous remote controllers.
-                if !is_lan_session && config.lan_active.load(Ordering::SeqCst) {
-                    if matches!(next, Some(Ok(Message::Close(_))) | None) { break; }
+                // Suppress relay business packets, not transport termination.
+                // In particular, a socket error must not be discarded in a
+                // tight loop while LAN owns the active session.
+                if !is_lan_session && config.lan_active.load(Ordering::SeqCst)
+                    && matches!(&next, Some(Ok(Message::Binary(_)))) {
                     continue;
                 }
                 match next {
@@ -311,7 +320,8 @@ where
                                 // Authenticated application-level ping works on both
                                 // LAN direct and WSS relay; no user data is exposed.
                                 let pong = encrypt(protocol::PONG, &bytes)?;
-                                outgoing.send(Message::Binary(pong)).await?;
+                                tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(pong)))
+                                    .await.context("application pong send timed out")??;
                             } else if kind == protocol::CONTROL {
                             #[cfg(windows)]
                             {
@@ -361,7 +371,8 @@ where
                                                 if let Ok(text) = clipboard.get_text() {
                                                     if crate::remote_ops::valid_clipboard_text(&text) {
                                                         let response = encrypt(protocol::CLIPBOARD, text.as_bytes())?;
-                                                        outgoing.send(Message::Binary(response)).await?;
+                                                        tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(response)))
+                                                            .await.context("clipboard send timed out")??;
                                                     }
                                                 }
                                             }
@@ -400,7 +411,7 @@ where
         }
     }
     drop(udp_probe);
-    let _ = outgoing.close().await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), outgoing.close()).await;
     let _ = config.messages.send("连接已断开".into());
     Ok(())
 }
