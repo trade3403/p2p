@@ -422,6 +422,11 @@ class PublicRelayE2eTest {
                     }
                 }, onVideoSize = { _,_ -> })
             }
+            stage="system_network_observer"
+            await("Android actual default network callback",15_000) { snap()["network_observer_ready"]==true }
+            assertEquals(0L,(snap()["network_change_events"] as Number).toLong())
+            metrics.put("system_network_observer_registered",true)
+            success("Actual Android default-network callback received before connection")
             stage="configuration"
             assertEquals(false,invoke("sendKey",mapOf("key" to "enter"))["ok"])
             command("configureRelay",mapOf("server" to cfg.getString("server"),"token" to cfg.getString("token")))
@@ -910,6 +915,8 @@ class PublicRelayE2eTest {
             val idle = snap()
             assertEquals("idle",idle["viewer_transport_phase"])
             assertEquals(0,(idle["lan_candidate_attempts"] as Number).toInt())
+            assertEquals(0L,(idle["network_change_events"] as Number).toLong())
+            assertEquals(0L,(idle["network_retry_wakes"] as Number).toLong())
             assertEquals("none",idle["active_video_codec"])
             assertEquals(false,idle["host_metadata_current"])
             assertEquals("",idle["video_encoder"])

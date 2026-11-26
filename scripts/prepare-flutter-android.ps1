@@ -170,6 +170,14 @@ if ($manifestText -notmatch 'android\.permission\.INTERNET') {
         1
     )
 }
+if ($manifestText -notmatch 'android\.permission\.ACCESS_NETWORK_STATE') {
+    $manifestText = [regex]::Replace(
+        $manifestText,
+        '(<manifest[^>]*>)',
+        ('$1' + [Environment]::NewLine + '    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />'),
+        1
+    )
+}
 $manifestText = $manifestText -replace 'android:label="[^"]+"', 'android:label="P2P Remote"'
 Set-Content -LiteralPath $manifest -Value $manifestText -Encoding UTF8
 

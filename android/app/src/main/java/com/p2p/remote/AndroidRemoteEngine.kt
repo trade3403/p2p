@@ -54,6 +54,10 @@ internal class AndroidRemoteEngine(
     private var receivedFrames = 0L
     private var activeEndpoint = ""
     private var lanAdvertised = false
+    private var currentLanAddress: String? = null
+    private var networkChanges = 0L
+    private var networkRetryWakes = 0L
+    private val networkObserver = AndroidNetworkObserver(context, main) { change -> onNetworkChanged(change) }
     private val lanAttempt = LanCandidatePlan()
     private var usingLan = false
     @Volatile private var lanVerified = false
@@ -184,6 +188,7 @@ internal class AndroidRemoteEngine(
             relayUrl = it.relayUrl
             relayToken = it.relayToken
         }
+        networkObserver.start()
         main.post(statePump)
     }
 
@@ -238,6 +243,9 @@ internal class AndroidRemoteEngine(
         },
         "lan_attempt_ms" to lanRecovery.attemptMs,
         "lan_candidate_attempts" to lanAttempt.attemptCount,
+        "network_observer_ready" to networkObserver.ready,
+        "network_change_events" to networkChanges,
+        "network_retry_wakes" to networkRetryWakes,
         "lan_fallback_reason" to lanRecovery.reason,
         "lan_fallback_started" to lanRecovery.fallbackStarted,
         "lan_fallback_relay_open_ms" to lanRecovery.relayOpenMs,
@@ -497,6 +505,7 @@ internal class AndroidRemoteEngine(
         }
         clearLiveDiagnostics()
         usingLan = tryLan
+        currentLanAddress = candidate?.address
         lanBusinessKey = null
         lanVerified = false
         transport = if(tryLan) "局域网加密直连 · 验证中" else "VPS WSS 中转 · 连接中"
@@ -858,6 +867,7 @@ internal class AndroidRemoteEngine(
         val next = if (!lanVerified) nextLanCandidate(now) else null
         lanVerified = false
         usingLan = false
+        currentLanAddress = null
         if (next != null) {
             openConnection(next)
             return
@@ -902,6 +912,35 @@ internal class AndroidRemoteEngine(
         lastPingTimeMs = 0L
         avcDecoder.reset()
         openConnection(selected)
+    }
+
+    private fun onNetworkChanged(change: NetworkChangePolicy.Change) {
+        if (closed || !requested) return
+        networkChanges++
+        val ws = socket
+        val address = currentLanAddress
+        if (usingLan && lanAdvertised && ws != null && address != null) {
+            // Confirm twice. A default-route handoff does not itself prove
+            // the LAN path is gone; the existing heartbeat remains authoritative.
+            if (!LanEndpoint.isOnLocalSubnet(address)) main.postDelayed({
+                if (requested && socket === ws && usingLan &&
+                    !LanEndpoint.isOnLocalSubnet(address)) {
+                    if (lanVerified) failVerifiedLan(ws, "lan_subnet_changed")
+                    else {
+                        socket = null
+                        lanBusinessKey = null
+                        lanSequence = null
+                        ws.cancel()
+                        handleLanFailure("lan_subnet_changed")
+                    }
+                }
+            }, 1000L)
+        } else if (change.available && !usingLan && socket == null && retryTask != null) {
+            // Wake a pending retry on an actual new usable default network.
+            // Never interrupt a healthy WSS or bypass explicit disconnect.
+            networkRetryWakes++
+            openConnection()
+        }
     }
 
     private fun scheduleRetry(reason: String) {
@@ -1171,6 +1210,8 @@ internal class AndroidRemoteEngine(
         transportVideo = TransportVideo()
         relaySocketOpens = 0L
         relayRetryEvents = 0L
+        networkChanges = 0L
+        networkRetryWakes = 0L
         receivedFrames = 0L
         renderedAvcFrames = 0L
         receivedAvcBytes = 0L
@@ -1211,6 +1252,7 @@ internal class AndroidRemoteEngine(
         activeToken = ""
         activeEndpoint = ""
         lanAdvertised = false
+        currentLanAddress = null
         lanAttempt.reset()
         lanRecovery.reset()
         lanFailureHint = null
@@ -1266,6 +1308,7 @@ internal class AndroidRemoteEngine(
         pairingCancelled.set(true)
         disconnect()
         closed = true
+        networkObserver.stop()
         main.removeCallbacks(statePump)
         avcDecoder.close()
         client.dispatcher.executorService.shutdown()
