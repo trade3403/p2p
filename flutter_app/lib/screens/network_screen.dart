@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'package:material_ui/material_ui.dart';
 
 import '../app_theme.dart';
 import '../services/remote_controller.dart';
+import '../services/performance_export.dart';
 import '../widgets/p2p_widgets.dart';
 
 class NetworkScreen extends StatefulWidget {
@@ -188,6 +190,12 @@ class _NetworkScreenState extends State<NetworkScreen> {
                     _NetworkStatusRow(icon: Icons.info_outline, title: '抑制 VPS 视频包',
                       value: controller.snapshot['host_relay_suppressed_frames']?.toString() ?? '待测'),
                   ],
+                  if (!controller.isAndroid && controller.hostRunning)
+                    OutlinedButton.icon(
+                      onPressed: () => _copyHostMetrics(controller),
+                      icon: const Icon(Icons.copy),
+                      label: const Text('复制 Host 性能 JSON'),
+                    ),
                   if (controller.viewerRequested) ...[
                     _NetworkStatusRow(icon: Icons.lan_rounded, title: '当前控制端传输',
                       value: controller.transport),
@@ -240,6 +248,25 @@ class _NetworkScreenState extends State<NetworkScreen> {
   String _bytes(Object? value) {
     if (value is! num || value < 0) return '待测';
     return '${value.toInt()} B';
+  }
+
+  Future<void> _copyHostMetrics(P2PRemoteController controller) async {
+    final snapshot = controller.snapshot;
+    final capturedAt = DateTime.now().toUtc();
+    try {
+      await Clipboard.setData(ClipboardData(
+        text: exportHostPerformanceSnapshot(snapshot, capturedAt: capturedAt),
+      ));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Host 性能 JSON 已复制到本机剪贴板')),
+      );
+    } on PlatformException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法写入本机剪贴板')),
+      );
+    }
   }
 
   Future<void> _saveConfiguration() async {

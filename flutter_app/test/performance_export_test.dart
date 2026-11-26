@@ -45,4 +45,44 @@ void main() {
     expect(metrics['rtt_ms'], isNull);
     expect(metrics.containsKey('pairing_code'), false);
   });
+
+  test('host export uses only local counters and keeps zero distinct from missing', () {
+    final result = jsonDecode(exportHostPerformanceSnapshot({
+      'host_running': true,
+      'host_lan_active': true,
+      'host_relay_socket_open': true,
+      'host_lan_video_bytes': 12345,
+      'host_relay_video_bytes': 0,
+      'host_relay_suppressed_frames': 12,
+      'host_lan_video_frames': -1,
+      'host_relay_socket_opens': 1.5,
+      'rendered_fps': 30,
+      'relay_token': 'PRIVATE_MARKER',
+    }, capturedAt: DateTime.utc(2026))) as Map;
+    final metrics = result['metrics'] as Map;
+    expect(result['sample_kind'], 'host_snapshot');
+    expect(metrics['host_lan_video_bytes'], 12345);
+    expect(metrics['host_relay_video_bytes'], 0);
+    expect(metrics['host_lan_active'], true);
+    expect(metrics['host_relay_socket_open'], true);
+    expect(metrics['host_relay_suppressed_frames'], 12);
+    expect(metrics['host_lan_video_frames'], isNull);
+    expect(metrics['host_relay_socket_opens'], isNull);
+    expect(metrics.containsKey('rendered_fps'), false);
+    expect(result.toString(), isNot(contains('PRIVATE_MARKER')));
+  });
+
+  test('stopped or unknown host never exports stale counters', () {
+    for (final running in [false, null]) {
+      final result = jsonDecode(exportHostPerformanceSnapshot({
+        'host_running': running,
+        'host_lan_active': true,
+        'host_lan_video_bytes': 200,
+      }, capturedAt: DateTime.utc(2026))) as Map;
+      final metrics = result['metrics'] as Map;
+      expect(metrics['host_running'], running);
+      expect(metrics['host_lan_active'], isNull);
+      expect(metrics['host_lan_video_bytes'], isNull);
+    }
+  });
 }

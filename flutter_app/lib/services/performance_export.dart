@@ -55,3 +55,32 @@ String exportPerformanceSnapshot(Map<String, dynamic> snapshot,
     'metrics': metrics,
   });
 }
+
+ 
+/// Local Host counters only. A stopped Host may retain stale bridge fields,
+/// so those fields are unavailable unless the native running flag is true.
+String exportHostPerformanceSnapshot(Map<String, dynamic> snapshot,
+    {required DateTime capturedAt}) {
+  final running = snapshot['host_running'];
+  final metrics = <String, Object?>{
+    'host_running': running is bool ? running : null,
+  };
+  for (final key in [
+    'host_lan_video_bytes', 'host_relay_video_bytes',
+    'host_lan_video_frames', 'host_relay_video_frames',
+    'host_relay_suppressed_frames', 'host_relay_socket_opens',
+  ]) {
+    final value = snapshot[key];
+    metrics[key] = running == true && value is int && value >= 0 ? value : null;
+  }
+  for (final key in ['host_lan_active', 'host_relay_socket_open']) {
+    final value = snapshot[key];
+    metrics[key] = running == true && value is bool ? value : null;
+  }
+  return const JsonEncoder.withIndent('  ').convert({
+    'schema_version': 1,
+    'captured_at_utc': capturedAt.toUtc().toIso8601String(),
+    'sample_kind': 'host_snapshot',
+    'metrics': metrics,
+  });
+}
