@@ -75,7 +75,8 @@ class PublicRelayE2eTest {
     // A test-only LAN peer using real TCP/WebSocket and v4 AES-GCM. The JPEG
     // is a previously received Windows frame, NOT a live Windows LAN capture.
     private class LanPeer(private val root: ByteArray, private val jpeg: ByteArray,
-        private val avc: List<ByteArray> = emptyList()) : AutoCloseable {
+        private val avc: List<ByteArray> = emptyList(),
+        private val stallHandshake: Boolean = false) : AutoCloseable {
         private val server = MockWebServer()
         private val worker = Executors.newSingleThreadScheduledExecutor()
         private val peer = AtomicReference<WebSocket>()
@@ -90,6 +91,8 @@ class PublicRelayE2eTest {
         private val codecRequests = AtomicLong()
         private val sentVideo = AtomicLong()
         private val avcStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val helloCount = AtomicLong()
+        val authenticatedHellos: Long get() = helloCount.get()
         val authenticatedPongs: Long get() = pongCount.get()
         val authenticatedCodecRequests: Long get() = codecRequests.get()
         val sentVideoPackets: Long get() = sentVideo.get()
@@ -182,6 +185,8 @@ class PublicRelayE2eTest {
                                 body.copyOfRange(0,hello.size).contentEquals(hello))
                             val fresh = body.copyOfRange(hello.size,body.size)
                             client = fresh
+                            helloCount.incrementAndGet()
+                            if (stallHandshake) return
                             check(webSocket.send(encode(root,7,prefix("CHALLENGE")+fresh+host)))
                         } else {
                             require(body.contentEquals(prefix("PROOF")+current+host))
@@ -524,6 +529,7 @@ class PublicRelayE2eTest {
                 }
                 val lanStats = snap()
                 assertEquals("lan_video",lanStats["viewer_transport_phase"])
+                assertEquals(1,(lanStats["lan_candidate_attempts"] as Number).toInt())
                 assertTrue((lanStats["lan_attempt_ms"] as Number).toLong() >= 0)
                 assertNull(lanStats["lan_fallback_reason"])
                 assertEquals(false,lanStats["lan_fallback_started"])
@@ -553,6 +559,7 @@ class PublicRelayE2eTest {
                 metrics.put("lan_close_to_public_verified_frame_ms",SystemClock.elapsedRealtime()-start)
                 val fallbackStats = snap()
                 assertEquals("relay_video",fallbackStats["viewer_transport_phase"])
+                assertEquals(1,(fallbackStats["lan_candidate_attempts"] as Number).toInt())
                 assertEquals(true,fallbackStats["lan_fallback_started"])
                 assertTrue(fallbackStats["lan_fallback_reason"] in setOf("peer_closed","transport_failure"))
                 val openMs = (fallbackStats["lan_fallback_relay_open_ms"] as Number).toLong()
@@ -809,12 +816,46 @@ class PublicRelayE2eTest {
                 stage="lan_avc_disconnect"
                 command("disconnectViewer")
             }
+            stage="lan_verification_timeout"
+            LanPeer(root,jpeg,stallHandshake=true).use { stalled ->
+                val connect = AndroidRemoteEngine::class.java.getDeclaredMethod("connect",
+                    String::class.java,String::class.java,String::class.java,String::class.java).apply { isAccessible=true }
+                val hex = root.joinToString("") { "%02x".format(it.toInt() and 255) }
+                val started = SystemClock.elapsedRealtime()
+                main { connect.invoke(engine,cfg.getString("server"),cfg.getString("token"),hex,stalled.address) }
+                await("actual LAN hello without challenge",8_000) { stalled.authenticatedHellos == 1L }
+                await("stalled LAN verification to actual public video",45_000) {
+                    val s=snap()
+                    s["viewer_transport_phase"]=="relay_video" && s["viewer_connected"]==true &&
+                        s["viewer_allow_input"]==true && s["viewer_allow_clipboard"]==true &&
+                        s["lan_fallback_first_video_ms"] is Number
+                }
+                val s=snap()
+                assertEquals("connect_or_verify_timeout",s["lan_fallback_reason"])
+                assertEquals(1,(s["lan_candidate_attempts"] as Number).toInt())
+                assertEquals(0L,(s["viewer_lan_video_bytes"] as Number).toLong())
+                assertTrue((s["viewer_relay_video_bytes"] as Number).toLong()>0)
+                assertEquals(0L,stalled.sentVideoPackets)
+                val attemptMs=(s["lan_attempt_ms"] as Number).toLong()
+                val openMs=(s["lan_fallback_relay_open_ms"] as Number).toLong()
+                val videoMs=(s["lan_fallback_first_video_ms"] as Number).toLong()
+                assertTrue(attemptMs>=0 && openMs>=0 && videoMs>=openMs)
+                metrics.put("lan_stalled_verification",JSONObject()
+                    .put("authenticated_hello_count",stalled.authenticatedHellos)
+                    .put("candidate_attempts",s["lan_candidate_attempts"])
+                    .put("attempt_ms",attemptMs).put("relay_open_ms",openMs)
+                    .put("first_video_ms",videoMs)
+                    .put("observed_total_ms",SystemClock.elapsedRealtime()-started))
+                success("Real LAN socket with authenticated hello but no challenge timed out and recovered real public Windows video")
+                command("disconnectViewer")
+            }
             root.fill(0)
             stage="disconnect"
             command("disconnectViewer")
             await("manual disconnect") { snap()["viewer_requested"]==false && snap()["viewer_connected"]==false }
             val idle = snap()
             assertEquals("idle",idle["viewer_transport_phase"])
+            assertEquals(0,(idle["lan_candidate_attempts"] as Number).toInt())
             assertEquals("none",idle["active_video_codec"])
             assertEquals(false,idle["host_metadata_current"])
             assertEquals("",idle["video_encoder"])

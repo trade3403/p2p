@@ -196,6 +196,8 @@ class _NetworkScreenState extends State<NetworkScreen> {
                         value: controller.transportPhaseLabel),
                       _NetworkStatusRow(icon: Icons.info_outline, title: '当前连接 Host 元数据',
                         value: controller.snapshot['host_metadata_current'] == true ? '已接收' : '待测'),
+                      _NetworkStatusRow(icon: Icons.info_outline, title: 'LAN 候选尝试次数',
+                        value: controller.snapshot['lan_candidate_attempts']?.toString() ?? '待测'),
                       _NetworkStatusRow(icon: Icons.timer_outlined, title: 'LAN 尝试耗时',
                         value: _millis(controller.snapshot['lan_attempt_ms'])),
                       _NetworkStatusRow(icon: Icons.info_outline, title: '最近 LAN 回退原因',

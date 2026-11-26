@@ -44,8 +44,11 @@ internal object LanEndpoint {
         }.sortedByDescending { it.second }.map { it.first }
     }
 
+    fun eligibleAdvertised(candidates: List<String>): List<String> =
+        rankedCandidates(candidates, localSubnets())
+
     fun selectAdvertised(candidates: List<String>): String? =
-        rankedCandidates(candidates, localSubnets()).firstOrNull()
+        eligibleAdvertised(candidates).firstOrNull()
 
     fun isOnLocalSubnet(candidate: String): Boolean =
         selectAdvertised(listOf(candidate)) != null

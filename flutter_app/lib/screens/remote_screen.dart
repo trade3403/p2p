@@ -549,6 +549,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
         'transport_phase=${s['viewer_transport_phase'] ?? 'unknown'}\n'
         'host_metadata_current=${s['host_metadata_current'] ?? false}\n'
         'lan_attempt_ms=${s['lan_attempt_ms'] ?? -1}\n'
+        'lan_candidate_attempts=${s['lan_candidate_attempts'] ?? 0}\n'
         'lan_fallback_reason=${s['lan_fallback_reason'] ?? 'none'}\n'
         'lan_fallback_started=${s['lan_fallback_started'] ?? false}\n'
         'lan_fallback_relay_open_ms=${s['lan_fallback_relay_open_ms'] ?? -1}\n'
