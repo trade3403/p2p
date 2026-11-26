@@ -88,6 +88,10 @@ class PublicRelayE2eTest {
         private var business: ByteArray? = null
         private var received = 0L
         private val pongCount = AtomicLong()
+        private val droppedPings = AtomicLong()
+        private val suppressPong = java.util.concurrent.atomic.AtomicBoolean(false)
+        val unansweredPings: Long get() = droppedPings.get()
+        fun stopAnsweringPings() { suppressPong.set(true) }
         private val codecRequests = AtomicLong()
         private val sentVideo = AtomicLong()
         private val avcStarted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -164,8 +168,11 @@ class PublicRelayE2eTest {
                             received = n
                             if (packet[0] == 8.toByte()) {
                                 require(body.size == 8)
-                                sendBusiness(webSocket,key,9,body)
-                                pongCount.incrementAndGet()
+                                if (suppressPong.get()) droppedPings.incrementAndGet()
+                                else {
+                                    sendBusiness(webSocket,key,9,body)
+                                    pongCount.incrementAndGet()
+                                }
                             } else {
                                 val control=JSONObject(body.toString(Charsets.UTF_8))
                                 if (control.optString("type")=="video_codec" &&
@@ -847,6 +854,53 @@ class PublicRelayE2eTest {
                     .put("first_video_ms",videoMs)
                     .put("observed_total_ms",SystemClock.elapsedRealtime()-started))
                 success("Real LAN socket with authenticated hello but no challenge timed out and recovered real public Windows video")
+                command("disconnectViewer")
+            }
+            stage="lan_authenticated_heartbeat_timeout"
+            LanPeer(root,jpeg).use { silent ->
+                val connect = AndroidRemoteEngine::class.java.getDeclaredMethod("connect",
+                    String::class.java,String::class.java,String::class.java,String::class.java).apply { isAccessible=true }
+                val hex = root.joinToString("") { "%02x".format(it.toInt() and 255) }
+                main { connect.invoke(engine,cfg.getString("server"),cfg.getString("token"),hex,silent.address) }
+                await("actual authenticated LAN video and pong",20_000) {
+                    val s=snap()
+                    s["viewer_transport_phase"]=="lan_video" && s["rtt_ms"] is Number &&
+                        silent.authenticatedPongs>0
+                }
+                val before=snap()
+                val started=SystemClock.elapsedRealtime()
+                silent.stopAnsweringPings()
+                await("LAN authenticated ping unanswered",10_000) { silent.unansweredPings>0 }
+                val missedAt=SystemClock.elapsedRealtime()
+                // Video continues, so the 20-second no-frame watchdog is not
+                // the cause of the fallback. Do not close the fixture socket.
+                Thread.sleep(4000)
+                val during=snap()
+                assertEquals("lan_video",during["viewer_transport_phase"])
+                assertTrue((during["viewer_lan_video_bytes"] as Number).toLong() >
+                    (before["viewer_lan_video_bytes"] as Number).toLong())
+                await("authenticated heartbeat fallback to live Windows",45_000) {
+                    val s=snap()
+                    s["viewer_transport_phase"]=="relay_video" && s["viewer_connected"]==true &&
+                        s["viewer_allow_input"]==true && s["viewer_allow_clipboard"]==true &&
+                        s["lan_fallback_first_video_ms"] is Number
+                }
+                val s=snap()
+                assertEquals("lan_heartbeat_timeout",s["lan_fallback_reason"])
+                assertEquals(1,(s["lan_candidate_attempts"] as Number).toInt())
+                assertEquals(1L,silent.unansweredPings)
+                assertTrue((s["viewer_relay_video_bytes"] as Number).toLong()>0)
+                val openMs=(s["lan_fallback_relay_open_ms"] as Number).toLong()
+                val videoMs=(s["lan_fallback_first_video_ms"] as Number).toLong()
+                assertTrue(openMs>=0 && videoMs>=openMs)
+                metrics.put("lan_authenticated_heartbeat_timeout",JSONObject()
+                    .put("unanswered_pings",silent.unansweredPings)
+                    .put("lan_video_bytes_during_silence",
+                        (during["viewer_lan_video_bytes"] as Number).toLong()-(before["viewer_lan_video_bytes"] as Number).toLong())
+                    .put("observed_silence_to_public_video_ms",SystemClock.elapsedRealtime()-missedAt)
+                    .put("observed_total_ms",SystemClock.elapsedRealtime()-started)
+                    .put("relay_open_ms",openMs).put("first_video_ms",videoMs))
+                success("Real LAN encrypted video continued but authenticated PONG stopped; heartbeat deadline recovered public Windows video")
                 command("disconnectViewer")
             }
             root.fill(0)

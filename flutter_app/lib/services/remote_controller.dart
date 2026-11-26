@@ -101,6 +101,9 @@ class P2PRemoteController extends ChangeNotifier {
       case 'peer_closed': return 'LAN 对端关闭';
       case 'transport_failure': return 'LAN 传输中断';
       case 'video_watchdog': return 'LAN 画面更新超时';
+      case 'lan_heartbeat_timeout': return 'LAN 加密心跳超时';
+      case 'lan_heartbeat_send_failed': return 'LAN 加密心跳发送失败';
+      case 'lan_subnet_changed': return 'LAN 本地网段变化';
       default: return '未记录';
     }
   }

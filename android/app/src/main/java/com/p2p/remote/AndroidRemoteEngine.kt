@@ -79,6 +79,8 @@ internal class AndroidRemoteEngine(
     private var relayRetryEvents = 0L
     private var retryTask: Runnable? = null
     private var watchdogTask: Runnable? = null
+    private var lanHeartbeatTask: Runnable? = null
+    private val lanHeartbeat = LanHeartbeat { SecureRandom().nextLong() }
     private var lastFrameAtMs = 0L
     private var status = "等待配置服务器"
     private var stunReport = "STUN UDP 尚未探测"
@@ -599,12 +601,32 @@ internal class AndroidRemoteEngine(
                                     transport = "局域网 P2P 直连"
                                     status = "已通过局域网加密验证 · 等待画面"
                                     startWatchdog()
+                                    startLanHeartbeat(webSocket, requireNotNull(candidate).address)
                                 } else {
                                     webSocket.cancel()
                                 }
                             }
                         }
                     } catch (_: Exception) { webSocket.cancel() }
+                    return
+                }
+                // Authenticated LAN PONG must not be dropped by the video
+                // decoder gate (which can still be busy with an older socket).
+                if (tryLan && bytes.size > 0 && (bytes[0].toInt() and 255) == 9) {
+                    try {
+                        val key = lanBusinessKey ?: return
+                        if (!lanVerified) return
+                        val packet = bytes.toByteArray()
+                        val (kind, body) = decryptPacket(key, packet)
+                        if (kind != 9 || body.size != 8 || socket !== webSocket ||
+                            !requireNotNull(replayGuard).accept(packet)) return
+                        val token = ByteBuffer.wrap(body).long
+                        main.post {
+                            if (socket === webSocket && requested && lanVerified) {
+                                lanHeartbeat.pong(token, SystemClock.elapsedRealtime())?.let { rttMs = it }
+                            }
+                        }
+                    } catch (_: Exception) {}
                     return
                 }
                 if (!decoding.compareAndSet(false, true)) return
@@ -919,7 +941,7 @@ internal class AndroidRemoteEngine(
         if(avcRequested) sendVideoControl(JSONObject().put("type","video_codec").put("codec","h264"))
         watchdogTask = object : Runnable {
             override fun run() {
-                if (!requested || !online) return
+                if (watchdogTask !== this || !requested || !online) return
                 if (SystemClock.elapsedRealtime() - lastFrameAtMs > 20_000L) {
                     status = "画面超过 20 秒未更新，正在恢复连接"
                     if (usingLan) lanFailureHint = "video_watchdog"
@@ -941,10 +963,70 @@ internal class AndroidRemoteEngine(
                     sampleBytes=receivedAvcBytes
                     sampleDrops=drops
                 }
-                sendPing()
+                if (!usingLan) sendPing()
                 main.postDelayed(this, 5_000L)
             }
         }.also { main.postDelayed(it, 5_000L) }
+    }
+
+    // Independent of frame delivery and WebSocket transport-level Ping/Pong.
+    // Only a matching authenticated business PONG re-arms the deadline.
+    private fun startLanHeartbeat(ws: WebSocket, address: String) {
+        lanHeartbeat.reset(SystemClock.elapsedRealtime())
+        var nextSubnetCheck = SystemClock.elapsedRealtime() + 4000L
+        var subnetMisses = 0
+        lanHeartbeatTask = object : Runnable {
+            override fun run() {
+                if (lanHeartbeatTask !== this || socket !== ws || !requested || !lanVerified) return
+                val now = SystemClock.elapsedRealtime()
+                if (lanHeartbeat.expired(now)) {
+                    failVerifiedLan(ws, "lan_heartbeat_timeout")
+                    return
+                }
+                if (lanAdvertised && now >= nextSubnetCheck) {
+                    nextSubnetCheck = now + 4000L
+                    subnetMisses = if (LanEndpoint.isOnLocalSubnet(address)) 0 else subnetMisses + 1
+                    if (subnetMisses >= 2) {
+                        failVerifiedLan(ws, "lan_subnet_changed")
+                        return
+                    }
+                }
+                val ping = lanHeartbeat.poll(now)
+                if (ping != null) {
+                    val key = lanBusinessKey
+                    val sent = try {
+                        key != null && ws.send(encryptBusiness(key, 8,
+                            ByteBuffer.allocate(8).putLong(ping.token).array()).toByteString())
+                    } catch (_: Exception) { false }
+                    if (!sent) {
+                        failVerifiedLan(ws, "lan_heartbeat_send_failed")
+                        return
+                    }
+                }
+                main.postDelayed(this, 1000L)
+            }
+        }.also { main.post(it) }
+    }
+
+    private fun failVerifiedLan(ws: WebSocket, reason: String) {
+        if (socket !== ws || !requested || !lanVerified) return
+        // Retire the socket before cancel. Do not wait for asynchronous failure.
+        socket = null
+        lanBusinessKey = null
+        lanSequence = null
+        online = false
+        receivingFrames = false
+        hostAllowsInput = null
+        hostAllowsClipboard = null
+        clearLiveDiagnostics()
+        rttMs = null
+        lastPingTimeMs = 0L
+        frame = null
+        h264Active = false
+        avcDecoder.reset()
+        stopWatchdog()
+        ws.cancel()
+        handleLanFailure(reason)
     }
 
     private fun startUdpPunch() {
@@ -1080,6 +1162,9 @@ internal class AndroidRemoteEngine(
     private fun stopWatchdog() {
         watchdogTask?.let { main.removeCallbacks(it) }
         watchdogTask = null
+        lanHeartbeatTask?.let { main.removeCallbacks(it) }
+        lanHeartbeatTask = null
+        lanHeartbeat.reset(SystemClock.elapsedRealtime())
     }
 
     private fun resetSessionTotals() {
