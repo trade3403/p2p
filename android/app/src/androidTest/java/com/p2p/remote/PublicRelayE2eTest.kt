@@ -813,7 +813,23 @@ class PublicRelayE2eTest {
             stage="disconnect"
             command("disconnectViewer")
             await("manual disconnect") { snap()["viewer_requested"]==false && snap()["viewer_connected"]==false }
-            success("Explicit disconnect stops reconnect")
+            val idle = snap()
+            assertEquals("idle",idle["viewer_transport_phase"])
+            assertEquals("none",idle["active_video_codec"])
+            assertEquals(false,idle["host_metadata_current"])
+            assertEquals("",idle["video_encoder"])
+            assertEquals("unknown",idle["capture_backend"])
+            assertNull(idle["host_relay_socket_open"])
+            assertNull(idle["host_relay_video_bytes"])
+            assertNull(idle["lan_fallback_reason"])
+            assertNull(idle["rtt_ms"])
+            for (field in listOf("rendered_fps","measured_video_bps","avc_rendered_frames",
+                "avc_received_bytes","received_frames","viewer_lan_video_bytes","viewer_relay_video_bytes",
+                "relay_socket_opens","relay_retry_events","host_encoded_frames")) {
+                assertEquals("stale disconnected metric: $field",0.0,(idle[field] as Number).toDouble(),0.0)
+            }
+            metrics.put("disconnected_diagnostics_cleared",true)
+            success("Explicit disconnect stops reconnect and clears live/session diagnostics")
             report.put("passed",true)
             phase("done")
         } catch (error: Throwable) {

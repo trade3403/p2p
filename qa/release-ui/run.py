@@ -403,7 +403,7 @@ def read_avc_metrics(strict=True):
                 if all(k in items for k in ("codec","frames","fps","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","encoder","decoder","decoder_mode",
                         "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames",
                         "transport","viewer_lan_video_bytes","viewer_relay_video_bytes","host_lan_video_bytes","host_relay_video_bytes","host_relay_suppressed_frames",
-                        "transport_phase","lan_attempt_ms","lan_fallback_reason","lan_fallback_started",
+                        "transport_phase","host_metadata_current","lan_attempt_ms","lan_fallback_reason","lan_fallback_started",
                         "lan_fallback_relay_open_ms","lan_fallback_first_video_ms","host_lan_video_frames",
                         "host_relay_video_frames","host_relay_socket_open","host_relay_socket_opens")):
                     return items
@@ -424,7 +424,7 @@ def read_avc_metrics(strict=True):
     if not strict:
         return data
     require(data["codec"]=="H264" and data["frames"]>0,"Actual MediaCodec AVC playback not verified")
-    require(data["transport_phase"]=="relay_video" and data["host_relay_socket_open"]=="true"
+    require(data["transport_phase"]=="relay_video" and data["host_metadata_current"]=="true" and data["host_relay_socket_open"]=="true"
             and data["host_relay_socket_opens"]>=1 and data["host_relay_video_frames"]>=0,
             "Actual release WSS transport diagnostics not verified")
     if data["lan_fallback_first_video_ms"]>=0:
@@ -495,7 +495,10 @@ def recovery_step(baseline):
             time.sleep(5)
             sample=read_avc_metrics(strict=False)
             evidence["outage_samples"].append(sample)
-            if sample["relay_retry_events"]>baseline["relay_retry_events"] and sample["codec"]!="H264":
+            if sample["relay_retry_events"]>baseline["relay_retry_events"] and sample["codec"]=="none" and sample["host_metadata_current"]=="false":
+                require(sample["fps"]==0 and sample["bps"]==0 and sample["encoder"]==""
+                        and sample["host_relay_socket_open"]=="unknown" and sample["host_relay_video_bytes"]==-1,
+                        "Stale current-socket diagnostics during actual blackout")
                 evidence["interrupted"]=sample
                 snapshot(android_capture,"05a-network-interrupted")
                 break

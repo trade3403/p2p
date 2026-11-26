@@ -108,6 +108,7 @@ internal class AndroidRemoteEngine(
     private var resizeCacheHits = 0L
     private var yuvCacheHits = 0L
     private var hostEncodedFrames = 0L
+    private var hostMetadataCurrent = false
     private var hostLanVideoBytes: Long? = null
     private var hostRelayVideoBytes: Long? = null
     private var hostRelaySuppressedFrames: Long? = null
@@ -251,6 +252,12 @@ internal class AndroidRemoteEngine(
         "frame_width" to if (h264Active) h264Width else (frame?.width ?: 0),
         "frame_height" to if (h264Active) h264Height else (frame?.height ?: 0),
         "h264_active" to (h264Active && receivingFrames),
+        "active_video_codec" to when {
+            !online || !receivingFrames -> "none"
+            h264Active -> "H264"
+            else -> "JPEG"
+        },
+        "host_metadata_current" to hostMetadataCurrent,
         "avc_rendered_frames" to renderedAvcFrames,
         "avc_received_bytes" to receivedAvcBytes,
         "avc_decoder" to if(h264Active) avcDecoder.codecName else "",
@@ -452,9 +459,7 @@ internal class AndroidRemoteEngine(
         transport = "连接中"
         activeToken = relayToken
         secret = key
-        transportVideo = TransportVideo()
-        relaySocketOpens = 0L
-        relayRetryEvents = 0L
+        resetSessionTotals()
         requested = true
         hostAllowsInput = null
         retryAttempt = 0
@@ -473,13 +478,7 @@ internal class AndroidRemoteEngine(
             lanRecovery.beginLan(SystemClock.elapsedRealtime())
             lanFailureHint = null
         }
-        hostLanVideoBytes = null
-        hostRelayVideoBytes = null
-        hostRelaySuppressedFrames = null
-        hostLanVideoFrames = null
-        hostRelayVideoFrames = null
-        hostRelaySocketOpen = null
-        hostRelaySocketOpens = null
+        clearLiveDiagnostics()
         usingLan = tryLan
         lanBusinessKey = null
         lanVerified = false
@@ -624,6 +623,8 @@ internal class AndroidRemoteEngine(
                                     frame = decoded
                                     emitFrame(original.second, decoded.width, decoded.height)
                                     h264Active = false
+                                    renderedFps = 0.0
+                                    measuredBps = 0L
                                     if(udpLastFrameAtMs != 0L) {
                                         udpLastFrameAtMs = 0L
                                         transport = "VPS WSS 中转"
@@ -680,6 +681,7 @@ internal class AndroidRemoteEngine(
                             main.post {
                                 if(socket===webSocket && requested){
                                         monitorCount=count;selectedMonitor=index
+                                        hostMetadataCurrent = true
                                         hostAllowsInput=inputAllowed
                                         hostAllowsClipboard=clipboardAllowed
                                         videoTargetBps=metadata.optInt("video_target_bps",0)
@@ -722,13 +724,7 @@ internal class AndroidRemoteEngine(
                     online = false
                     hostAllowsInput = null
                     hostAllowsClipboard = null
-                    hostLanVideoFrames = null
-                    hostRelayVideoFrames = null
-                    hostRelaySocketOpen = null
-                    hostRelaySocketOpens = null
-                    hostLanVideoBytes = null
-                    hostRelayVideoBytes = null
-                    hostRelaySuppressedFrames = null
+                    clearLiveDiagnostics()
                     udpProbe?.stop()
                     udpProbe = null
                     udpAttempted = false
@@ -783,13 +779,7 @@ internal class AndroidRemoteEngine(
                     online = false
                     hostAllowsInput = null
                     hostAllowsClipboard = null
-                    hostLanVideoFrames = null
-                    hostRelayVideoFrames = null
-                    hostRelaySocketOpen = null
-                    hostRelaySocketOpens = null
-                    hostLanVideoBytes = null
-                    hostRelayVideoBytes = null
-                    hostRelaySuppressedFrames = null
+                    clearLiveDiagnostics()
                     udpProbe?.stop()
                     udpProbe = null
                     udpAttempted = false
@@ -906,8 +896,8 @@ internal class AndroidRemoteEngine(
                     val now=SystemClock.elapsedRealtime()
                     val elapsed=(now-sampleAt).coerceAtLeast(1)
                     val drops=avcDecoder.droppedFrames
-                    renderedFps=(renderedAvcFrames-sampleFrames)*1000.0/elapsed
-                    measuredBps=(receivedAvcBytes-sampleBytes)*8000L/elapsed
+                    renderedFps=if(h264Active && receivingFrames) (renderedAvcFrames-sampleFrames)*1000.0/elapsed else 0.0
+                    measuredBps=if(h264Active && receivingFrames) (receivedAvcBytes-sampleBytes)*8000L/elapsed else 0L
                     val rtt=rttMs
                     if(h264Active && rtt!=null) sendVideoControl(JSONObject()
                         .put("type","video_feedback").put("rtt_ms",rtt)
@@ -966,6 +956,8 @@ internal class AndroidRemoteEngine(
                             emitFrame(jpeg, decoded.width, decoded.height)
                             if(h264Active) avcDecoder.reset()
                             h264Active = false
+                            renderedFps = 0.0
+                            measuredBps = 0L
                             receivingFrames = true
                             udpPreviewFrames++
                             udpLastFrameAtMs = SystemClock.elapsedRealtime()
@@ -1023,12 +1015,22 @@ internal class AndroidRemoteEngine(
         }.start()
     }
 
-    private fun stopWatchdog() {
-        watchdogTask?.let { main.removeCallbacks(it) }
-        watchdogTask = null
-    }
-
-    private fun disconnect() {
+    // Host statistics describe the current socket, not a previous peer.
+    // Session totals and LAN recovery history survive automatic reconnect.
+    private fun clearLiveDiagnostics() {
+        hostMetadataCurrent = false
+        videoTargetBps = 0
+        videoTargetFps = 0
+        videoEncoder = ""
+        captureBackend = "unknown"
+        captureAvgUs = 0L
+        encodeAvgUs = 0L
+        sendAvgUs = 0L
+        freshFrames = 0L
+        reusedFrames = 0L
+        resizeCacheHits = 0L
+        yuvCacheHits = 0L
+        hostEncodedFrames = 0L
         hostLanVideoBytes = null
         hostRelayVideoBytes = null
         hostRelaySuppressedFrames = null
@@ -1036,6 +1038,27 @@ internal class AndroidRemoteEngine(
         hostRelayVideoFrames = null
         hostRelaySocketOpen = null
         hostRelaySocketOpens = null
+        renderedFps = 0.0
+        measuredBps = 0L
+        clipboardResult = ""
+    }
+
+    private fun stopWatchdog() {
+        watchdogTask?.let { main.removeCallbacks(it) }
+        watchdogTask = null
+    }
+
+    private fun resetSessionTotals() {
+        transportVideo = TransportVideo()
+        relaySocketOpens = 0L
+        relayRetryEvents = 0L
+        receivedFrames = 0L
+        renderedAvcFrames = 0L
+        receivedAvcBytes = 0L
+    }
+
+    private fun disconnect() {
+        clearLiveDiagnostics()
         requested = false
         lanBusinessKey = null
         lanSequence = null
@@ -1057,6 +1080,7 @@ internal class AndroidRemoteEngine(
         frame = null
         h264Active = false
         avcDecoder.reset()
+        resetSessionTotals()
         clipboardResult = ""
         monitorCount = 1
         selectedMonitor = 0

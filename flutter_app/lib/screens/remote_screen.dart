@@ -519,7 +519,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
 
   Future<void> _showVideoMetrics(BuildContext routeContext) async {
     final s = _controller.snapshot;
-    final codec = s['h264_active'] == true ? 'H264' : 'JPEG';
+    final codec = s['active_video_codec'] as String? ??
+        (_controller.viewerConnected ? (s['h264_active'] == true ? 'H264' : 'JPEG') : 'none');
     final hardware = s['avc_decoder_hardware'] == true
         ? 'hardware' : s['avc_decoder_hardware'] == false ? 'software' : 'unknown';
     final details = 'codec=$codec\n'
@@ -546,6 +547,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
         'host_encoded_frames=${s['host_encoded_frames'] ?? 0}\n'
         'transport=${_controller.transport}\n'
         'transport_phase=${s['viewer_transport_phase'] ?? 'unknown'}\n'
+        'host_metadata_current=${s['host_metadata_current'] ?? false}\n'
         'lan_attempt_ms=${s['lan_attempt_ms'] ?? -1}\n'
         'lan_fallback_reason=${s['lan_fallback_reason'] ?? 'none'}\n'
         'lan_fallback_started=${s['lan_fallback_started'] ?? false}\n'
