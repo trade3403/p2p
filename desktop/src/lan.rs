@@ -107,6 +107,33 @@ async fn accept_authorized(
     Ok((socket, business_key(&config.secret, &client_nonce, &server_nonce)))
 }
 
+// Shared by the real listener and the Windows loopback integration test.
+// The active flag can only be reached with a socket returned by accept_authorized.
+async fn serve_authorized_session(
+    config: &HostConfig,
+    socket: WebSocketStream<TcpStream>,
+    key: [u8;32],
+    address: IpAddr,
+) {
+    if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
+        return;
+    }
+    let _ = config.messages.send(format!("局域网直连已验证 · 对端 {}", address));
+    // One authorized LAN viewer per listener; relay remains connected for fallback.
+    config.lan_active.store(true, Ordering::SeqCst);
+    let mut lan_config = config.clone();
+    lan_config.secret = key;
+    let result = host::serve_session(&lan_config, socket, true).await;
+    config.lan_active.store(false, Ordering::SeqCst);
+    if let Err(error) = result {
+        let _ = config.messages.send(format!("局域网直连断开：{}", error));
+    }
+}
+
+#[cfg(all(test, windows))]
+#[path = "lan_g1_test.rs"]
+mod g1;
+
 pub fn spawn(config: HostConfig) {
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -129,26 +156,7 @@ pub fn spawn(config: HostConfig) {
                         }
                         match accept_authorized(stream, &config).await {
                             Ok((socket, key)) => {
-                                if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
-                                    continue;
-                                }
-                                let _ = config.messages.send(format!(
-                                    "局域网直连已验证 · 对端 {}",
-                                    address.ip()
-                                ));
-                                // One authorized LAN viewer per host at a time.
-                                // Relay remains connected independently for fallback.
-                                config.lan_active.store(true, Ordering::SeqCst);
-                                let mut lan_config = config.clone();
-                                lan_config.secret = key;
-                                let result = host::serve_session(&lan_config, socket, true).await;
-                                config.lan_active.store(false, Ordering::SeqCst);
-                                if let Err(error) = result {
-                                    let _ = config.messages.send(format!(
-                                        "局域网直连断开：{}",
-                                        error
-                                    ));
-                                }
+                                serve_authorized_session(&config, socket, key, address.ip()).await;
                             }
                             Err(_) => {
                                 // Do not echo untrusted handshakes or secret-related

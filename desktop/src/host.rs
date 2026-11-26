@@ -109,7 +109,7 @@ pub fn start(config: HostConfig) {
     });
 }
 
-async fn run(config: &HostConfig) -> Result<()> {
+pub(crate) async fn run(config: &HostConfig) -> Result<()> {
     let mut endpoint = url::Url::parse(config.server.trim()).context("invalid relay URL")?;
     match endpoint.scheme() {
         "https" => { endpoint.set_scheme("wss").map_err(|_| anyhow!("scheme"))?; }

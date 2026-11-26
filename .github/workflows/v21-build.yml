@@ -56,6 +56,17 @@ jobs:
           cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features
           if ($LASTEXITCODE -ne 0) { throw 'Rust native core tests failed' }
 
+      - name: G1 Windows real Host LAN video suppression and relay recovery
+        run: |
+          New-Item -ItemType Directory -Force evidence/windows | Out-Null
+          $env:P2P_G1_REPORT = Join-Path $env:GITHUB_WORKSPACE 'evidence/windows/g1-lan-video.jsonl'
+          Remove-Item $env:P2P_G1_REPORT -ErrorAction SilentlyContinue
+          cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features lan::g1::windows_real_host_lan_suppresses_relay_video -- --exact --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'G1 Windows production Host transport test failed' }
+          if (-not (Test-Path $env:P2P_G1_REPORT)) { throw 'G1 evidence missing (test did not run)' }
+          $last = Get-Content $env:P2P_G1_REPORT -Tail 1 | ConvertFrom-Json
+          if ($last.stage -ne 'passed') { throw 'G1 evidence incomplete' }
+
       - name: Build Rust native shared library
         run: |
           cargo build --manifest-path desktop/Cargo.toml --lib --no-default-features --release
