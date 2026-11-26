@@ -54,6 +54,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Peer<S> {
         timeout(Duration::from_secs(5), self.socket.send(Message::Binary(packet)))
             .await.expect("peer send timeout").expect("peer send failed");
     }
+    // Keep transport traffic moving while polling a real OS side effect.
+    async fn service_until<F: std::future::Future>(&mut self, work: F) -> F::Output {
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                biased;
+                done = &mut work => return done,
+                next = self.socket.next() => {
+                    match next {
+                        Some(Ok(Message::Binary(packet))) => {
+                            protocol::decrypt(&self.key, &packet).expect("host packet authentication failed");
+                            if let Some(guard) = &mut self.guard {
+                                assert!(guard.accept(&packet), "host LAN replay/direction violation");
+                            }
+                        }
+                        Some(Ok(Message::Ping(_))) => {
+                            timeout(Duration::from_secs(5), self.socket.flush()).await.unwrap().unwrap();
+                        }
+                        Some(Ok(Message::Close(_))) | None => panic!("unexpected peer close while checking OS input"),
+                        Some(Err(error)) => panic!("peer read failed: {}", error),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     async fn sample(&mut self, seconds: u64, expected_ping: u64) -> Observed {
         let deadline = Instant::now() + Duration::from_secs(seconds);
         let mut result = Observed::default();
@@ -439,4 +465,255 @@ fn g2_evidence(stage: &str, data: serde_json::Value) {
             .expect("open G2 evidence");
         writeln!(file, "{}", line).expect("write G2 evidence");
     }
+}
+
+
+// Independent real OS input test; a small native EDIT window is owned by the
+// test process, not an existing user's application. No hooks or keylogging.
+mod input_probe {
+    use std::ffi::c_void;
+    type Hwnd = *mut c_void;
+    #[repr(C)]
+    struct Point { x: i32, y: i32 }
+    #[repr(C)]
+    struct Rect { left: i32, top: i32, right: i32, bottom: i32 }
+    #[repr(C)]
+    struct Msg { hwnd: Hwnd, message: u32, wparam: usize, lparam: isize, time: u32, pt: Point, private: u32 }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn CreateWindowExW(ex: u32, class: *const u16, title: *const u16, style: u32,
+            x: i32, y: i32, w: i32, h: i32, parent: Hwnd, menu: Hwnd,
+            instance: Hwnd, param: *mut c_void) -> Hwnd;
+        fn DestroyWindow(hwnd: Hwnd) -> i32;
+        fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32;
+        fn SetForegroundWindow(hwnd: Hwnd) -> i32;
+        fn GetForegroundWindow() -> Hwnd;
+        fn SetFocus(hwnd: Hwnd) -> Hwnd;
+        fn GetFocus() -> Hwnd;
+        fn GetWindowTextW(hwnd: Hwnd, out: *mut u16, max: i32) -> i32;
+        fn GetWindowRect(hwnd: Hwnd, out: *mut Rect) -> i32;
+        fn PeekMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32, remove: u32) -> i32;
+        fn TranslateMessage(msg: *const Msg) -> i32;
+        fn DispatchMessageW(msg: *const Msg) -> isize;
+        fn GetAsyncKeyState(key: i32) -> i16;
+        fn GetCursorPos(out: *mut Point) -> i32;
+        fn mouse_event(flags: u32, dx: u32, dy: u32, data: u32, extra: usize);
+    }
+    pub struct Window(Hwnd);
+    impl Window {
+        pub fn new() -> Self {
+            let class: Vec<u16> = "EDIT\0".encode_utf16().collect();
+            let title = [0u16];
+            let screen = screenshots::Screen::all().unwrap().remove(0).display_info;
+            // A topmost, visible, multiline EDIT; coordinates inside it
+            // are derived from the actual window rectangle below.
+            let hwnd = unsafe { CreateWindowExW(8, class.as_ptr(), title.as_ptr(),
+                0x90c00004, screen.x + 40, screen.y + 40, 420, 240,
+                std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+            assert!(!hwnd.is_null(), "native EDIT window creation failed");
+            let w = Self(hwnd);
+            unsafe { ShowWindow(hwnd, 5); SetForegroundWindow(hwnd); SetFocus(hwnd); }
+            w.pump();
+            w
+        }
+        pub fn pump(&self) {
+            unsafe {
+                let mut msg: Msg = std::mem::zeroed();
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, 1) != 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        }
+        pub fn focused(&self) -> bool {
+            unsafe { GetForegroundWindow() == self.0 && GetFocus() == self.0 }
+        }
+        pub fn text(&self) -> String {
+            self.pump();
+            let mut out = [0u16; 128];
+            let n = unsafe { GetWindowTextW(self.0, out.as_mut_ptr(), out.len() as i32) };
+            String::from_utf16_lossy(&out[..n.max(0) as usize])
+        }
+        pub fn target(&self, offset: i32) -> (f64, f64, i32, i32) {
+            let mut r = Rect { left:0, top:0, right:0, bottom:0 };
+            assert_ne!(unsafe { GetWindowRect(self.0, &mut r) }, 0);
+            let screen = screenshots::Screen::all().unwrap().remove(0).display_info;
+            let x = r.left + 60 + offset;
+            let y = r.top + 100;
+            assert!(x < r.right && y < r.bottom);
+            ((x-screen.x) as f64 / (screen.width-1) as f64,
+             (y-screen.y) as f64 / (screen.height-1) as f64, x, y)
+        }
+    }
+    impl Drop for Window {
+        fn drop(&mut self) {
+            // Test-only emergency cleanup, also on assertion unwind.
+            unsafe {
+                if GetAsyncKeyState(1) < 0 { mouse_event(4,0,0,0,0); }
+                DestroyWindow(self.0);
+            }
+        }
+    }
+    pub fn held() -> bool { unsafe { GetAsyncKeyState(1) < 0 } }
+    pub fn at(x:i32,y:i32) -> bool {
+        let mut p = Point{x:0,y:0};
+        unsafe { GetCursorPos(&mut p) != 0 && (p.x-x).abs() <= 3 && (p.y-y).abs() <= 3 }
+    }
+}
+async fn await_os(window: &input_probe::Window, label: &str, check: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        window.pump();
+        if check() { return; }
+        assert!(Instant::now() < deadline, "OS assertion timed out: {}", label);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+async fn settle_os(window: &input_probe::Window, millis: u64, check: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_millis(millis);
+    loop {
+        window.pump();
+        assert!(check(), "unexpected OS input effect during blocked interval");
+        if Instant::now() >= deadline { return; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+async fn pointer<S: AsyncRead + AsyncWrite + Unpin>(peer: &mut Peer<S>, kind: &str, target: (f64,f64,i32,i32)) {
+    let data = serde_json::json!({"type":kind,"x":target.0,"y":target.1}).to_string();
+    peer.send(protocol::CONTROL, data.as_bytes()).await;
+}
+fn input_evidence(stage: &str, data: serde_json::Value) {
+    use std::io::Write;
+    let line = serde_json::json!({"stage":stage,"scope":"windows_runner_real_sendinput_loopback","data":data}).to_string();
+    eprintln!("{}", line);
+    if let Ok(path) = std::env::var("P2P_G2_INPUT_REPORT") {
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(f,"{}",line).unwrap();
+    }
+}
+#[tokio::test]
+#[ignore = "interactive Windows desktop; mandatory dedicated G2c input CI step"]
+async fn windows_real_host_input_handoff() {
+    tokio::task::LocalSet::new().run_until(async {
+        let window = input_probe::Window::new();
+        let a = window.target(0);
+        let b = window.target(120);
+        let c = window.target(240);
+        assert!(!input_probe::held(), "left mouse already held before test");
+        let relay_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let relay_address = relay_listener.local_addr().unwrap();
+        let lan_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let lan_address = lan_listener.local_addr().unwrap();
+        let secret = protocol::new_secret();
+        let (messages, _logs) = mpsc::channel();
+        let config = HostConfig {
+            server: format!("ws://{relay_address}"),
+            relay_token: "local-test-only".into(), secret,
+            running: Arc::new(AtomicBool::new(true)),
+            allow_input: Arc::new(AtomicBool::new(false)),
+            allow_clipboard: Arc::new(AtomicBool::new(false)),
+            monitor_index: Arc::new(AtomicUsize::new(0)),
+            lan_direct: Arc::new(AtomicBool::new(true)),
+            lan_active: Arc::new(AtomicBool::new(false)),
+            control_gate: Arc::new(host::ControlGate::default()),
+            allow_udp_probe: Arc::new(AtomicBool::new(false)),
+            allow_udp_preview: Arc::new(AtomicBool::new(false)),
+            udp_active: Arc::new(AtomicBool::new(false)),
+            h264_enabled: Arc::new(AtomicBool::new(false)),
+            target_fps: Arc::new(AtomicU32::new(6)),
+            sent_frames: Arc::new(AtomicU64::new(0)),
+            dropped_frames: Arc::new(AtomicU64::new(0)),
+            transport_video: Arc::new(host::TransportVideoStats::default()),
+            messages,
+        };
+        let relay_config = config.clone();
+        let relay_task = tokio::task::spawn_local(async move { host::run(&relay_config).await });
+        let (stream, _) = timeout(Duration::from_secs(15), relay_listener.accept())
+            .await.expect("host relay connect timeout").unwrap();
+        let socket = timeout(Duration::from_secs(10), accept_async(stream)).await.unwrap().unwrap();
+        let mut relay = Peer::new(socket, secret, false);
+
+        config.allow_input.store(true, Ordering::SeqCst);
+        pointer(&mut relay,"down",a).await;
+        relay.service_until(await_os(&window,"relay real down",||input_probe::held() && input_probe::at(a.2,a.3) && window.focused())).await;
+        pointer(&mut relay,"move",b).await;
+        relay.service_until(await_os(&window,"relay real drag",||input_probe::held() && input_probe::at(b.2,b.3))).await;
+        input_evidence("relay_drag",serde_json::json!({"down":true,"moved":true}));
+        let lan_config = config.clone();
+        let lan_task = tokio::task::spawn_local(async move {
+            let (stream, address) = lan_listener.accept().await.unwrap();
+            assert!(is_lan_address(address.ip()));
+            let (socket, key) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
+            serve_authorized_session(&lan_config, socket, key, address.ip()).await;
+        });
+        let (mut socket, _) = timeout(Duration::from_secs(10),
+            connect_async(format!("ws://{lan_address}/direct"))).await.unwrap().unwrap();
+        let client = protocol::new_secret();
+        socket.send(Message::Binary(protocol::encrypt(&secret, HELLO,
+            &transcript(HELLO_PAYLOAD, &client, &[])).unwrap())).await.unwrap();
+        let (kind, challenge) = protocol::decrypt(&secret, &binary(&mut socket).await).unwrap();
+        assert_eq!(kind, READY);
+        let prefix = transcript(CHALLENGE_PAYLOAD, &client, &[]);
+        let server = challenge.strip_prefix(prefix.as_slice()).unwrap();
+        assert_eq!(server.len(), NONCE_LEN);
+        assert!(!config.lan_active.load(Ordering::SeqCst), "LAN active before proof");
+        socket.send(Message::Binary(protocol::encrypt(&secret, HELLO,
+            &transcript(PROOF_PAYLOAD, &client, server)).unwrap())).await.unwrap();
+        let (kind, ready) = protocol::decrypt(&secret, &binary(&mut socket).await).unwrap();
+        assert_eq!(kind, READY);
+        assert_eq!(ready, transcript(READY_PAYLOAD, &client, server));
+        let mut lan = Peer::new(socket, business_key(&secret, &client, server), true);
+
+        await_os(&window,"release relay drag at LAN activation",||!input_probe::held()).await;
+        input_evidence("lan_takeover",serde_json::json!({"relay_button_released":true}));
+        let _ = tokio::join!(relay.sample(3,999),lan.sample(3,999));
+        pointer(&mut lan,"down",a).await;
+        lan.service_until(await_os(&window,"LAN real down",||input_probe::held() && input_probe::at(a.2,a.3))).await;
+        pointer(&mut relay,"up",c).await;
+        pointer(&mut relay,"move",c).await;
+        relay.send(protocol::CONTROL,br#"{"type":"text","text":"BLOCKED"}"#).await;
+        // Ensure the competing relay has time to be serviced while the
+        // LAN button remains held. Both transport sockets are drained.
+        let (r,l,_) = tokio::join!(relay.sample(2,999),lan.sample(2,999),
+            settle_os(&window,1800,||input_probe::held() && input_probe::at(a.2,a.3) && window.text().is_empty()));
+        assert_eq!(r.frames,0);
+        assert!(l.frames>0);
+        pointer(&mut lan,"move",b).await;
+        lan.service_until(await_os(&window,"LAN real drag",||input_probe::held() && input_probe::at(b.2,b.3))).await;
+        pointer(&mut lan,"up",b).await;
+        lan.service_until(await_os(&window,"LAN real up",||!input_probe::held())).await;
+        assert!(window.focused());
+        lan.send(protocol::CONTROL,br#"{"type":"text","text":"LAN_OK"}"#).await;
+        lan.service_until(await_os(&window,"LAN real Unicode text",||window.text()=="LAN_OK")).await;
+        assert!(window.focused(), "test EDIT lost focus before key command");
+        lan.send(protocol::CONTROL,br#"{"type":"key","key":"end"}"#).await;
+        lan.send(protocol::CONTROL,br#"{"type":"key","key":"backspace"}"#).await;
+        lan.service_until(await_os(&window,"LAN real keyboard backspace",||window.text()=="LAN_O")).await;
+        input_evidence("lan_exclusive",serde_json::json!({"relay_move_up_text_blocked":true,"lan_drag":true,"unicode":true,"key":true}));
+        pointer(&mut lan,"down",a).await;
+        lan.service_until(await_os(&window,"LAN held at disconnect",||input_probe::held())).await;
+        // Abrupt peer drop must release the actual OS button, not just a flag.
+        drop(lan);
+        timeout(Duration::from_secs(12),lan_task).await.unwrap().unwrap();
+        await_os(&window,"LAN disconnect real release",||!input_probe::held()).await;
+        assert!(!config.lan_active.load(Ordering::SeqCst));
+        pointer(&mut relay,"down",c).await;
+        relay.service_until(await_os(&window,"relay resumed real down",||input_probe::held() && input_probe::at(c.2,c.3))).await;
+        config.allow_input.store(false,Ordering::SeqCst);
+        relay.service_until(await_os(&window,"revocation real release",||!input_probe::held())).await;
+        pointer(&mut relay,"down",a).await;
+        relay.send(protocol::CONTROL,br#"{"type":"text","text":"DENIED"}"#).await;
+        let before = window.text();
+        let (_,_) = tokio::join!(relay.sample(2,999),
+            settle_os(&window,1800,||!input_probe::held() && input_probe::at(c.2,c.3) && window.text()==before));
+        config.allow_input.store(true,Ordering::SeqCst);
+        pointer(&mut relay,"down",b).await;
+        relay.service_until(await_os(&window,"reauthorized relay real down",||input_probe::held() && input_probe::at(b.2,b.3))).await;
+        config.running.store(false,Ordering::SeqCst);
+        timeout(Duration::from_secs(12),relay_task).await.unwrap().unwrap().unwrap();
+        await_os(&window,"sharing stop real release",||!input_probe::held()).await;
+        drop(relay);
+        input_evidence("passed",serde_json::json!({"lan_disconnect_release":true,"relay_resumed":true,
+            "revocation_release":true,"denied_input_blocked":true,"reauthorized":true,"stop_release":true}));
+    }).await;
 }

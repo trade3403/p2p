@@ -78,6 +78,17 @@ jobs:
           $last = Get-Content $env:P2P_G2_REPORT -Tail 1 | ConvertFrom-Json
           if ($last.stage -ne 'passed') { throw 'G2 evidence incomplete' }
 
+      - name: G2c Windows real SendInput ownership handoff and release
+        run: |
+          New-Item -ItemType Directory -Force evidence/windows | Out-Null
+          $env:P2P_G2_INPUT_REPORT = Join-Path $env:GITHUB_WORKSPACE 'evidence/windows/g2-input-handoff.jsonl'
+          Remove-Item $env:P2P_G2_INPUT_REPORT -ErrorAction SilentlyContinue
+          cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features lan::g1::windows_real_host_input_handoff -- --exact --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'G2c real Windows SendInput handoff failed' }
+          if (-not (Test-Path $env:P2P_G2_INPUT_REPORT)) { throw 'G2c input evidence missing' }
+          $last = Get-Content $env:P2P_G2_INPUT_REPORT -Tail 1 | ConvertFrom-Json
+          if ($last.stage -ne 'passed') { throw 'G2c input evidence incomplete' }
+
       - name: Build Rust native shared library
         run: |
           cargo build --manifest-path desktop/Cargo.toml --lib --no-default-features --release
