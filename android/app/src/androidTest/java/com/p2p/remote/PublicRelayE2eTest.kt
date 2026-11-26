@@ -11,6 +11,9 @@ import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.view.Surface
 import android.os.SystemClock
+import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.net.ConnectivityManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import okhttp3.WebSocket
@@ -62,6 +65,12 @@ class PublicRelayE2eTest {
         }
         throw AssertionError("Timed out: " + label)
     }
+    // Android shell commands execute inside the disposable CI emulator.
+    // Do not print their output (network identifiers may be present).
+    private fun shell(command: String): String =
+        ParcelFileDescriptor.AutoCloseInputStream(inst.uiAutomation.executeShellCommand(command))
+            .bufferedReader().use { it.readText().trim() }
+
     private fun near(pixel: Int, rgb: IntArray) =
         abs(Color.red(pixel)-rgb[0]) < 40 && abs(Color.green(pixel)-rgb[1]) < 40 &&
         abs(Color.blue(pixel)-rgb[2]) < 40
@@ -520,6 +529,95 @@ class PublicRelayE2eTest {
             click()
             frame("recovered")
             success("Automatic Android reconnect after real WSS cancellation; input restored")
+
+            stage="system_network_outage_preflight"
+            // Mandatory in public CI, never toggle radios on a physical device.
+            require(cfg.optBoolean("disposable_emulator_network_test"))
+            require(Build.HARDWARE in setOf("ranchu","goldfish"))
+            val connectivity = requireNotNull(ctx.getSystemService(ConnectivityManager::class.java))
+            val wifiBefore = shell("settings get global wifi_on")
+            val dataBefore = shell("settings get global mobile_data")
+            require(wifiBefore in setOf("0","1") && dataBefore in setOf("0","1"))
+            require(wifiBefore=="1" || dataBefore=="1")
+            require(connectivity.activeNetwork != null)
+            val beforeOutage=snap()
+            val preOutageSocket=main { field.get(engine) as WebSocket }
+            fun metric(s:Map<*,*>, name:String)=(s[name] as Number).toLong()
+            val evidence=JSONObject().put("scope","real Android emulator Wi-Fi/mobile-data radio controls; not physical radio mobility")
+            metrics.put("system_network_outage",evidence)
+            val outageStarted=SystemClock.elapsedRealtime()
+            var disconnectedAt=0L
+            try {
+                stage="system_network_radios_off"
+                shell("svc wifi disable")
+                shell("svc data disable")
+                await("actual Android default network absent",30_000) {
+                    connectivity.activeNetwork==null &&
+                        metric(snap(),"network_change_events")>metric(beforeOutage,"network_change_events")
+                }
+                evidence.put("default_network_lost",true)
+                    .put("observed_network_loss_ms",SystemClock.elapsedRealtime()-outageStarted)
+                stage="system_network_native_retry"
+                await("actual native connection retired after radios off",55_000) {
+                    val s=snap()
+                    s["viewer_requested"]==true && s["viewer_connected"]==false &&
+                        s["active_video_codec"]=="none" &&
+                        s["host_metadata_current"]==false &&
+                        metric(s,"relay_retry_events")>metric(beforeOutage,"relay_retry_events") &&
+                        main { field.get(engine) !== preOutageSocket }
+                }
+                val interrupted=snap()
+                disconnectedAt=SystemClock.elapsedRealtime()
+                evidence.put("native_connection_retired",true)
+                    .put("observed_retire_ms",disconnectedAt-outageStarted)
+                    .put("retry_events_during_outage",
+                        metric(interrupted,"relay_retry_events")-metric(beforeOutage,"relay_retry_events"))
+                assertNull(interrupted["host_relay_socket_open"])
+                assertNull(interrupted["host_relay_video_bytes"])
+                assertEquals(0.0,(interrupted["rendered_fps"] as Number).toDouble(),0.0)
+                assertEquals(0L,metric(interrupted,"measured_video_bps"))
+            } finally {
+                // Restore each original setting even if the outage assertion failed.
+                val dataRestored=runCatching { shell("svc data "+if(dataBefore=="1") "enable" else "disable") }
+                val wifiRestored=runCatching { shell("svc wifi "+if(wifiBefore=="1") "enable" else "disable") }
+                dataRestored.getOrThrow()
+                wifiRestored.getOrThrow()
+            }
+            stage="system_network_radios_restore"
+            val restoreStarted=SystemClock.elapsedRealtime()
+            await("actual Android default network restored",45_000) {
+                connectivity.activeNetwork!=null &&
+                    metric(snap(),"network_change_events")>=metric(beforeOutage,"network_change_events")+2
+            }
+            evidence.put("default_network_restored",true)
+                .put("observed_default_network_restore_ms",SystemClock.elapsedRealtime()-restoreStarted)
+            stage="system_network_live_video_recovery"
+            val beforeRestoreFrames=frames.get()
+            await("new authenticated public video after actual radio restoration",60_000) {
+                val s=snap()
+                s["viewer_transport_phase"]=="relay_video" && s["viewer_connected"]==true &&
+                    s["viewer_allow_input"]==true && s["viewer_allow_clipboard"]==true &&
+                    s["host_metadata_current"]==true && s["rtt_ms"] is Number &&
+                    metric(s,"relay_socket_opens")>metric(beforeOutage,"relay_socket_opens") &&
+                    metric(s,"viewer_relay_video_bytes")>metric(beforeOutage,"viewer_relay_video_bytes") &&
+                    main { field.get(engine)!=null && field.get(engine)!==preOutageSocket } &&
+                    frames.get()>beforeRestoreFrames && lastState.get()=="recovered"
+            }
+            val restored=snap()
+            evidence.put("new_authenticated_video",true)
+                .put("observed_restore_to_video_ms",SystemClock.elapsedRealtime()-restoreStarted)
+                .put("observed_retire_to_video_ms",SystemClock.elapsedRealtime()-disconnectedAt)
+                .put("network_change_events",metric(restored,"network_change_events")-metric(beforeOutage,"network_change_events"))
+                .put("network_retry_wakes",metric(restored,"network_retry_wakes")-metric(beforeOutage,"network_retry_wakes"))
+                .put("new_relay_socket_opens",metric(restored,"relay_socket_opens")-metric(beforeOutage,"relay_socket_opens"))
+            val stableFrames=frames.get()
+            val stableOpens=metric(restored,"relay_socket_opens")
+            Thread.sleep(3000)
+            assertTrue(frames.get()>stableFrames)
+            assertEquals(stableOpens,metric(snap(),"relay_socket_opens"))
+            assertEquals("relay_video",snap()["viewer_transport_phase"])
+            evidence.put("sustained_video",true)
+            success("Actual emulator default network lost and restored; new authenticated public Windows video and permissions verified")
             stage="lan_fixture_setup"
             // Keep the actual paired root in memory only. Private reflection is
             // confined to instrumentation; no production debug API is added.

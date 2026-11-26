@@ -317,7 +317,7 @@ def android():
     require(pair,"Host did not provide a current CI pairing window")
     REPORT["pairing_offer_remaining_seconds"]=int(pair["expires_at"]-time.time())
     config={"server":"wss://"+HOST,"token":TOKEN,"number":pair["number"],"code":pair["code"],
-            "expires_at":pair["expires_at"]}
+            "expires_at":pair["expires_at"],"disposable_emulator_network_test":True}
     # Transfer over adb stdin into the disposable app's private directory.
     # Never pass credentials as CLI arguments, test properties or artifacts.
     adb("shell","-T","run-as com.p2p.remote sh -c 'mkdir -p files; cat > files/ci-private.json'",
@@ -327,7 +327,8 @@ def android():
         process=subprocess.Popen(["adb","shell","am","instrument","-w","-r","-e","class",
             "com.p2p.remote.PublicRelayE2eTest","com.p2p.remote.test/androidx.test.runner.AndroidJUnitRunner"],
             stdout=log,stderr=subprocess.STDOUT)
-        end=time.monotonic()+240
+        # Include mandatory emulator radio outage and bounded recovery.
+        end=time.monotonic()+420
         try:
             while process.poll() is None and time.monotonic()<end:
                 phase=adb("shell","run-as","com.p2p.remote","cat","files/e2e/phase.txt",check=False).stdout.strip()
@@ -352,6 +353,11 @@ def android():
     require(process.returncode==0 and native.get("passed") is True
             and "OK (1 test)" in instrumentation and "INSTRUMENTATION_CODE: -1" in instrumentation,
             "Android native E2E assertions failed; inspect instrumentation.txt")
+    outage=native.get("metrics",{}).get("system_network_outage",{})
+    require(all(outage.get(key) is True for key in (
+        "default_network_lost","native_connection_retired","default_network_restored",
+        "new_authenticated_video","sustained_video")),
+        "Mandatory Android system network outage evidence incomplete")
     STAGE="video_encoding"
     encode_evidence(native["metrics"]["recorded_frames"])
     STAGE="host_confirmation"
