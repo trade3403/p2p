@@ -1,7 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import '../lib/services/performance_export.dart';
+import 'package:p2p_remote_ui/services/performance_export.dart';
 
 void main() {
   test('exports actual scalar values without inventing missing measurements', () {

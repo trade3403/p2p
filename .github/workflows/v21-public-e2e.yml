@@ -8,6 +8,7 @@ on:
       - 'qa/public-relay/**'
       - 'android/**'
       - 'desktop/**'
+      - 'flutter_app/**'
   workflow_dispatch:
 
 permissions:
