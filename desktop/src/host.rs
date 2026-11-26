@@ -77,6 +77,29 @@ impl ControlGate {
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, ControlState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
+
+    // Permission transitions linearize with native input execution. Even a
+    // revoke/regrant faster than the worker's poll invalidates queued work.
+    pub fn set_input(&self, allowed: &AtomicBool, value: bool) {
+        let mut state = self.lock();
+        if allowed.swap(value, Ordering::SeqCst) != value {
+            state.advance();
+        }
+    }
+
+    // Clipboard calls are synchronous and already use this same lock.
+    // Do not hold the lock across the subsequent network response.
+    pub fn set_clipboard(&self, allowed: &AtomicBool, value: bool) {
+        let _state = self.lock();
+        allowed.store(value, Ordering::SeqCst);
+    }
+
+    pub fn stop(&self, running: &AtomicBool) {
+        let mut state = self.lock();
+        if running.swap(false, Ordering::SeqCst) {
+            state.advance();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -111,7 +134,7 @@ pub fn start(config: HostConfig) {
             Ok(rt) => rt,
             Err(error) => {
                 let _ = config.messages.send(format!("运行时初始化失败: {error}"));
-                config.running.store(false, Ordering::SeqCst);
+                config.control_gate.stop(&config.running);
                 return;
             }
         };
@@ -160,7 +183,7 @@ pub fn start(config: HostConfig) {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        config.running.store(false, Ordering::SeqCst);
+        config.control_gate.stop(&config.running);
         let _ = config.messages.send("远程服务已停止".into());
     });
 }
@@ -774,6 +797,42 @@ mod heartbeat_tests {
 #[cfg(test)]
 mod input_gate_tests {
     use super::*;
+    #[test]
+    fn rapid_permission_revoke_and_regrant_invalidates_queued_epoch() {
+        let gate = ControlGate::default();
+        let allowed = AtomicBool::new(true);
+        let running = AtomicBool::new(true);
+        let (id, queued) = {
+            let mut state = gate.lock();
+            let id = state.register(false);
+            (id, state.epoch)
+        };
+        gate.set_input(&allowed, true);
+        assert!(gate.lock().current(false, id, queued, false));
+        gate.set_input(&allowed, false);
+        gate.set_input(&allowed, true);
+        let fresh = gate.lock().epoch;
+        assert!(allowed.load(Ordering::SeqCst));
+        assert!(!gate.lock().current(false, id, queued, false));
+        assert!(gate.lock().current(false, id, fresh, false));
+        gate.stop(&running);
+        assert!(!running.load(Ordering::SeqCst));
+        assert!(!gate.lock().current(false, id, fresh, false));
+    }
+    #[test]
+    fn clipboard_permission_does_not_invalidate_independent_input_epoch() {
+        let gate = ControlGate::default();
+        let clipboard = AtomicBool::new(false);
+        let (id, epoch) = {
+            let mut state = gate.lock();
+            let id = state.register(true);
+            (id, state.epoch)
+        };
+        gate.set_clipboard(&clipboard, true);
+        gate.set_clipboard(&clipboard, false);
+        assert!(!clipboard.load(Ordering::SeqCst));
+        assert!(gate.lock().current(true, id, epoch, true));
+    }
     #[test]
     fn old_queue_epochs_and_retired_sessions_cannot_execute() {
         let gate = ControlGate::default();

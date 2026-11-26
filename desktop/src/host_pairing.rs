@@ -17,7 +17,7 @@ pub fn start(
     thread::spawn(move || {
         if let Err(error) = run(config.clone(), identity, decisions) {
             let _ = config.messages.send(format!("数字配对服务错误：{error:#}"));
-            config.running.store(false, Ordering::SeqCst);
+            config.control_gate.stop(&config.running);
         }
     });
 }

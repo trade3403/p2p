@@ -90,6 +90,7 @@ struct App {
     pairing_decision_tx: Option<Sender<host_pairing::PairingDecision>>,
     secret: [u8;32],
     running: Arc<AtomicBool>,
+    control_gate: Arc<host::ControlGate>,
     allow_input: Arc<AtomicBool>,
     allow_clipboard: Arc<AtomicBool>,
     launch_on_login: bool,
@@ -166,6 +167,7 @@ impl Default for App {
             pairing_decision_tx: None,
             secret,
             running: Arc::new(AtomicBool::new(false)),
+            control_gate: Arc::new(host::ControlGate::default()),
             allow_input: Arc::new(AtomicBool::new(false)),
             allow_clipboard: Arc::new(AtomicBool::new(false)),
             monitor_index: Arc::new(AtomicUsize::new(0)),
@@ -217,7 +219,7 @@ impl Default for App {
         // It is never a Windows service and never attempts secure-desktop capture.
         if autostart && app.trust_saved && app.launch_on_login
         {
-            app.allow_input.store(app.unattended_input, Ordering::SeqCst);
+            app.control_gate.set_input(&app.allow_input, app.unattended_input);
             app.running.store(true, Ordering::SeqCst);
             app.status = "已按此前授权登录后启动 · 正在连接 VPS".into();
             host::start(host::HostConfig {
@@ -230,7 +232,7 @@ impl Default for App {
                 monitor_index: app.monitor_index.clone(),
                 lan_direct: app.lan_direct.clone(),
                 lan_active: app.lan_active.clone(),
-                control_gate: Arc::new(host::ControlGate::default()),
+                control_gate: app.control_gate.clone(),
                 allow_udp_probe: app.allow_udp_probe.clone(),
                 allow_udp_preview: app.allow_udp_preview.clone(),
                 udp_active: app.udp_active.clone(),
@@ -250,12 +252,12 @@ impl Default for App {
 impl Drop for App {
     fn drop(&mut self) {
         tracing::info!("P2P Remote shutting down; stopping host and viewer sessions");
-        self.running.store(false, Ordering::SeqCst);
+        self.control_gate.stop(&self.running);
         self.viewer_active.store(false, Ordering::SeqCst);
         self.viewer_pairing_cancel.store(true, Ordering::SeqCst);
         self.viewer_pairing_active.store(false, Ordering::SeqCst);
-        self.allow_input.store(false, Ordering::SeqCst);
-        self.allow_clipboard.store(false, Ordering::SeqCst);
+        self.control_gate.set_input(&self.allow_input, false);
+        self.control_gate.set_clipboard(&self.allow_clipboard, false);
     }
 }
 
@@ -579,10 +581,10 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
         Msg::Server(s) if !state.running.load(Ordering::SeqCst) => state.server = s,
         Msg::Token(s) if !state.running.load(Ordering::SeqCst) => state.relay_token = s,
         Msg::Allow(value) => {
-            state.allow_input.store(value, Ordering::SeqCst);
+            state.control_gate.set_input(&state.allow_input, value);
             state.tray_input_paused = false;
         },
-        Msg::Clipboard(value) => state.allow_clipboard.store(value, Ordering::SeqCst),
+        Msg::Clipboard(value) => state.control_gate.set_clipboard(&state.allow_clipboard, value),
         Msg::ProbeNetwork => {
             state.diagnostics = "正在发送 STUN UDP 探测（最多约 2 秒）".into();
             let relay = state.server.clone();
@@ -646,9 +648,9 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
             }
         }
         Msg::RevokeTrust => {
-            state.running.store(false, Ordering::SeqCst);
-            state.allow_input.store(false, Ordering::SeqCst);
-            state.allow_clipboard.store(false, Ordering::SeqCst);
+            state.control_gate.stop(&state.running);
+            state.control_gate.set_input(&state.allow_input, false);
+            state.control_gate.set_clipboard(&state.allow_clipboard, false);
             state.relay_token.clear();
             state.secret = protocol::new_secret();
             state.launch_on_login = false;
@@ -706,6 +708,15 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                 };
                 Some(pairing_crypto::DeviceIdentity::from_parts(device_id, signing_seed))
             };
+            // A new share must not revive the previous share's atomics or
+            // gate while its network and input workers are still retiring.
+            state.running = Arc::new(AtomicBool::new(false));
+            state.control_gate = Arc::new(host::ControlGate::default());
+            state.allow_input = Arc::new(AtomicBool::new(state.allow_input.load(Ordering::SeqCst)));
+            state.allow_clipboard = Arc::new(AtomicBool::new(state.allow_clipboard.load(Ordering::SeqCst)));
+            state.lan_direct = Arc::new(AtomicBool::new(state.lan_direct.load(Ordering::SeqCst)));
+            state.lan_active = Arc::new(AtomicBool::new(false));
+            state.udp_active = Arc::new(AtomicBool::new(false));
             let config = host::HostConfig {
                 server: state.server.clone(), relay_token: state.relay_token.clone(),
                 secret: state.secret, running: state.running.clone(),
@@ -714,7 +725,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                 monitor_index: state.monitor_index.clone(),
                 lan_direct: state.lan_direct.clone(),
                 lan_active: state.lan_active.clone(),
-                control_gate: Arc::new(host::ControlGate::default()),
+                control_gate: state.control_gate.clone(),
                 allow_udp_probe: state.allow_udp_probe.clone(),
                 allow_udp_preview: state.allow_udp_preview.clone(),
                 udp_active: state.udp_active.clone(),
@@ -751,7 +762,7 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
         }
         Msg::Stop => {
             tracing::info!("stopping local host and numeric pairing");
-            state.running.store(false, Ordering::SeqCst);
+            state.control_gate.stop(&state.running);
             state.pairing_code.clear();
             state.pairing_expires_at = 0;
             state.pending_pairing_request = None;
@@ -809,11 +820,11 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                         tray::Action::ToggleInput => {
                             if state.allow_input.load(Ordering::SeqCst) {
                                 state.tray_input_paused = true;
-                                state.allow_input.store(false, Ordering::SeqCst);
+                                state.control_gate.set_input(&state.allow_input, false);
                                 state.status = "已从系统托盘暂停远程输入".into();
                             } else if state.tray_input_paused {
                                 state.tray_input_paused = false;
-                                state.allow_input.store(true, Ordering::SeqCst);
+                                state.control_gate.set_input(&state.allow_input, true);
                                 state.status = "已恢复此前由本机用户授权的远程输入".into();
                             } else {
                                 state.status = "远程输入尚未授权；请在主窗口中明确授权".into();
@@ -825,10 +836,10 @@ fn update(state: &mut App, msg: Msg) -> Task<Msg> {
                                     "type":"up", "x":state.viewer_pointer.0, "y":state.viewer_pointer.1
                                 }).to_string());
                             }
-                            state.running.store(false, Ordering::SeqCst);
+                            state.control_gate.stop(&state.running);
                             state.viewer_active.store(false, Ordering::SeqCst);
-                            state.allow_input.store(false, Ordering::SeqCst);
-                            state.allow_clipboard.store(false, Ordering::SeqCst);
+                            state.control_gate.set_input(&state.allow_input, false);
+                            state.control_gate.set_clipboard(&state.allow_clipboard, false);
                             tracing::info!("full exit requested from tray menu");
                             return window::get_latest().map(Msg::ExitWindow);
                         }

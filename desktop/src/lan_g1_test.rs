@@ -247,7 +247,7 @@ async fn windows_real_host_lan_suppresses_relay_video() {
 
         // Actual Windows clipboard side effect, tested separately from the
         // ten-second video sample. Do not read or log pre-existing clipboard data.
-        config.allow_clipboard.store(true, Ordering::SeqCst);
+        config.control_gate.set_clipboard(&config.allow_clipboard, true);
         {
             let mut clipboard = arboard::Clipboard::new().expect("test clipboard unavailable");
             clipboard.set_text("G2b-local-marker").expect("initialize test clipboard");
@@ -264,7 +264,7 @@ async fn windows_real_host_lan_suppresses_relay_video() {
             let mut clipboard = arboard::Clipboard::new().unwrap();
             assert!(clipboard.get_text().unwrap() == "G2b-authorized-lan", "LAN clipboard command not applied");
         }
-        config.allow_clipboard.store(false, Ordering::SeqCst);
+        config.control_gate.set_clipboard(&config.allow_clipboard, false);
         evidence("clipboard_ownership", serde_json::json!({"relay_blocked":true,"lan_applied":true}));
 
         timeout(Duration::from_secs(5), lan.socket.close(None)).await.unwrap().unwrap();
@@ -633,7 +633,7 @@ async fn windows_real_host_input_handoff() {
         let socket = timeout(Duration::from_secs(10), accept_async(stream)).await.unwrap().unwrap();
         let mut relay = Peer::new(socket, secret, false);
 
-        config.allow_input.store(true, Ordering::SeqCst);
+        config.control_gate.set_input(&config.allow_input, true);
         pointer(&mut relay,"down",a).await;
         relay.service_until(await_os(&window,"relay real down",||input_probe::held() && input_probe::at(a.2,a.3) && window.focused())).await;
         pointer(&mut relay,"move",b).await;
@@ -699,17 +699,25 @@ async fn windows_real_host_input_handoff() {
         assert!(!config.lan_active.load(Ordering::SeqCst));
         pointer(&mut relay,"down",c).await;
         relay.service_until(await_os(&window,"relay resumed real down",||input_probe::held() && input_probe::at(c.2,c.3))).await;
-        config.allow_input.store(false,Ordering::SeqCst);
+        config.control_gate.set_input(&config.allow_input, false);
         relay.service_until(await_os(&window,"revocation real release",||!input_probe::held())).await;
         pointer(&mut relay,"down",a).await;
         relay.send(protocol::CONTROL,br#"{"type":"text","text":"DENIED"}"#).await;
         let before = window.text();
         let (_,_) = tokio::join!(relay.sample(2,999),
             settle_os(&window,1800,||!input_probe::held() && input_probe::at(c.2,c.3) && window.text()==before));
-        config.allow_input.store(true,Ordering::SeqCst);
+        config.control_gate.set_input(&config.allow_input, true);
         pointer(&mut relay,"down",b).await;
         relay.service_until(await_os(&window,"reauthorized relay real down",||input_probe::held() && input_probe::at(b.2,b.3))).await;
-        config.running.store(false,Ordering::SeqCst);
+        // No await between local permission transitions: exercise the race
+        // faster than the input worker's 50ms poll. Actual button must release.
+        config.control_gate.set_input(&config.allow_input, false);
+        config.control_gate.set_input(&config.allow_input, true);
+        relay.service_until(await_os(&window,"rapid revoke/regrant real release",||!input_probe::held())).await;
+        input_evidence("rapid_permission_cycle",serde_json::json!({"released":true}));
+        pointer(&mut relay,"down",b).await;
+        relay.service_until(await_os(&window,"fresh post-cycle down",||input_probe::held() && input_probe::at(b.2,b.3))).await;
+        config.control_gate.stop(&config.running);
         timeout(Duration::from_secs(12),relay_task).await.unwrap().unwrap().unwrap();
         await_os(&window,"sharing stop real release",||!input_probe::held()).await;
         drop(relay);

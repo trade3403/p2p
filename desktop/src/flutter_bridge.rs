@@ -117,6 +117,7 @@ impl Shared {
 }
 
 struct HostHandle {
+    control_gate: Arc<crate::host::ControlGate>,
     running: Arc<AtomicBool>,
     allow_input: Arc<AtomicBool>,
     allow_clipboard: Arc<AtomicBool>,
@@ -340,6 +341,7 @@ impl Engine {
         let (decision_tx, decision_rx) = mpsc::channel::<PairingDecision>();
         let transport_video = Arc::new(crate::host::TransportVideoStats::default());
         let lan_active = Arc::new(AtomicBool::new(false));
+        let control_gate = Arc::new(crate::host::ControlGate::default());
         let config = HostConfig {
             server: profile.relay_url.clone(),
             relay_token: profile.relay_token.clone(),
@@ -351,7 +353,7 @@ impl Engine {
             // The pairing coordinator starts the listener only after local approval.
             lan_direct: Arc::new(AtomicBool::new(true)),
             lan_active: lan_active.clone(),
-            control_gate: Arc::new(crate::host::ControlGate::default()),
+            control_gate: control_gate.clone(),
             allow_udp_probe: Arc::new(AtomicBool::new(false)),
             allow_udp_preview: Arc::new(AtomicBool::new(false)),
             udp_active: Arc::new(AtomicBool::new(false)),
@@ -406,6 +408,7 @@ impl Engine {
         });
 
         self.host = Some(HostHandle {
+            control_gate,
             running,
             allow_input,
             allow_clipboard,
@@ -427,9 +430,9 @@ impl Engine {
 
     fn stop_host(&mut self) -> Value {
         if let Some(host) = self.host.take() {
-            host.allow_input.store(false, Ordering::SeqCst);
-            host.allow_clipboard.store(false, Ordering::SeqCst);
-            host.running.store(false, Ordering::SeqCst);
+            host.control_gate.set_input(&host.allow_input, false);
+            host.control_gate.set_clipboard(&host.allow_clipboard, false);
+            host.control_gate.stop(&host.running);
         }
         let mut shared = shared_lock(&self.shared);
         shared.snapshot.host_running = false;
@@ -448,7 +451,7 @@ impl Engine {
     fn set_remote_input(&mut self, allowed: Option<bool>) -> Value {
         let Some(allowed) = allowed else { return self.fail("allowed 必须是布尔值"); };
         let Some(host) = self.host.as_ref() else { return self.fail("请先启动本机共享"); };
-        host.allow_input.store(allowed, Ordering::SeqCst);
+        host.control_gate.set_input(&host.allow_input, allowed);
         let mut shared = shared_lock(&self.shared);
         shared.snapshot.allow_input = allowed;
         shared.emit(json!({"type":"permission","name":"remoteInput","allowed":allowed}));
@@ -459,7 +462,7 @@ impl Engine {
     fn set_clipboard(&mut self, allowed: Option<bool>) -> Value {
         let Some(allowed) = allowed else { return self.fail("allowed 必须是布尔值"); };
         let Some(host) = self.host.as_ref() else { return self.fail("请先启动本机共享"); };
-        host.allow_clipboard.store(allowed, Ordering::SeqCst);
+        host.control_gate.set_clipboard(&host.allow_clipboard, allowed);
         let mut shared = shared_lock(&self.shared);
         shared.snapshot.allow_clipboard = allowed;
         shared.emit(json!({"type":"permission","name":"clipboard","allowed":allowed}));
@@ -957,9 +960,9 @@ pub extern "C" fn p2p_bridge_free_string(value: *mut c_char) {
 pub extern "C" fn p2p_bridge_shutdown() {
     let mut engine = engine_lock();
     if let Some(host) = engine.host.take() {
-        host.allow_input.store(false, Ordering::SeqCst);
-        host.allow_clipboard.store(false, Ordering::SeqCst);
-        host.running.store(false, Ordering::SeqCst);
+        host.control_gate.set_input(&host.allow_input, false);
+        host.control_gate.set_clipboard(&host.allow_clipboard, false);
+        host.control_gate.stop(&host.running);
     }
     if let Some(viewer) = engine.viewer.take() {
         let _ = viewer.controls.send(json!({"type":"up","x":0.5,"y":0.5}).to_string());
