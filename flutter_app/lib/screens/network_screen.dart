@@ -175,10 +175,16 @@ class _NetworkScreenState extends State<NetworkScreen> {
                   if (controller.hostRunning) ...[
                     _NetworkStatusRow(icon: Icons.lan_rounded, title: '本机 LAN 会话',
                       value: controller.snapshot['host_lan_active'] == true ? '已验证直连' : '未激活'),
+                    _NetworkStatusRow(icon: Icons.cloud_done_rounded, title: '本机 Relay WebSocket',
+                      value: _socketLabel(controller.snapshot['host_relay_socket_open'])),
+                    _NetworkStatusRow(icon: Icons.info_outline, title: '本次共享 Relay 建连次数',
+                      value: controller.snapshot['host_relay_socket_opens']?.toString() ?? '待测'),
                     _NetworkStatusRow(icon: Icons.swap_vert, title: 'LAN 视频发送',
                       value: _bytes(controller.snapshot['host_lan_video_bytes'])),
                     _NetworkStatusRow(icon: Icons.cloud_done_rounded, title: 'VPS 视频发送',
                       value: _bytes(controller.snapshot['host_relay_video_bytes'])),
+                    _NetworkStatusRow(icon: Icons.info_outline, title: 'LAN / VPS 已发送视频包',
+                      value: '${controller.snapshot['host_lan_video_frames'] ?? '待测'} / ${controller.snapshot['host_relay_video_frames'] ?? '待测'}'),
                     _NetworkStatusRow(icon: Icons.info_outline, title: '抑制 VPS 视频包',
                       value: controller.snapshot['host_relay_suppressed_frames']?.toString() ?? '待测'),
                   ],
@@ -204,7 +210,7 @@ class _NetworkScreenState extends State<NetworkScreen> {
                     _NetworkStatusRow(icon: Icons.cloud_done_rounded, title: 'VPS 视频接收',
                       value: _bytes(controller.snapshot['viewer_relay_video_bytes'])),
                   ],
-                  const Text('累计加密视频包字节，不含 TCP/TLS、握手和元数据；并非网卡总流量。',
+                  const Text('WebSocket 已连接不代表对端已经接收画面。累计加密视频包字节不含 TCP/TLS、握手和元数据；并非网卡总流量。',
                     style: TextStyle(color: P2PColors.muted, fontSize: 11)),
                 ],
               ),
@@ -214,6 +220,9 @@ class _NetworkScreenState extends State<NetworkScreen> {
       },
     );
   }
+
+  String _socketLabel(Object? value) =>
+      value == true ? '已建立' : value == false ? '未建立' : '待测';
 
   String _millis(Object? value) =>
       value is num && value >= 0 ? '${value.toInt()} ms' : '待测';

@@ -14,6 +14,22 @@ pub struct TransportVideoStats {
     pub lan_frames: AtomicU64,
     pub relay_frames: AtomicU64,
     pub relay_suppressed_frames: AtomicU64,
+    // Socket lifetime, not viewer authentication or delivered frame count.
+    pub relay_open_sockets: AtomicUsize,
+    pub relay_socket_opens: AtomicU64,
+}
+struct RelaySocketLease<'a>(&'a TransportVideoStats);
+impl<'a> RelaySocketLease<'a> {
+    fn open(stats: &'a TransportVideoStats) -> Self {
+        stats.relay_open_sockets.fetch_add(1, Ordering::SeqCst);
+        stats.relay_socket_opens.fetch_add(1, Ordering::Relaxed);
+        Self(stats)
+    }
+}
+impl Drop for RelaySocketLease<'_> {
+    fn drop(&mut self) {
+        self.0.relay_open_sockets.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 impl TransportVideoStats {
     fn record(&self, lan: bool, bytes: usize) {
@@ -209,6 +225,7 @@ pub(crate) async fn run(config: &HostConfig) -> Result<()> {
     request.headers_mut().insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", config.relay_token))?);
     let (socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request))
         .await.context("relay connection timed out")??;
+    let _relay_lease = RelaySocketLease::open(&config.transport_video);
     let _ = config.messages.send("已连接中转服务器 · 等待已授权 Windows / Android 控制端".into());
     serve_session(config, socket, false).await
 }
@@ -388,7 +405,11 @@ where
                         "host_encoded_frames": video_stats.encode_samples.load(Ordering::Relaxed),
                         "host_lan_video_bytes": config.transport_video.lan_bytes.load(Ordering::Relaxed),
                         "host_relay_video_bytes": config.transport_video.relay_bytes.load(Ordering::Relaxed),
-                        "host_relay_suppressed_frames": config.transport_video.relay_suppressed_frames.load(Ordering::Relaxed)
+                        "host_relay_suppressed_frames": config.transport_video.relay_suppressed_frames.load(Ordering::Relaxed),
+                        "host_lan_video_frames": config.transport_video.lan_frames.load(Ordering::Relaxed),
+                        "host_relay_video_frames": config.transport_video.relay_frames.load(Ordering::Relaxed),
+                        "host_relay_socket_open": config.transport_video.relay_open_sockets.load(Ordering::SeqCst) > 0,
+                        "host_relay_socket_opens": config.transport_video.relay_socket_opens.load(Ordering::Relaxed)
                     }).to_string();
                     let packet = encrypt(protocol::MONITORS, info.as_bytes())?;
                     tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
@@ -1074,6 +1095,20 @@ mod win_input {
 #[cfg(test)]
 mod transport_video_tests {
     use super::*;
+    #[test]
+    fn relay_socket_lease_counts_open_and_drop_without_resetting_history() {
+        let stats = TransportVideoStats::default();
+        assert_eq!(stats.relay_open_sockets.load(Ordering::SeqCst), 0);
+        {
+            let _a = RelaySocketLease::open(&stats);
+            let b = RelaySocketLease::open(&stats);
+            assert_eq!(stats.relay_open_sockets.load(Ordering::SeqCst), 2);
+            drop(b);
+            assert_eq!(stats.relay_open_sockets.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(stats.relay_open_sockets.load(Ordering::SeqCst), 0);
+        assert_eq!(stats.relay_socket_opens.load(Ordering::Relaxed), 2);
+    }
     #[test]
     fn video_counters_separate_lan_and_relay() {
         let stats = TransportVideoStats::default();

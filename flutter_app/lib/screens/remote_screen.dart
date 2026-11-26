@@ -555,7 +555,11 @@ class _RemoteScreenState extends State<RemoteScreen> {
         'viewer_relay_video_bytes=${s['viewer_relay_video_bytes'] ?? -1}\n'
         'host_lan_video_bytes=${s['host_lan_video_bytes'] ?? -1}\n'
         'host_relay_video_bytes=${s['host_relay_video_bytes'] ?? -1}\n'
-        'host_relay_suppressed_frames=${s['host_relay_suppressed_frames'] ?? -1}';
+        'host_relay_suppressed_frames=${s['host_relay_suppressed_frames'] ?? -1}\n'
+        'host_lan_video_frames=${s['host_lan_video_frames'] ?? -1}\n'
+        'host_relay_video_frames=${s['host_relay_video_frames'] ?? -1}\n'
+        'host_relay_socket_open=${s['host_relay_socket_open'] ?? 'unknown'}\n'
+        'host_relay_socket_opens=${s['host_relay_socket_opens'] ?? -1}';
     await showDialog<void>(
       context: routeContext,
       builder: (dialogContext) => AlertDialog(

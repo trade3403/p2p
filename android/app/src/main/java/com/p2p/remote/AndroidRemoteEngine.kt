@@ -111,6 +111,10 @@ internal class AndroidRemoteEngine(
     private var hostLanVideoBytes: Long? = null
     private var hostRelayVideoBytes: Long? = null
     private var hostRelaySuppressedFrames: Long? = null
+    private var hostLanVideoFrames: Long? = null
+    private var hostRelayVideoFrames: Long? = null
+    private var hostRelaySocketOpen: Boolean? = null
+    private var hostRelaySocketOpens: Long? = null
     private var sampleAt = 0L
     private var sampleFrames = 0L
     private var sampleDrops = 0L
@@ -269,6 +273,10 @@ internal class AndroidRemoteEngine(
         "host_lan_video_bytes" to hostLanVideoBytes,
         "host_relay_video_bytes" to hostRelayVideoBytes,
         "host_relay_suppressed_frames" to hostRelaySuppressedFrames,
+        "host_lan_video_frames" to hostLanVideoFrames,
+        "host_relay_video_frames" to hostRelayVideoFrames,
+        "host_relay_socket_open" to hostRelaySocketOpen,
+        "host_relay_socket_opens" to hostRelaySocketOpens,
         "pairing_status" to if (pairingActive) status else "",
         "vault_error" to null,
     )
@@ -468,6 +476,10 @@ internal class AndroidRemoteEngine(
         hostLanVideoBytes = null
         hostRelayVideoBytes = null
         hostRelaySuppressedFrames = null
+        hostLanVideoFrames = null
+        hostRelayVideoFrames = null
+        hostRelaySocketOpen = null
+        hostRelaySocketOpens = null
         usingLan = tryLan
         lanBusinessKey = null
         lanVerified = false
@@ -685,6 +697,10 @@ internal class AndroidRemoteEngine(
                                         hostLanVideoBytes=metadata.optLong("host_lan_video_bytes",-1).takeIf { it >= 0 }
                                         hostRelayVideoBytes=metadata.optLong("host_relay_video_bytes",-1).takeIf { it >= 0 }
                                         hostRelaySuppressedFrames=metadata.optLong("host_relay_suppressed_frames",-1).takeIf { it >= 0 }
+                                        hostLanVideoFrames=metadata.optLong("host_lan_video_frames",-1).takeIf { it >= 0 }
+                                        hostRelayVideoFrames=metadata.optLong("host_relay_video_frames",-1).takeIf { it >= 0 }
+                                        hostRelaySocketOpen=if(metadata.has("host_relay_socket_open")) metadata.optBoolean("host_relay_socket_open") else null
+                                        hostRelaySocketOpens=metadata.optLong("host_relay_socket_opens",-1).takeIf { it >= 0 }
                                         if (!tryLan) tryAdvertisedLan(webSocket, metadata.optString("lan_ipv4", ""))
                                     }
                             }
@@ -706,6 +722,13 @@ internal class AndroidRemoteEngine(
                     online = false
                     hostAllowsInput = null
                     hostAllowsClipboard = null
+                    hostLanVideoFrames = null
+                    hostRelayVideoFrames = null
+                    hostRelaySocketOpen = null
+                    hostRelaySocketOpens = null
+                    hostLanVideoBytes = null
+                    hostRelayVideoBytes = null
+                    hostRelaySuppressedFrames = null
                     udpProbe?.stop()
                     udpProbe = null
                     udpAttempted = false
@@ -760,6 +783,13 @@ internal class AndroidRemoteEngine(
                     online = false
                     hostAllowsInput = null
                     hostAllowsClipboard = null
+                    hostLanVideoFrames = null
+                    hostRelayVideoFrames = null
+                    hostRelaySocketOpen = null
+                    hostRelaySocketOpens = null
+                    hostLanVideoBytes = null
+                    hostRelayVideoBytes = null
+                    hostRelaySuppressedFrames = null
                     udpProbe?.stop()
                     udpProbe = null
                     udpAttempted = false
@@ -1002,6 +1032,10 @@ internal class AndroidRemoteEngine(
         hostLanVideoBytes = null
         hostRelayVideoBytes = null
         hostRelaySuppressedFrames = null
+        hostLanVideoFrames = null
+        hostRelayVideoFrames = null
+        hostRelaySocketOpen = null
+        hostRelaySocketOpens = null
         requested = false
         lanBusinessKey = null
         lanSequence = null

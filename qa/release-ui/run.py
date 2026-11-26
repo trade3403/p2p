@@ -402,7 +402,10 @@ def read_avc_metrics(strict=True):
                 items=dict(re.findall(r"(?m)^([a-z_]+)=([^\r\n]*)",field))
                 if all(k in items for k in ("codec","frames","fps","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","encoder","decoder","decoder_mode",
                         "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames",
-                        "transport","viewer_lan_video_bytes","viewer_relay_video_bytes","host_lan_video_bytes","host_relay_video_bytes","host_relay_suppressed_frames")):
+                        "transport","viewer_lan_video_bytes","viewer_relay_video_bytes","host_lan_video_bytes","host_relay_video_bytes","host_relay_suppressed_frames",
+                        "transport_phase","lan_attempt_ms","lan_fallback_reason","lan_fallback_started",
+                        "lan_fallback_relay_open_ms","lan_fallback_first_video_ms","host_lan_video_frames",
+                        "host_relay_video_frames","host_relay_socket_open","host_relay_socket_opens")):
                     return items
         return None
     try:
@@ -414,12 +417,20 @@ def read_avc_metrics(strict=True):
     finally:
         android_tap("关闭性能数据")
     for key in ("frames","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames",
-                "viewer_lan_video_bytes","viewer_relay_video_bytes","host_lan_video_bytes","host_relay_video_bytes","host_relay_suppressed_frames"):
+                "viewer_lan_video_bytes","viewer_relay_video_bytes","host_lan_video_bytes","host_relay_video_bytes","host_relay_suppressed_frames",
+                "lan_attempt_ms","lan_fallback_relay_open_ms","lan_fallback_first_video_ms","host_lan_video_frames","host_relay_video_frames","host_relay_socket_opens"):
         data[key]=int(data[key])
     data["fps"]=float(data["fps"])
     if not strict:
         return data
     require(data["codec"]=="H264" and data["frames"]>0,"Actual MediaCodec AVC playback not verified")
+    require(data["transport_phase"]=="relay_video" and data["host_relay_socket_open"]=="true"
+            and data["host_relay_socket_opens"]>=1 and data["host_relay_video_frames"]>=0,
+            "Actual release WSS transport diagnostics not verified")
+    if data["lan_fallback_first_video_ms"]>=0:
+        require(data["lan_fallback_started"]=="true" and data["lan_fallback_relay_open_ms"]>=0
+                and data["lan_fallback_first_video_ms"]>=data["lan_fallback_relay_open_ms"],
+                "Invalid measured LAN recovery ordering")
     require(data["encoder"] in ("OpenH264 software","Media Foundation hardware","Media Foundation D3D11 texture") and data["decoder"] not in ("","unknown"),"Actual encoder and decoder not reported")
     require(data["decoder_mode"] in ("hardware","software","unknown"),"Invalid decoder classification")
     require(data["capture_backend"] in ("DXGI","screenshots compatibility"),"Actual host capture backend not reported")

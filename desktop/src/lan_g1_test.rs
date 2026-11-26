@@ -9,6 +9,8 @@ use tokio_tungstenite::connect_async;
 #[derive(Debug, serde::Serialize)]
 struct Snapshot {
     active: bool,
+    relay_socket_open: bool,
+    relay_socket_opens: u64,
     relay_bytes: u64,
     relay_frames: u64,
     lan_bytes: u64,
@@ -19,6 +21,8 @@ fn snapshot(c: &HostConfig) -> Snapshot {
     let s = &c.transport_video;
     Snapshot {
         active: c.lan_active.load(Ordering::SeqCst),
+        relay_socket_open: s.relay_open_sockets.load(Ordering::SeqCst) > 0,
+        relay_socket_opens: s.relay_socket_opens.load(Ordering::Relaxed),
         relay_bytes: s.relay_bytes.load(Ordering::Relaxed),
         relay_frames: s.relay_frames.load(Ordering::Relaxed),
         lan_bytes: s.lan_bytes.load(Ordering::Relaxed),
@@ -188,6 +192,7 @@ async fn windows_real_host_lan_suppresses_relay_video() {
         let after = snapshot(&config);
         evidence("relay_baseline", serde_json::json!({"before":before,"after":after,"relay":baseline}));
         assert!(!after.active && after.lan_frames == 0 && after.lan_bytes == 0);
+        assert!(after.relay_socket_open && after.relay_socket_opens == 1);
         assert!(after.relay_bytes > before.relay_bytes && after.relay_frames >= before.relay_frames + 2);
         assert!(baseline.frames >= 2 && baseline.bytes > 0 && baseline.pong);
 
@@ -236,6 +241,7 @@ async fn windows_real_host_lan_suppresses_relay_video() {
         evidence("lan_stable", serde_json::json!({"before":stable_before,"after":stable_after,
             "relay":blocked,"lan":direct,"accepted_jpeg_codec_controls":codec_controls}));
         assert!(stable_after.active);
+        assert!(stable_after.relay_socket_open && stable_after.relay_socket_opens == 1);
         assert_eq!(stable_after.relay_bytes, stable_before.relay_bytes);
         assert_eq!(stable_after.relay_frames, stable_before.relay_frames);
         assert!(stable_after.lan_bytes > stable_before.lan_bytes);
@@ -277,6 +283,7 @@ async fn windows_real_host_lan_suppresses_relay_video() {
         let resume_after = snapshot(&config);
         evidence("relay_resumed", serde_json::json!({"before":resume_before,"after":resume_after,"relay":resumed}));
         assert!(!resume_after.active);
+        assert!(resume_after.relay_socket_open && resume_after.relay_socket_opens == 1);
         assert_eq!(resume_after.lan_bytes, resume_before.lan_bytes);
         assert_eq!(resume_after.lan_frames, resume_before.lan_frames);
         assert_eq!(resume_after.suppressed, resume_before.suppressed);
@@ -289,7 +296,9 @@ async fn windows_real_host_lan_suppresses_relay_video() {
         drop(relay);
         timeout(Duration::from_secs(12), relay_task).await.expect("relay stop timeout")
             .unwrap().expect("production relay session failed");
-        evidence("passed", serde_json::json!({"host":snapshot(&config)}));
+        let stopped = snapshot(&config);
+        assert!(!stopped.relay_socket_open && stopped.relay_socket_opens == 1);
+        evidence("passed", serde_json::json!({"host":stopped}));
     }).await;
 }
 

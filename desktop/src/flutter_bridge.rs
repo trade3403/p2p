@@ -203,6 +203,8 @@ impl Engine {
         if let Some(host) = &self.host {
             let stats = &host.transport_video;
             value["host_lan_active"] = json!(host.lan_active.load(Ordering::SeqCst));
+            value["host_relay_socket_open"] = json!(stats.relay_open_sockets.load(Ordering::SeqCst) > 0);
+            value["host_relay_socket_opens"] = json!(stats.relay_socket_opens.load(Ordering::Relaxed));
             value["host_lan_video_bytes"] = json!(stats.lan_bytes.load(Ordering::Relaxed));
             value["host_relay_video_bytes"] = json!(stats.relay_bytes.load(Ordering::Relaxed));
             value["host_lan_video_frames"] = json!(stats.lan_frames.load(Ordering::Relaxed));
