@@ -58,6 +58,8 @@ internal class AndroidRemoteEngine(
     private var usingLan = false
     @Volatile private var lanVerified = false
     private var transport = "未连接"
+    private val lanRecovery = LanRecoveryMetrics()
+    private var lanFailureHint: String? = null
     private var activeToken = ""
     private var retryAttempt = 0
     // Counters cover authenticated video packets admitted past the decoder
@@ -141,6 +143,7 @@ internal class AndroidRemoteEngine(
                         receivedFrames++
                         renderedAvcFrames++
                         lastFrameAtMs = SystemClock.elapsedRealtime()
+                        if (!usingLan) lanRecovery.relayVideo(lastFrameAtMs)
                         retryAttempt = 0
                         status = "已连接家庭电脑 · H.264 正在播放"
                     }
@@ -215,6 +218,22 @@ internal class AndroidRemoteEngine(
         "monitors" to mapOf("count" to monitorCount, "selected" to selectedMonitor),
         "clipboard_text" to clipboardResult,
         "transport" to transport,
+        "viewer_transport_phase" to when {
+            !requested -> if (lanRecovery.reason != null) "failed" else "idle"
+            usingLan && !lanVerified -> "lan_verifying"
+            usingLan && receivingFrames -> "lan_video"
+            usingLan -> "lan_verified"
+            udpLastFrameAtMs != 0L && receivingFrames -> "udp_video"
+            online && receivingFrames -> "relay_video"
+            online -> "relay_open"
+            retryTask != null -> "relay_retry"
+            else -> "relay_connecting"
+        },
+        "lan_attempt_ms" to lanRecovery.attemptMs,
+        "lan_fallback_reason" to lanRecovery.reason,
+        "lan_fallback_started" to lanRecovery.fallbackStarted,
+        "lan_fallback_relay_open_ms" to lanRecovery.relayOpenMs,
+        "lan_fallback_first_video_ms" to lanRecovery.firstVideoMs,
         "rtt_ms" to rttMs,
         "relay_socket_opens" to relaySocketOpens,
         "viewer_lan_video_bytes" to transportVideo.lanBytes.get(),
@@ -418,6 +437,8 @@ internal class AndroidRemoteEngine(
         activeEndpoint = "$normalized/relay?room=$room&role=viewer"
         lanEndpoint = LanEndpoint.url(lanIp) ?: ""
         lanAttempt.reset()
+        lanRecovery.reset()
+        lanFailureHint = null
         usingLan = false
         lanVerified = false
         transport = "连接中"
@@ -440,13 +461,17 @@ internal class AndroidRemoteEngine(
         retryTask?.let { main.removeCallbacks(it) }
         retryTask = null
         val tryLan = lanAttempt.take(lanEndpoint)
+        if (tryLan) {
+            lanRecovery.beginLan(SystemClock.elapsedRealtime())
+            lanFailureHint = null
+        }
         hostLanVideoBytes = null
         hostRelayVideoBytes = null
         hostRelaySuppressedFrames = null
         usingLan = tryLan
         lanBusinessKey = null
         lanVerified = false
-        transport = if(tryLan) "局域网加密直连 · 验证中" else "VPS WSS 中转"
+        transport = if(tryLan) "局域网加密直连 · 验证中" else "VPS WSS 中转 · 连接中"
         status = if(tryLan) "尝试局域网直连..." else
             if (retryAttempt == 0) "正在连接中转服务器..." else "正在重新连接中转服务器..."
         val request = try {
@@ -455,6 +480,7 @@ internal class AndroidRemoteEngine(
             builder.build()
         } catch (_: Exception) {
             status = "连接地址无效"
+            if (tryLan) lanRecovery.failed("invalid_endpoint", lanAttempt.canFallback(activeToken), SystemClock.elapsedRealtime())
             if(tryLan && lanAttempt.canFallback(activeToken)){
                 usingLan=false
                 openConnection()
@@ -491,6 +517,7 @@ internal class AndroidRemoteEngine(
                             }
                         }else{
                             relaySocketOpens++
+                            lanRecovery.relayOpened(SystemClock.elapsedRealtime())
                             online = true
                             transport = "VPS WSS 中转"
                             status = "已连接中转服务器，等待家庭电脑画面"
@@ -537,6 +564,7 @@ internal class AndroidRemoteEngine(
                                 } else if (state.acceptReady(payload)) {
                                     lanBusinessKey = state.businessKey(key)
                                     lanVerified = true
+                                    lanRecovery.verified(SystemClock.elapsedRealtime())
                                     online = true
                                     receivingFrames = false
                                     transport = "局域网 P2P 直连"
@@ -590,6 +618,7 @@ internal class AndroidRemoteEngine(
                                     }
                                     receivingFrames = true
                                     lastFrameAtMs = SystemClock.elapsedRealtime()
+                                    if (!tryLan) lanRecovery.relayVideo(lastFrameAtMs)
                                     retryAttempt = 0
                                     status = "已连接家庭电脑 · 正在接收画面"
                                 }
@@ -690,9 +719,11 @@ internal class AndroidRemoteEngine(
                     avcDecoder.reset()
                     stopWatchdog()
                     if(tryLan) {
+                        lanRecovery.failed(lanFailureHint ?: if (lanVerified) "transport_failure" else "connect_or_verify_failure",
+                            lanAttempt.canFallback(activeToken), SystemClock.elapsedRealtime())
                         lanVerified = false
                         usingLan = false
-                        transport = "局域网不可达，已切换 VPS"
+                        transport = "局域网不可达，准备切换 VPS"
                         status = "局域网直连失败，改走 VPS 中转"
                         if(lanAttempt.canFallback(activeToken)){
                             openConnection()
@@ -706,6 +737,7 @@ internal class AndroidRemoteEngine(
                         requested = false
                         secret = null
                         activeToken = ""
+                        transport = "VPS WSS 中转 · 授权失败"
                         status = "中转访问口令错误（HTTP ${response.code}），已停止重试"
                     } else {
                         scheduleRetry("连接失败：${response?.code ?: error.localizedMessage ?: "网络错误"}")
@@ -741,6 +773,8 @@ internal class AndroidRemoteEngine(
                     avcDecoder.reset()
                     stopWatchdog()
                     if (tryLan) {
+                        lanRecovery.failed(lanFailureHint ?: if (lanVerified) "peer_closed" else "closed_before_verified",
+                            lanAttempt.canFallback(activeToken), SystemClock.elapsedRealtime())
                         lanVerified = false
                         usingLan = false
                         transport = "局域网已断开，切换 VPS"
@@ -763,6 +797,7 @@ internal class AndroidRemoteEngine(
         if (tryLan) main.postDelayed({
             if (socket === ws && requested && !lanVerified) {
                 status = "局域网连接或验证超时，准备切换 VPS"
+                lanFailureHint = "connect_or_verify_timeout"
                 ws.cancel()
             }
         }, LanAttemptPolicy.CONNECT_TIMEOUT_MS)
@@ -799,6 +834,7 @@ internal class AndroidRemoteEngine(
         retryTask?.let { main.removeCallbacks(it) }
         val waitMs = ReconnectPolicy.delayMs(retryAttempt)
         retryAttempt = (retryAttempt + 1).coerceAtMost(31)
+        transport = "VPS WSS 中转 · 等待重连"
         status = "$reason · ${waitMs / 1000} 秒后重连"
         retryTask = object : Runnable {
             override fun run() {
@@ -832,6 +868,7 @@ internal class AndroidRemoteEngine(
                 if (!requested || !online) return
                 if (SystemClock.elapsedRealtime() - lastFrameAtMs > 20_000L) {
                     status = "画面超过 20 秒未更新，正在恢复连接"
+                    if (usingLan) lanFailureHint = "video_watchdog"
                     socket?.cancel()
                     return
                 }
@@ -998,6 +1035,8 @@ internal class AndroidRemoteEngine(
         activeEndpoint = ""
         lanEndpoint = ""
         lanAttempt.reset()
+        lanRecovery.reset()
+        lanFailureHint = null
         usingLan = false
         lanVerified = false
         transport = "未连接"

@@ -183,7 +183,22 @@ class _NetworkScreenState extends State<NetworkScreen> {
                       value: controller.snapshot['host_relay_suppressed_frames']?.toString() ?? '待测'),
                   ],
                   if (controller.viewerRequested) ...[
-                    _NetworkStatusRow(icon: Icons.lan_rounded, title: '当前控制端传输', value: controller.transport),
+                    _NetworkStatusRow(icon: Icons.lan_rounded, title: '当前控制端传输',
+                      value: controller.transport),
+                    if (controller.isAndroid) ...[
+                      _NetworkStatusRow(icon: Icons.info_outline, title: '连接阶段',
+                        value: controller.transportPhaseLabel),
+                      _NetworkStatusRow(icon: Icons.timer_outlined, title: 'LAN 尝试耗时',
+                        value: _millis(controller.snapshot['lan_attempt_ms'])),
+                      _NetworkStatusRow(icon: Icons.info_outline, title: '最近 LAN 回退原因',
+                        value: controller.lanFallbackReasonLabel),
+                      if (controller.snapshot['lan_fallback_started'] == true) ...[
+                        _NetworkStatusRow(icon: Icons.timer_outlined, title: '回退至 WSS 建连',
+                          value: _millis(controller.snapshot['lan_fallback_relay_open_ms'])),
+                        _NetworkStatusRow(icon: Icons.timer_outlined, title: '回退至首帧画面',
+                          value: _millis(controller.snapshot['lan_fallback_first_video_ms'])),
+                      ],
+                    ],
                     _NetworkStatusRow(icon: Icons.swap_vert, title: 'LAN 视频接收',
                       value: _bytes(controller.snapshot['viewer_lan_video_bytes'])),
                     _NetworkStatusRow(icon: Icons.cloud_done_rounded, title: 'VPS 视频接收',
@@ -199,6 +214,9 @@ class _NetworkScreenState extends State<NetworkScreen> {
       },
     );
   }
+
+  String _millis(Object? value) =>
+      value is num && value >= 0 ? '${value.toInt()} ms' : '待测';
 
   String _bytes(Object? value) {
     if (value is! num || value < 0) return '待测';

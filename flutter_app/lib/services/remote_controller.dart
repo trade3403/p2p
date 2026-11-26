@@ -77,6 +77,33 @@ class P2PRemoteController extends ChangeNotifier {
   bool get viewerAllowsInput => _snapshot['viewer_allow_input'] == true;
   bool get viewerAllowsClipboard => _snapshot['viewer_allow_clipboard'] == true;
   String get transport => (_snapshot['transport'] as String?) ?? (viewerConnected ? 'WSS 中转' : '未连接');
+  String get transportPhaseLabel {
+    switch (_snapshot['viewer_transport_phase']) {
+      case 'lan_verifying': return 'LAN 连接 / 加密验证中';
+      case 'lan_verified': return 'LAN 已验证，等待画面';
+      case 'lan_video': return 'LAN 正在接收画面';
+      case 'relay_connecting': return 'VPS WSS 连接中';
+      case 'relay_open': return 'VPS WSS 已连接，等待画面';
+      case 'relay_video': return 'VPS 正在接收画面';
+      case 'relay_retry': return 'VPS 等待重连';
+      case 'udp_video': return 'UDP 预览，控制走 WSS';
+      case 'failed': return '连接失败 / 已停止';
+      case 'idle': return '未连接';
+      default: return '待测';
+    }
+  }
+  String get lanFallbackReasonLabel {
+    switch (_snapshot['lan_fallback_reason']) {
+      case 'invalid_endpoint': return '连接地址无效';
+      case 'connect_or_verify_timeout': return 'LAN 连接或验证超时';
+      case 'connect_or_verify_failure': return 'LAN 连接或验证失败';
+      case 'closed_before_verified': return 'LAN 验证前关闭';
+      case 'peer_closed': return 'LAN 对端关闭';
+      case 'transport_failure': return 'LAN 传输中断';
+      case 'video_watchdog': return 'LAN 画面更新超时';
+      default: return '未记录';
+    }
+  }
   int? get rttMs => (_snapshot['rtt_ms'] as num?)?.toInt();
   bool get pairingActive => _snapshot['pairing_active'] == true;
   bool get tokenConfigured => _snapshot['token_configured'] == true;
