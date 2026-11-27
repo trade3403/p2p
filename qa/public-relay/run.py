@@ -263,11 +263,11 @@ def encode_evidence(expected_frames):
         frame.unlink()
 
 
-def make_lan_avc_fixture(ffmpeg):
+def make_lan_avc_fixture(ffmpeg,width=320,height=240):
     # Real encoded test pattern, not Windows capture or measured host performance.
     # AUD starts each access unit; closed GOPs repeat SPS/PPS for safe looping.
     result=subprocess.run([ffmpeg,"-hide_banner","-loglevel","error","-f","lavfi",
-        "-i","testsrc2=size=320x240:rate=10","-frames:v","20",
+        "-i",f"testsrc2=size={width}x{height}:rate=10","-frames:v","20",
         "-c:v","libx264","-preset","ultrafast","-tune","zerolatency",
         "-pix_fmt","yuv420p","-x264-params","aud=1:repeat-headers=1:keyint=10:min-keyint=10:scenecut=0:open-gop=0:bframes=0",
         "-f","h264","pipe:1"],capture_output=True,check=True)
@@ -280,7 +280,7 @@ def make_lan_avc_fixture(ffmpeg):
         nals=[units[index][m.end()]&31 for m in re.finditer(rb"\x00\x00(?:\x00)?\x01",units[index])
               if m.end()<len(units[index])]
         require(all(n in nals for n in (7,8,5)),"AVC fixture GOP lacks SPS/PPS/IDR")
-    payload=b"".join(struct.pack(">IHH",len(unit)+4,320,240)+unit for unit in units)
+    payload=b"".join(struct.pack(">IHH",len(unit)+4,width,height)+unit for unit in units)
     require(len(payload)<2*1024*1024,"AVC fixture unexpectedly large")
     return payload
 
@@ -323,6 +323,8 @@ def android():
     STAGE="lan_avc_fixture"
     fixture=make_lan_avc_fixture(imageio_ffmpeg.get_ffmpeg_exe())
     adb("shell","-T","run-as com.p2p.remote sh -c 'mkdir -p files; cat > files/ci-lan-avc.bin'",data=fixture)
+    alternate=make_lan_avc_fixture(imageio_ffmpeg.get_ffmpeg_exe(),640,360)
+    adb("shell","-T","run-as com.p2p.remote sh -c 'cat > files/ci-lan-avc-alt.bin'",data=alternate)
     STAGE="rendezvous"
     WS=rendezvous("viewer")
     until=time.monotonic()+20*60
@@ -408,6 +410,17 @@ def android():
                 "verified_candidate_disconnect_recovers_public")),
             "Mandatory actual multi-candidate evidence incomplete")
     require(aliases_ready and aliases_cleaned and not aliases,"Candidate alias lifecycle incomplete")
+    switches=native.get("metrics",{}).get("lan_avc_resolution_switches",[])
+    require(len(switches)==2 and [(s.get("width"),s.get("height")) for s in switches]==[(640,360),(320,240)],
+            "Mandatory AVC resolution switch evidence missing")
+    for switch in switches:
+        require(switch.get("predictive_only_packets",0)>=5 and switch.get("predictive_only_render_delta")==0
+                and switch.get("predictive_only_connected") is False
+                and switch.get("render_delta",0)>=3 and switch.get("surface_delta",0)>0
+                and switch.get("recovery_ms",-1)>=0 and switch.get("same_socket") is True
+                and switch.get("relay_socket_opens")==0 and switch.get("relay_video_bytes")==0
+                and switch.get("surface_errors")==0,
+                "Mandatory AVC resolution recovery evidence incomplete")
     STAGE="video_encoding"
     encode_evidence(native["metrics"]["recorded_frames"])
     STAGE="host_confirmation"

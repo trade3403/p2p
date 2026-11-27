@@ -105,6 +105,15 @@ class PublicRelayE2eTest {
         private val codecRequests = AtomicLong()
         private val sentVideo = AtomicLong()
         private val avcStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+        // The scheduled worker alone owns the current GOP/index. A switch
+        // replaces the entire list at a packet boundary, not the WebSocket.
+        private val nextVideo = AtomicReference<List<ByteArray>?>()
+        private val videoSwitches = AtomicLong()
+        val appliedVideoSwitches: Long get() = videoSwitches.get()
+        fun switchAvc(units: List<ByteArray>) {
+            require(avc.isNotEmpty() && units.isNotEmpty())
+            check(nextVideo.compareAndSet(null,units)) { "Unapplied AVC fixture switch" }
+        }
         private val helloCount = AtomicLong()
         val authenticatedHellos: Long get() = helloCount.get()
         val authenticatedPongs: Long get() = pongCount.get()
@@ -115,13 +124,20 @@ class PublicRelayE2eTest {
         private fun startVideo(ws: WebSocket, key: ByteArray) {
             if (!avcStarted.compareAndSet(false,true)) return
             var index = 0
+            var activeUnits = avc
             // Do not emit catch-up bursts after the emulator or worker stalls.
             worker.scheduleWithFixedDelay({
                 try {
                     if (avc.isEmpty()) sendBusiness(ws,key,1,jpeg)
                     else {
-                        sendBusiness(ws,key,5,avc[index])
-                        index=(index+1)%avc.size
+                        val replacement = nextVideo.getAndSet(null)
+                        if (replacement != null) {
+                            activeUnits = replacement
+                            index = 0
+                            videoSwitches.incrementAndGet()
+                        }
+                        sendBusiness(ws,key,5,activeUnits[index])
+                        index=(index+1)%activeUnits.size
                     }
                     sentVideo.incrementAndGet()
                 } catch (failure: Throwable) { error.compareAndSet(null,failure) }
@@ -812,19 +828,28 @@ class PublicRelayE2eTest {
             // Independent AVC session, after every live Windows/JPEG assertion.
             // This is an encoded test pattern, not a physical LAN host capture.
             stage="lan_avc_setup"
-            val fixtureFile=File(ctx.filesDir,"ci-lan-avc.bin")
-            val fixture=ByteBuffer.wrap(fixtureFile.readBytes())
-            fixtureFile.delete()
-            val units=mutableListOf<ByteArray>()
-            while(fixture.hasRemaining()) {
-                val size=fixture.int
-                require(size in 9..fixture.remaining())
-                val unit=ByteArray(size)
-                fixture.get(unit)
-                requireNotNull(AvcPayload.parse(unit))
-                units.add(unit)
+            fun loadAvcFixture(name: String, width: Int, height: Int): List<ByteArray> {
+                val file=File(ctx.filesDir,name)
+                val fixture=ByteBuffer.wrap(file.readBytes())
+                file.delete()
+                val units=mutableListOf<ByteArray>()
+                while(fixture.hasRemaining()) {
+                    val size=fixture.int
+                    require(size in 9..fixture.remaining())
+                    val unit=ByteArray(size)
+                    fixture.get(unit)
+                    val parsed=requireNotNull(AvcPayload.parse(unit))
+                    assertEquals(width,parsed.width)
+                    assertEquals(height,parsed.height)
+                    units.add(unit)
+                }
+                assertEquals(20,units.size)
+                assertTrue(requireNotNull(AvcPayload.parse(units[0])).hasSelfContainedIdr())
+                assertTrue(requireNotNull(AvcPayload.parse(units[10])).hasSelfContainedIdr())
+                return units
             }
-            assertEquals(20,units.size)
+            val units=loadAvcFixture("ci-lan-avc.bin",320,240)
+            val alternate=loadAvcFixture("ci-lan-avc-alt.bin",640,360)
             command("disconnectViewer")
             val consumer=AvcSurfaceConsumer()
             avcConsumer=consumer
@@ -933,6 +958,85 @@ class PublicRelayE2eTest {
                     .put("relay_video_bytes",0).put("relay_socket_opens",0)
                     .put("source","FFmpeg synthetic test pattern; emulator-local LAN, not physical Windows capture"))
                 success("Real MediaCodec AVC surface output via encrypted LAN fixture, no viewer relay opens or video")
+                // Keep the same authenticated LAN WebSocket, engine and EGL
+                // consumer. Deliberately withhold the new format's keyframe
+                // before supplying its real, independently encoded closed GOP.
+                val switches=org.json.JSONArray()
+                metrics.put("lan_avc_resolution_switches",switches)
+                for ((width,height,nextUnits) in listOf(
+                    Triple(640,360,alternate),Triple(320,240,units))) {
+                    stage="lan_avc_resolution_${width}_predictive_only"
+                    val before=snap()
+                    val helloCount=lan.authenticatedHellos
+                    val applied=lan.appliedVideoSwitches
+                    val sent=lan.sentVideoPackets
+                    val predictive=nextUnits.subList(1,10)
+                    assertTrue(predictive.all {
+                        !requireNotNull(AvcPayload.parse(it)).hasSelfContainedIdr()
+                    })
+                    lan.switchAvc(predictive)
+                    fun matchesSize(v:Map<*,*>) =
+                        (v["frame_width"] as Number).toInt()==width &&
+                        (v["frame_height"] as Number).toInt()==height
+                    await("new resolution waiting for IDR",8_000) {
+                        val v=snap()
+                        matchesSize(v) && v["h264_active"]==true &&
+                            v["viewer_connected"]==false &&
+                            lan.appliedVideoSwitches==applied+1
+                    }
+                    val blocked=snap()
+                    val blockedRendered=(blocked["avc_rendered_frames"] as Number).toLong()
+                    val blockedSent=lan.sentVideoPackets
+                    // At least five actual predictive-only packets after
+                    // observing the new-format barrier, with no new output.
+                    await("predictive-only packets sent",5_000) {
+                        lan.sentVideoPackets>=blockedSent+5
+                    }
+                    val stillBlocked=snap()
+                    assertTrue(matchesSize(stillBlocked))
+                    assertEquals(false,stillBlocked["viewer_connected"])
+                    val blockedDelta=(stillBlocked["avc_rendered_frames"] as Number).toLong()-blockedRendered
+                    assertEquals(0L,blockedDelta)
+                    val blockedPackets=lan.sentVideoPackets-blockedSent
+                    assertTrue(lan.sentVideoPackets>sent)
+                    assertEquals(helloCount,lan.authenticatedHellos)
+                    assertEquals(0L,(stillBlocked["relay_socket_opens"] as Number).toLong())
+                    assertEquals(0L,(stillBlocked["viewer_relay_video_bytes"] as Number).toLong())
+                    stage="lan_avc_resolution_${width}_recovery"
+                    val resumeSurface=consumer.frames
+                    val resumeAt=SystemClock.elapsedRealtime()
+                    lan.switchAvc(nextUnits)
+                    await("actual new-format MediaCodec output",15_000) {
+                        val v=snap()
+                        matchesSize(v) && v["viewer_connected"]==true &&
+                            v["transport"]=="局域网 P2P 直连" &&
+                            (v["avc_rendered_frames"] as Number).toLong()>=blockedRendered+3 &&
+                            consumer.frames>resumeSurface &&
+                            lan.appliedVideoSwitches==applied+2
+                    }
+                    val recoveredFormat=snap()
+                    assertEquals(helloCount,lan.authenticatedHellos)
+                    assertEquals(before["relay_socket_opens"],recoveredFormat["relay_socket_opens"])
+                    assertEquals(0L,(recoveredFormat["viewer_relay_video_bytes"] as Number).toLong())
+                    assertEquals(0L,consumer.errors)
+                    assertNull(lan.failureType)
+                    assertTrue((recoveredFormat["viewer_lan_video_bytes"] as Number).toLong()>
+                        (before["viewer_lan_video_bytes"] as Number).toLong())
+                    val evidence=JSONObject()
+                        .put("width",width).put("height",height)
+                        .put("predictive_only_packets",blockedPackets)
+                        .put("predictive_only_render_delta",blockedDelta)
+                        .put("predictive_only_connected",stillBlocked["viewer_connected"])
+                        .put("render_delta",(recoveredFormat["avc_rendered_frames"] as Number).toLong()-blockedRendered)
+                        .put("surface_delta",consumer.frames-resumeSurface)
+                        .put("recovery_ms",SystemClock.elapsedRealtime()-resumeAt)
+                        .put("same_socket",lan.authenticatedHellos==helloCount)
+                        .put("relay_socket_opens",recoveredFormat["relay_socket_opens"])
+                        .put("relay_video_bytes",recoveredFormat["viewer_relay_video_bytes"])
+                        .put("surface_errors",consumer.errors)
+                    switches.put(evidence)
+                    success("Actual MediaCodec resolution recovery on same encrypted LAN: "+evidence.toString())
+                }
                 val beforeFallback = snap()
                 val fallbackStart = SystemClock.elapsedRealtime()
                 val beforeSurface = consumer.frames
