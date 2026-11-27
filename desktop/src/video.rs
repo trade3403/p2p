@@ -74,6 +74,7 @@ pub fn spawn_frames(
     force_jpeg: Arc<AtomicBool>,
     actual_encoder: Arc<AtomicU32>,
     stats: Arc<VideoStats>,
+    encoder_reset: Arc<AtomicBool>,
 ) -> mpsc::Receiver<Frame> {
     let (tx, rx) = mpsc::channel(2);
     thread::spawn(move || {
@@ -106,7 +107,9 @@ pub fn spawn_frames(
             let selected = monitor.load(Ordering::Relaxed);
             let profile = (bitrate.load(Ordering::Relaxed).clamp(400_000,4_000_000),
                            target_fps.load(Ordering::Relaxed).clamp(5,30));
+            let requested_reset = encoder_reset.swap(false, Ordering::AcqRel);
             if active_h264 != previous_h264
+                || (active_h264 && requested_reset)
                 || selected != previous_monitor
                 || (active_h264 && ((gpu.is_none() && hardware.is_none() && frames_since_reset >= profile.1) || previous_profile != profile))
             {
@@ -180,6 +183,7 @@ pub fn spawn_frames(
     _force_jpeg: Arc<AtomicBool>,
     _actual_encoder: Arc<AtomicU32>,
     _stats: Arc<VideoStats>,
+    _encoder_reset: Arc<AtomicBool>,
 ) -> mpsc::Receiver<Frame> {
     let (_tx, rx) = mpsc::channel(1);
     rx

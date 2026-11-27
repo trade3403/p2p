@@ -268,6 +268,60 @@ impl LanHeartbeat {
     }
 }
 
+// Once a relay AVC access unit has been discarded, predictive pictures can
+// reference data the receiver never got. Resume only at a self-contained IDR.
+#[derive(Default)]
+struct RelayAvcRecovery {
+    waiting: bool,
+    reset_requested: bool,
+}
+impl RelayAvcRecovery {
+    fn suppressed(&mut self, kind: u8) {
+        if kind == protocol::AVC {
+            self.waiting = true;
+            self.reset_requested = false;
+        }
+    }
+    fn allow(&mut self, kind: u8, bytes: &[u8], reset: &AtomicBool) -> bool {
+        if !self.waiting || kind != protocol::AVC { return true; }
+        if self_contained_avc_idr(bytes) {
+            *self = Self::default();
+            return true;
+        }
+        if !self.reset_requested {
+            reset.store(true, Ordering::Release);
+            self.reset_requested = true;
+        }
+        false
+    }
+}
+
+// Skip the four-byte wire dimensions header. Require SPS and PPS before
+// the first IDR, with no earlier predictive VCL.
+fn self_contained_avc_idr(payload: &[u8]) -> bool {
+    let Some(bytes) = payload.get(4..) else { return false; };
+    if !bytes.starts_with(&[0,0,1]) && !bytes.starts_with(&[0,0,0,1]) {
+        return false;
+    }
+    let (mut sps, mut pps) = (false, false);
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i..].starts_with(&[0,0,1]) {
+            let header = bytes[i+3];
+            if header & 0x80 != 0 { return false; }
+            match header & 31 {
+                7 => sps = true,
+                8 => pps = true,
+                5 => return sps && pps,
+                1..=4 => return false,
+                _ => {}
+            }
+            i += 4;
+        } else { i += 1; }
+    }
+    false
+}
+
 /// Shared authenticated session pump for VPS WSS and opt-in LAN WebSocket.
 /// Only the LAN path performs an additional encrypted HELLO proof before calling this.
 pub(crate) async fn serve_session<S>(
@@ -297,6 +351,8 @@ where
     let mut good_samples = 0u32;
     let actual_encoder=Arc::new(AtomicU32::new(0));
     let video_stats=Arc::new(crate::video::VideoStats::default());
+    let encoder_reset = Arc::new(AtomicBool::new(false));
+    let mut relay_avc_recovery = RelayAvcRecovery::default();
     let mut frames = crate::video::spawn_frames(
         config.monitor_index.clone(),
         config.h264_enabled.clone(),
@@ -307,6 +363,7 @@ where
         force_jpeg.clone(),
         actual_encoder.clone(),
         video_stats.clone(),
+        encoder_reset.clone(),
     );
     // Refresh bounded candidates while sharing, only in encrypted metadata.
     #[cfg(windows)]
@@ -352,9 +409,16 @@ where
                 };
                 if !is_lan_session && config.lan_active.load(Ordering::SeqCst) {
                     config.transport_video.relay_suppressed_frames.fetch_add(1, Ordering::Relaxed);
+                    relay_avc_recovery.suppressed(kind);
                     continue;
                 }
-                if !is_lan_session && config.udp_active.load(Ordering::SeqCst) { continue; }
+                if !is_lan_session && config.udp_active.load(Ordering::SeqCst) {
+                    relay_avc_recovery.suppressed(kind);
+                    continue;
+                }
+                if !is_lan_session && !relay_avc_recovery.allow(kind, &bytes, &encoder_reset) {
+                    continue;
+                }
                 let send_start=std::time::Instant::now();
                 let packet = encrypt(kind, &bytes)?;
                 let encrypted_len = packet.len();
@@ -1112,6 +1176,33 @@ mod transport_video_tests {
         assert_eq!(stats.relay_open_sockets.load(Ordering::SeqCst), 0);
         assert_eq!(stats.relay_socket_opens.load(Ordering::Relaxed), 2);
     }
+    #[test]
+    fn relay_recovery_waits_for_self_contained_idr_and_requests_one_reset() {
+        let mut gate = RelayAvcRecovery::default();
+        let reset = AtomicBool::new(false);
+        let p = [0,2,0,2,0,0,1,0x61,0x80];
+        let idr_only = [0,2,0,2,0,0,1,0x65,0x80];
+        let key = [0,2,0,2,0,0,0,1,0x67,0x80,0,0,1,0x68,0x80,0,0,1,0x65,0x80];
+        assert!(gate.allow(protocol::AVC, &p, &reset));
+        gate.suppressed(protocol::FRAME);
+        assert!(gate.allow(protocol::AVC, &p, &reset));
+        gate.suppressed(protocol::AVC);
+        assert!(gate.allow(protocol::FRAME, &[], &reset));
+        assert!(!gate.allow(protocol::AVC, &p, &reset));
+        assert!(reset.swap(false, Ordering::AcqRel));
+        assert!(!gate.allow(protocol::AVC, &idr_only, &reset));
+        assert!(!gate.allow(protocol::AVC, &[0; 4], &reset));
+        assert!(!reset.load(Ordering::Acquire));
+        let mut wrong_order = p.to_vec();
+        wrong_order.extend_from_slice(&key[4..]);
+        assert!(!gate.allow(protocol::AVC, &wrong_order, &reset));
+        assert!(gate.allow(protocol::AVC, &key, &reset));
+        assert!(gate.allow(protocol::AVC, &p, &reset));
+        gate.suppressed(protocol::AVC);
+        assert!(!gate.allow(protocol::AVC, &p, &reset));
+        assert!(reset.load(Ordering::Acquire));
+    }
+
     #[test]
     fn video_counters_separate_lan_and_relay() {
         let stats = TransportVideoStats::default();

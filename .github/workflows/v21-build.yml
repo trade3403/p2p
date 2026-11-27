@@ -81,6 +81,18 @@ jobs:
           if (($records.stage -join ',') -ne 'start,relay_baseline,lan_startup,lan_stable,relay_resumed,passed') { throw 'G5b-1 evidence incomplete' }
           if (@($records | Where-Object { $_.scope -ne 'windows_runner_loopback_ws_real_avc' }).Count -ne 0) { throw 'G5b-1 evidence scope mismatch' }
 
+      - name: G5b-2 negotiated AVC handoff and predictive decode
+        run: |
+          New-Item -ItemType Directory -Force evidence/windows | Out-Null
+          $env:P2P_G5B2_REPORT = Join-Path $env:GITHUB_WORKSPACE 'evidence/windows/g5b2-avc-handoff.jsonl'
+          Remove-Item $env:P2P_G5B2_REPORT -ErrorAction SilentlyContinue
+          cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features lan::g1::windows_real_host_negotiated_avc_handoff -- --exact --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'G5b-2 negotiated AVC handoff failed' }
+          if (-not (Test-Path $env:P2P_G5B2_REPORT)) { throw 'G5b-2 evidence missing' }
+          $records = @(Get-Content $env:P2P_G5B2_REPORT | ForEach-Object { $_ | ConvertFrom-Json })
+          if (($records.stage -join ',') -ne 'start,relay_baseline,lan_startup,lan_stable,relay_resumed,passed') { throw 'G5b-2 evidence incomplete' }
+          if (@($records | Where-Object { $_.scope -ne 'windows_runner_loopback_ws_avc_handoff' }).Count -ne 0) { throw 'G5b-2 evidence scope mismatch' }
+
       - name: G2 Windows real Host LAN abnormal exit and sharing stop cleanup
         run: |
           New-Item -ItemType Directory -Force evidence/windows | Out-Null
