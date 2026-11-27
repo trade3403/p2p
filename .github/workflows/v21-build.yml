@@ -69,6 +69,18 @@ jobs:
           $last = Get-Content $env:P2P_G1_REPORT -Tail 1 | ConvertFrom-Json
           if ($last.stage -ne 'passed') { throw 'G1 evidence incomplete' }
 
+      - name: G5b-1 Windows real capture AVC encrypted LAN and relay recovery
+        run: |
+          New-Item -ItemType Directory -Force evidence/windows | Out-Null
+          $env:P2P_G5B_REPORT = Join-Path $env:GITHUB_WORKSPACE 'evidence/windows/g5b-real-avc.jsonl'
+          Remove-Item $env:P2P_G5B_REPORT -ErrorAction SilentlyContinue
+          cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features lan::g1::windows_real_host_lan_avc_and_relay_recovery -- --exact --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'G5b-1 real Windows AVC transport test failed' }
+          if (-not (Test-Path $env:P2P_G5B_REPORT)) { throw 'G5b-1 evidence missing (test did not run)' }
+          $records = @(Get-Content $env:P2P_G5B_REPORT | ForEach-Object { $_ | ConvertFrom-Json })
+          if (($records.stage -join ',') -ne 'start,relay_baseline,lan_startup,lan_stable,relay_resumed,passed') { throw 'G5b-1 evidence incomplete' }
+          if (@($records | Where-Object { $_.scope -ne 'windows_runner_loopback_ws_real_avc' }).Count -ne 0) { throw 'G5b-1 evidence scope mismatch' }
+
       - name: G2 Windows real Host LAN abnormal exit and sharing stop cleanup
         run: |
           New-Item -ItemType Directory -Force evidence/windows | Out-Null

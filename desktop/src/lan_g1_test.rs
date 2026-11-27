@@ -734,3 +734,266 @@ async fn windows_real_host_input_handoff() {
             "revocation_release":true,"denied_input_blocked":true,"reauthorized":true,"stop_release":true}));
     }).await;
 }
+
+
+// G5b-1: observe real negotiated Annex-B access units, never inject an AVC
+// fixture into the Host. Keep the JPEG-only G1/G2 observation unchanged.
+#[derive(Default, Debug, serde::Serialize)]
+struct AvcObserved {
+    elapsed_ms: u64,
+    bytes: u64,
+    packets: u64,
+    vcl_packets: u64,
+    jpeg_packets: u64,
+    sps_packets: u64,
+    pps_packets: u64,
+    idr_packets: u64,
+    decoded_idr: u64,
+    first_decoded_idr_ms: Option<u64>,
+    dimensions: Option<(usize, usize)>,
+    pong: bool,
+    ws_pings: u64,
+}
+
+fn avc_nal_types(bytes: &[u8]) -> Vec<u8> {
+    // Both 3- and 4-byte Annex-B prefixes are legal. Reject empty/invalid NALs.
+    assert!(bytes.starts_with(&[0,0,1]) || bytes.starts_with(&[0,0,0,1]),
+        "missing Annex-B start code");
+    let types: Vec<u8> = openh264::nal_units(bytes).map(|nal| {
+        let body = nal.strip_prefix(&[0,0,0,1]).or_else(|| nal.strip_prefix(&[0,0,1]))
+            .expect("invalid Annex-B prefix");
+        let header = *body.first().expect("empty AVC NAL");
+        assert_eq!(header & 0x80, 0, "forbidden AVC NAL bit");
+        let kind = header & 31;
+        assert!((1..=23).contains(&kind), "invalid AVC NAL type");
+        kind
+    }).collect();
+    assert!(!types.is_empty(), "no AVC NAL units");
+    types
+}
+
+#[test]
+fn g5b_annex_b_nal_types() {
+    // Structural parser test only; these bytes are not performance evidence.
+    assert_eq!(avc_nal_types(&[0,0,0,1,0x67,2,0,0,1,0x68,3,0,0,0,1,0x65,4]),
+        vec![7,8,5]);
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> Peer<S> {
+    async fn sample_avc(&mut self, seconds: u64, expected_ping: u64,
+        expected_size: (usize, usize)) -> AvcObserved {
+        use openh264::formats::YUVSource;
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(seconds);
+        let mut result = AvcObserved::default();
+        loop {
+            let message = match timeout_at(deadline, self.socket.next()).await {
+                Err(_) => break,
+                Ok(Some(Ok(message))) => message,
+                _ => panic!("peer disconnected during AVC observation"),
+            };
+            match message {
+                Message::Binary(packet) => {
+                    let (kind, payload) = protocol::decrypt(&self.key, &packet)
+                        .expect("host packet authentication failed");
+                    if let Some(guard) = &mut self.guard {
+                        assert!(guard.accept(&packet), "host LAN replay/direction violation");
+                    }
+                    match kind {
+                        protocol::FRAME => {
+                            assert_eq!(result.packets, 0, "JPEG after negotiated AVC");
+                            result.jpeg_packets += 1;
+                        }
+                        protocol::AVC => {
+                            assert!(payload.len() > 4 && payload.len() <= 2 * 1024 * 1024);
+                            let size = (u16::from_be_bytes([payload[0],payload[1]]) as usize,
+                                u16::from_be_bytes([payload[2],payload[3]]) as usize);
+                            assert_eq!(size, expected_size, "AVC header differs from real display profile");
+                            result.dimensions = Some(size);
+                            let types = avc_nal_types(&payload[4..]);
+                            let (sps, pps, idr) = (types.contains(&7), types.contains(&8), types.contains(&5));
+                            result.sps_packets += u64::from(sps);
+                            result.pps_packets += u64::from(pps);
+                            result.idr_packets += u64::from(idr);
+                            if types.contains(&1) || idr { result.vcl_packets += 1; }
+                            // Independently decode the first self-contained random access
+                            // unit in this window; don't rely on earlier decoder state.
+                            if sps && pps && idr && result.decoded_idr == 0 {
+                                let mut decoder = openh264::decoder::Decoder::new().expect("test decoder");
+                                let decoded = decoder.decode(&payload[4..]).expect("invalid IDR bitstream")
+                                    .expect("IDR did not produce a decoded frame");
+                                assert_eq!(decoded.dimensions(), size, "decoded dimensions differ from wire header");
+                                assert!(!decoded.y().is_empty(), "empty decoded luma");
+                                result.decoded_idr = 1;
+                                result.first_decoded_idr_ms = Some(started.elapsed().as_millis() as u64);
+                            }
+                            result.packets += 1;
+                            result.bytes += packet.len() as u64;
+                        }
+                        protocol::PONG if payload.as_slice() == &expected_ping.to_be_bytes()[..] => {
+                            result.pong = true;
+                        }
+                        _ => {}
+                    }
+                }
+                Message::Ping(_) => {
+                    result.ws_pings += 1;
+                    timeout(Duration::from_secs(5), self.socket.flush()).await.unwrap().unwrap();
+                }
+                Message::Close(_) => panic!("host closed during AVC observation"),
+                _ => {}
+            }
+            if Instant::now() >= deadline { break; }
+        }
+        result.elapsed_ms = started.elapsed().as_millis() as u64;
+        result
+    }
+}
+
+fn g5b_evidence(stage: &str, data: serde_json::Value) {
+    use std::io::Write;
+    let line = serde_json::json!({"stage":stage,"scope":"windows_runner_loopback_ws_real_avc","data":data}).to_string();
+    eprintln!("{}", line);
+    if let Ok(path) = std::env::var("P2P_G5B_REPORT") {
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            .expect("open G5b evidence");
+        writeln!(file, "{}", line).expect("write G5b evidence");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires interactive Windows desktop; mandatory dedicated G5b-1 Windows CI step"]
+async fn windows_real_host_lan_avc_and_relay_recovery() {
+    // The production host runs in a current-thread runtime. Local tasks avoid
+    // imposing Send on its platform-specific native input/clipboard objects.
+    tokio::task::LocalSet::new().run_until(async {
+        let relay_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let relay_address = relay_listener.local_addr().unwrap();
+        let lan_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let lan_address = lan_listener.local_addr().unwrap();
+        let secret = protocol::new_secret();
+        let (messages, _logs) = mpsc::channel();
+        let config = HostConfig {
+            server: format!("ws://{relay_address}"),
+            relay_token: "local-test-only".into(), secret,
+            running: Arc::new(AtomicBool::new(true)),
+            allow_input: Arc::new(AtomicBool::new(false)),
+            allow_clipboard: Arc::new(AtomicBool::new(false)),
+            monitor_index: Arc::new(AtomicUsize::new(0)),
+            lan_direct: Arc::new(AtomicBool::new(true)),
+            lan_active: Arc::new(AtomicBool::new(false)),
+            control_gate: Arc::new(host::ControlGate::default()),
+            allow_udp_probe: Arc::new(AtomicBool::new(false)),
+            allow_udp_preview: Arc::new(AtomicBool::new(false)),
+            udp_active: Arc::new(AtomicBool::new(false)),
+            h264_enabled: Arc::new(AtomicBool::new(true)),
+            target_fps: Arc::new(AtomicU32::new(6)),
+            sent_frames: Arc::new(AtomicU64::new(0)),
+            dropped_frames: Arc::new(AtomicU64::new(0)),
+            transport_video: Arc::new(host::TransportVideoStats::default()),
+            messages,
+        };
+        g5b_evidence("start", serde_json::json!({"host":snapshot(&config)}));
+        let relay_config = config.clone();
+        let relay_task = tokio::task::spawn_local(async move { host::run(&relay_config).await });
+        let (stream, _) = timeout(Duration::from_secs(15), relay_listener.accept())
+            .await.expect("host relay connect timeout").unwrap();
+        let socket = timeout(Duration::from_secs(10), accept_async(stream)).await.unwrap().unwrap();
+        let mut relay = Peer::new(socket, secret, false);
+        let before = snapshot(&config);
+        relay.send(protocol::PING, &1u64.to_be_bytes()).await;
+        let baseline = relay.sample(10, 1).await;
+        let after = snapshot(&config);
+        g5b_evidence("relay_baseline", serde_json::json!({"before":before,"after":after,"relay":baseline}));
+        assert!(!after.active && after.lan_frames == 0 && after.lan_bytes == 0);
+        assert!(after.relay_socket_open && after.relay_socket_opens == 1);
+        assert!(after.relay_bytes > before.relay_bytes && after.relay_frames >= before.relay_frames + 2);
+        assert!(baseline.frames >= 2 && baseline.bytes > 0 && baseline.pong);
+
+        // Use the exact production authorization and activation functions,
+        // never assign lan_active or increment host video counters in the test.
+        let lan_config = config.clone();
+        let lan_task = tokio::task::spawn_local(async move {
+            let (stream, address) = lan_listener.accept().await.unwrap();
+            assert!(is_lan_address(address.ip()));
+            let (socket, key) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
+            serve_authorized_session(&lan_config, socket, key, address.ip()).await;
+        });
+        let (mut socket, _) = timeout(Duration::from_secs(10),
+            connect_async(format!("ws://{lan_address}/direct"))).await.unwrap().unwrap();
+        let client = protocol::new_secret();
+        socket.send(Message::Binary(protocol::encrypt(&secret, HELLO,
+            &transcript(HELLO_PAYLOAD, &client, &[])).unwrap())).await.unwrap();
+        let (kind, challenge) = protocol::decrypt(&secret, &binary(&mut socket).await).unwrap();
+        assert_eq!(kind, READY);
+        let prefix = transcript(CHALLENGE_PAYLOAD, &client, &[]);
+        let server = challenge.strip_prefix(prefix.as_slice()).unwrap();
+        assert_eq!(server.len(), NONCE_LEN);
+        assert!(!config.lan_active.load(Ordering::SeqCst), "LAN active before proof");
+        socket.send(Message::Binary(protocol::encrypt(&secret, HELLO,
+            &transcript(PROOF_PAYLOAD, &client, server)).unwrap())).await.unwrap();
+        let (kind, ready) = protocol::decrypt(&secret, &binary(&mut socket).await).unwrap();
+        assert_eq!(kind, READY);
+        assert_eq!(ready, transcript(READY_PAYLOAD, &client, server));
+        let mut lan = Peer::new(socket, business_key(&secret, &client, server), true);
+        let display = screenshots::Screen::all().unwrap().remove(0).display_info;
+        let (w,h) = crate::video::dimensions(display.width, display.height);
+        assert!(w >= 2 && h >= 2);
+        let size = (w as usize,h as usize);
+        lan.send(protocol::CONTROL, br#"{"type":"video_codec","codec":"h264"}"#).await;
+        lan.send(protocol::PING, &2u64.to_be_bytes()).await;
+        // Allow bounded startup negotiation and any queued JPEG to drain.
+        let (drain, startup) = tokio::join!(relay.sample(10,99),lan.sample_avc(10,2,size));
+        let stable_before = snapshot(&config);
+        g5b_evidence("lan_startup",serde_json::json!({"host":stable_before,"relay":drain,"lan":startup}));
+        assert!(stable_before.active && startup.pong && startup.vcl_packets >= 2);
+        assert!(startup.sps_packets > 0 && startup.pps_packets > 0 && startup.idr_packets > 0);
+        assert_eq!(startup.decoded_idr,1, "no independently decoded LAN IDR");
+        relay.send(protocol::PING, &3u64.to_be_bytes()).await;
+        lan.send(protocol::PING, &4u64.to_be_bytes()).await;
+        let (blocked, direct) = tokio::join!(relay.sample(10,3),lan.sample_avc(10,4,size));
+        let stable_after = snapshot(&config);
+        g5b_evidence("lan_stable",serde_json::json!({"before":stable_before,"after":stable_after,
+            "relay":blocked,"lan":direct}));
+        assert!(stable_after.active && stable_after.relay_socket_open && stable_after.relay_socket_opens == 1);
+        assert_eq!((stable_after.relay_bytes,stable_after.relay_frames),
+            (stable_before.relay_bytes,stable_before.relay_frames));
+        assert_eq!((blocked.frames,blocked.bytes),(0,0));
+        assert!(!blocked.pong && direct.pong && direct.ws_pings > 0);
+        assert_eq!(direct.jpeg_packets,0);
+        assert!(direct.vcl_packets >= 2 && direct.bytes > 0);
+        assert!(stable_after.lan_bytes > stable_before.lan_bytes
+            && stable_after.lan_frames >= stable_before.lan_frames + 2);
+        assert!(stable_after.suppressed > stable_before.suppressed);
+
+        // The baseline relay is JPEG. After actual LAN disconnect the same
+        // authorized relay socket negotiates real AVC; continuity of an
+        // already-negotiated relay AVC GOP is a separate G5b-2 requirement.
+        timeout(Duration::from_secs(5),lan.socket.close(None)).await.unwrap().unwrap();
+        drop(lan);
+        timeout(Duration::from_secs(12),lan_task).await.expect("LAN cleanup timeout").unwrap();
+        let resume_before = snapshot(&config);
+        assert!(!resume_before.active);
+        relay.send(protocol::CONTROL,br#"{"type":"video_codec","codec":"h264"}"#).await;
+        relay.send(protocol::PING,&5u64.to_be_bytes()).await;
+        let resumed = relay.sample_avc(10,5,size).await;
+        let resume_after = snapshot(&config);
+        g5b_evidence("relay_resumed",serde_json::json!({"before":resume_before,"after":resume_after,"relay":resumed}));
+        assert!(!resume_after.active && resume_after.relay_socket_open && resume_after.relay_socket_opens == 1);
+        assert_eq!((resume_after.lan_bytes,resume_after.lan_frames,resume_after.suppressed),
+            (resume_before.lan_bytes,resume_before.lan_frames,resume_before.suppressed));
+        assert!(resume_after.relay_bytes > resume_before.relay_bytes
+            && resume_after.relay_frames >= resume_before.relay_frames + 2);
+        assert!(resumed.pong && resumed.vcl_packets >= 2 && resumed.bytes > 0);
+        assert!(resumed.sps_packets > 0 && resumed.pps_packets > 0 && resumed.idr_packets > 0);
+        assert_eq!(resumed.decoded_idr,1,"no independently decoded relay IDR");
+        config.running.store(false, Ordering::SeqCst);
+        let _ = timeout(Duration::from_secs(5),relay.socket.close(None)).await;
+        drop(relay);
+        timeout(Duration::from_secs(12),relay_task).await.expect("relay stop timeout")
+            .unwrap().expect("production relay session failed");
+        let stopped = snapshot(&config);
+        assert!(!stopped.relay_socket_open && stopped.relay_socket_opens == 1);
+        g5b_evidence("passed",serde_json::json!({"host":stopped}));
+    }).await;
+}
