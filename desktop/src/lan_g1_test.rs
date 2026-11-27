@@ -741,6 +741,7 @@ async fn windows_real_host_input_handoff() {
 #[derive(Default, Debug, serde::Serialize)]
 struct AvcObserved {
     elapsed_ms: u64,
+    timing_samples: Vec<SessionTimingObservation>,
     bytes: u64,
     packets: u64,
     vcl_packets: u64,
@@ -755,6 +756,52 @@ struct AvcObserved {
     dimensions: Option<(usize, usize)>,
     pong: bool,
     ws_pings: u64,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SessionTiming {
+    capture: crate::video::TimingSample,
+    encode: crate::video::TimingSample,
+    send: crate::video::TimingSample,
+    queue_wait: crate::video::TimingSample,
+    queue_drops: u64,
+}
+#[derive(Debug, serde::Serialize)]
+struct SessionTimingObservation {
+    observed_ms: u64,
+    encoder: String,
+    capture_backend: String,
+    timing: SessionTiming,
+}
+
+fn timing_interval(samples: &[SessionTimingObservation]) -> serde_json::Value {
+    let first = samples.first().expect("session timing missing");
+    let last = samples.last().unwrap();
+    assert!(samples.len() >= 2 && last.observed_ms > first.observed_ms);
+    let stage = |a: crate::video::TimingSample, b: crate::video::TimingSample| {
+        let d = b.delta(a).expect("session timing regressed");
+        assert!(d.samples > 0, "no stage progress");
+        serde_json::json!({"total_us":d.total_us,"samples":d.samples,
+            "mean_us":d.total_us as f64 / d.samples as f64})
+    };
+    for pair in samples.windows(2) {
+        let (a,b) = (&pair[0].timing,&pair[1].timing);
+        assert!(b.capture.delta(a.capture).is_some() && b.encode.delta(a.encode).is_some()
+            && b.send.delta(a.send).is_some() && b.queue_wait.delta(a.queue_wait).is_some()
+            && b.queue_drops >= a.queue_drops, "session timing counters regressed");
+    }
+    let (a,b) = (&first.timing,&last.timing);
+    assert_eq!(a.send.samples,a.queue_wait.samples);
+    assert_eq!(b.send.samples,b.queue_wait.samples);
+    serde_json::json!({
+        "elapsed_observation_ms":last.observed_ms-first.observed_ms,
+        "metadata_samples":samples.len(),
+        "capture":stage(a.capture,b.capture),"encode":stage(a.encode,b.encode),
+        "send":stage(a.send,b.send),"queue_wait":stage(a.queue_wait,b.queue_wait),
+        "queue_drops":b.queue_drops-a.queue_drops,
+        "encoder_first":first.encoder,"encoder_last":last.encoder,
+        "capture_backend_first":first.capture_backend,"capture_backend_last":last.capture_backend
+    })
 }
 
 fn avc_nal_types(bytes: &[u8]) -> Vec<u8> {
@@ -855,6 +902,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Peer<S> {
                             }
                             result.packets += 1;
                             result.bytes += packet.len() as u64;
+                        }
+                        protocol::MONITORS => {
+                            let metadata: serde_json::Value = serde_json::from_slice(&payload).expect("host metadata");
+                            let timing = serde_json::from_value(metadata["session_video_timing"].clone())
+                                .expect("host session video timing");
+                            result.timing_samples.push(SessionTimingObservation {
+                                observed_ms: started.elapsed().as_millis() as u64,
+                                encoder: metadata["video_encoder"].as_str().unwrap_or("unknown").to_owned(),
+                                capture_backend: metadata["capture_backend"].as_str().unwrap_or("unknown").to_owned(),
+                                timing,
+                            });
                         }
                         protocol::PONG if payload.as_slice() == &expected_ping.to_be_bytes()[..] => {
                             result.pong = true;
@@ -1129,8 +1187,20 @@ async fn windows_real_host_negotiated_avc_handoff() {
         lan.send(protocol::PING, &4u64.to_be_bytes()).await;
         let (blocked, direct) = tokio::join!(relay.sample_avc(10,3,size),lan.observe_avc(10,4,size,true,false));
         let stable_after = snapshot(&config);
+        let timing = timing_interval(&direct.timing_samples);
+        let performance = serde_json::json!({
+            "scope":"windows_runner_loopback_real_capture_session_timing",
+            "receiver_window_ms":direct.elapsed_ms,
+            "received_avc_packets":direct.packets,
+            "decoded_vcl":direct.decoded_vcl,
+            "encrypted_avc_bytes":direct.bytes,
+            "received_avc_packets_per_second":direct.packets as f64*1000.0/direct.elapsed_ms as f64,
+            "decoded_vcl_per_second":direct.decoded_vcl as f64*1000.0/direct.elapsed_ms as f64,
+            "encrypted_avc_bps":direct.bytes as f64*8000.0/direct.elapsed_ms as f64,
+            "session_timing":timing
+        });
         g5b2_evidence("lan_stable",serde_json::json!({"before":stable_before,"after":stable_after,
-            "relay":blocked,"lan":direct}));
+            "relay":blocked,"lan":direct,"performance":performance}));
         assert!(stable_after.active && stable_after.relay_socket_open && stable_after.relay_socket_opens == 1);
         assert_eq!((stable_after.relay_bytes,stable_after.relay_frames),
             (stable_before.relay_bytes,stable_before.relay_frames));

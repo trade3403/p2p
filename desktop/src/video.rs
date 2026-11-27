@@ -17,21 +17,60 @@ pub struct VideoStats {
     pub reused_frames: AtomicU64,
     pub resize_cache_hits: AtomicU64,
     pub yuv_cache_hits: AtomicU64,
-    pub capture_total_us: AtomicU64,
-    pub capture_samples: AtomicU64,
-    pub encode_total_us: AtomicU64,
-    pub encode_samples: AtomicU64,
-    pub send_total_us: AtomicU64,
-    pub send_samples: AtomicU64,
+    pub capture: Timing,
+    pub encode: Timing,
+    pub send: Timing,
+    pub queue_wait: Timing,
+    pub queue_drops: AtomicU64,
 }
-impl VideoStats {
-    pub fn average(total:&AtomicU64,count:&AtomicU64)->u64 {
-        total.load(Ordering::Relaxed).checked_div(count.load(Ordering::Relaxed)).unwrap_or(0)
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct TimingSample {
+    pub total_us: u64,
+    pub samples: u64,
+}
+impl TimingSample {
+    pub fn average(self) -> u64 {
+        self.total_us.checked_div(self.samples).unwrap_or(0)
     }
-    pub fn record(total:&AtomicU64,count:&AtomicU64,start:Instant) {
-        total.fetch_add(start.elapsed().as_micros().min(u64::MAX as u128) as u64,Ordering::Relaxed);
-        count.fetch_add(1,Ordering::Relaxed);
+    #[cfg(test)]
+    pub fn delta(self, before: Self) -> Option<Self> {
+        Some(Self { total_us: self.total_us.checked_sub(before.total_us)?,
+            samples: self.samples.checked_sub(before.samples)? })
     }
+}
+
+// A total and its denominator are read together. No lock spans capture,
+// encoding or a socket await. Different stages are independent observations.
+#[derive(Default)]
+pub struct Timing(std::sync::Mutex<TimingSample>);
+impl Timing {
+    pub fn snapshot(&self) -> TimingSample {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn record_us(&self, us: u64) {
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        s.total_us += us;
+        s.samples += 1;
+    }
+    pub fn record(&self, start: Instant) {
+        self.record_us(start.elapsed().as_micros().min(u64::MAX as u128) as u64);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn timing_samples_preserve_denominator_and_checked_interval() {
+    let timing = Timing::default();
+    timing.record_us(120);
+    let before = timing.snapshot();
+    timing.record_us(30);
+    timing.record_us(70);
+    let after = timing.snapshot();
+    let interval = after.delta(before).unwrap();
+    assert_eq!((interval.total_us, interval.samples, interval.average()), (100,2,50));
+    assert!(before.delta(after).is_none());
+    assert_eq!(TimingSample::default().average(),0);
 }
 
 // Cached scaled pixels and software color conversion are only reusable when
@@ -76,7 +115,7 @@ pub fn spawn_frames(
     stats: Arc<VideoStats>,
     encoder_reset: Arc<AtomicBool>,
     video_epoch: Arc<AtomicU64>,
-) -> mpsc::Receiver<(u64, Frame)> {
+) -> mpsc::Receiver<(u64, Instant, Frame)> {
     let (tx, rx) = mpsc::channel(2);
     thread::spawn(move || {
         let mut encoder: Option<openh264::encoder::Encoder> = None;
@@ -143,10 +182,11 @@ pub fn spawn_frames(
                           &mut hardware_failed, &actual_encoder, &mut desktop_capture, &mut pixels, &mut gpu, &mut gpu_failed, &stats) {
                 Ok(Some(frame)) => {
                     frames_since_reset += 1;
-                    match tx.try_send((frame_epoch, frame)) {
+                    match tx.try_send((frame_epoch, Instant::now(), frame)) {
                         Ok(()) => (),
                         Err(mpsc::error::TrySendError::Full(_)) => {
                             drops.fetch_add(1, Ordering::Relaxed);
+                            stats.queue_drops.fetch_add(1, Ordering::Relaxed);
                             // Never keep a GOP with missing P frames. Restart so
                             // the next video access unit contains SPS/PPS + IDR.
                             encoder = None;
@@ -195,7 +235,7 @@ pub fn spawn_frames(
     _stats: Arc<VideoStats>,
     _encoder_reset: Arc<AtomicBool>,
     _video_epoch: Arc<AtomicU64>,
-) -> mpsc::Receiver<(u64, Frame)> {
+) -> mpsc::Receiver<(u64, Instant, Frame)> {
     let (_tx, rx) = mpsc::channel(1);
     rx
 }
@@ -253,10 +293,8 @@ fn capture(
                     stats.capture_backend.store(2,Ordering::Relaxed);
                     if fresh{stats.fresh_frames.fetch_add(1,Ordering::Relaxed);}
                     else{stats.reused_frames.fetch_add(1,Ordering::Relaxed);}
-                    stats.capture_total_us.fetch_add(capture_us,Ordering::Relaxed);
-                    stats.capture_samples.fetch_add(1,Ordering::Relaxed);
-                    stats.encode_total_us.fetch_add(encode_us,Ordering::Relaxed);
-                    stats.encode_samples.fetch_add(1,Ordering::Relaxed);
+                    stats.capture.record_us(capture_us);
+                    stats.encode.record_us(encode_us);
                     actual_encoder.store(3,Ordering::Relaxed);
                     return Ok(Some((protocol::AVC,packet)));
                 }
@@ -292,7 +330,7 @@ fn capture(
     stats.capture_backend.store(backend,Ordering::Relaxed);
     if reused {stats.reused_frames.fetch_add(1,Ordering::Relaxed);}
     else {stats.fresh_frames.fetch_add(1,Ordering::Relaxed);}
-    VideoStats::record(&stats.capture_total_us,&stats.capture_samples,capture_start);
+    stats.capture.record(capture_start);
     let encode_start=Instant::now();
     if let Some(rgba)=fresh {
         let (raw_w,raw_h)=rgba.dimensions();
@@ -322,7 +360,7 @@ fn capture(
                 packet.extend_from_slice(&(h as u16).to_be_bytes());
                 packet.extend_from_slice(&bytes);
                 actual_encoder.store(2,Ordering::Relaxed);
-                VideoStats::record(&stats.encode_total_us,&stats.encode_samples,encode_start);
+                stats.encode.record(encode_start);
                 return Ok(Some((protocol::AVC,packet)));
             }
             // Fail closed to the validated software encoder with a fresh IDR.
@@ -355,13 +393,13 @@ fn capture(
         output.extend_from_slice(&bytes); // one Annex-B H264 access unit
         if output.len() > 2 * 1024 * 1024 { return Err(anyhow!("encoded AVC frame too large")); }
         actual_encoder.store(1,Ordering::Relaxed);
-        VideoStats::record(&stats.encode_total_us,&stats.encode_samples,encode_start);
+        stats.encode.record(encode_start);
         Ok(Some((protocol::AVC, output)))
     } else {
         let mut bytes = Vec::new();
         JpegEncoder::new_with_quality(&mut bytes, 58).encode_image(image)?;
         actual_encoder.store(0,Ordering::Relaxed);
-        VideoStats::record(&stats.encode_total_us,&stats.encode_samples,encode_start);
+        stats.encode.record(encode_start);
         Ok(Some((protocol::FRAME, bytes)))
     }
 }

@@ -434,7 +434,7 @@ where
                     || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
                 // When an authenticated LAN viewer is active, do not waste
                 // uplink bandwidth relaying frames to the VPS.
-                let Some((frame_epoch, (kind, bytes))) = frame else {
+                let Some((frame_epoch, queued_at, (kind, bytes))) = frame else {
                     return Err(anyhow!("screen capture worker exited unexpectedly"));
                 };
                 // Read ownership and generation together. Do not hold the gate
@@ -464,13 +464,15 @@ where
                 if !is_lan_session && !relay_avc_recovery.allow(kind, &bytes, &encoder_reset) {
                     continue;
                 }
+                let queue_wait_us = queued_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
                 let send_start=std::time::Instant::now();
                 let packet = encrypt(kind, &bytes)?;
                 let encrypted_len = packet.len();
                 tokio::time::timeout(Duration::from_secs(8), outgoing.send(Message::Binary(packet)))
                     .await.context("video send timed out")??;
                 config.transport_video.record(is_lan_session, encrypted_len);
-                crate::video::VideoStats::record(&video_stats.send_total_us,&video_stats.send_samples,send_start);
+                video_stats.send.record(send_start);
+                video_stats.queue_wait.record_us(queue_wait_us);
                 config.sent_frames.fetch_add(1, Ordering::Relaxed);
             }
             _ = metadata_tick.tick() => {
@@ -489,6 +491,10 @@ where
                     }
                     let count = screenshots::Screen::all().map(|screens| screens.len()).unwrap_or(0);
                     let selected = config.monitor_index.load(Ordering::SeqCst).min(count.saturating_sub(1));
+                    let capture_timing = video_stats.capture.snapshot();
+                    let encode_timing = video_stats.encode.snapshot();
+                    let send_timing = video_stats.send.snapshot();
+                    let queue_timing = video_stats.queue_wait.snapshot();
                     let info = serde_json::json!({
                         "count": count.min(16), "selected": selected,
                         "lan_ipv4": lan_candidates.first(),
@@ -507,14 +513,19 @@ where
                         "capture_backend": match video_stats.capture_backend.load(Ordering::Relaxed) {
                             2=>"DXGI", 1=>"screenshots compatibility", _=>"unknown"
                         },
-                        "capture_avg_us": crate::video::VideoStats::average(&video_stats.capture_total_us,&video_stats.capture_samples),
-                        "encode_avg_us": crate::video::VideoStats::average(&video_stats.encode_total_us,&video_stats.encode_samples),
-                        "send_avg_us": crate::video::VideoStats::average(&video_stats.send_total_us,&video_stats.send_samples),
+                        "capture_avg_us": capture_timing.average(),
+                        "encode_avg_us": encode_timing.average(),
+                        "send_avg_us": send_timing.average(),
+                        "session_video_timing": {
+                            "capture": capture_timing, "encode": encode_timing,
+                            "send": send_timing, "queue_wait": queue_timing,
+                            "queue_drops": video_stats.queue_drops.load(Ordering::Relaxed),
+                        },
                         "fresh_frames": video_stats.fresh_frames.load(Ordering::Relaxed),
                         "reused_frames": video_stats.reused_frames.load(Ordering::Relaxed),
                         "resize_cache_hits": video_stats.resize_cache_hits.load(Ordering::Relaxed),
                         "yuv_cache_hits": video_stats.yuv_cache_hits.load(Ordering::Relaxed),
-                        "host_encoded_frames": video_stats.encode_samples.load(Ordering::Relaxed),
+                        "host_encoded_frames": encode_timing.samples,
                         "host_lan_video_bytes": config.transport_video.lan_bytes.load(Ordering::Relaxed),
                         "host_relay_video_bytes": config.transport_video.relay_bytes.load(Ordering::Relaxed),
                         "host_relay_suppressed_frames": config.transport_video.relay_suppressed_frames.load(Ordering::Relaxed),
