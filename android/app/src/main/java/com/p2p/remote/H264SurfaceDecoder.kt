@@ -4,13 +4,10 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaCodecList
 import android.os.Build
-import java.util.concurrent.atomic.AtomicLong
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
 import android.view.Surface
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Bounded Annex-B H.264 access-unit decoder rendered to a TextureView Surface.
@@ -23,52 +20,54 @@ internal class H264SurfaceDecoder(
 ) {
     private val thread = HandlerThread("P2PRemote-H264").apply { start() }
     private val handler = Handler(thread.looper)
-    private val pending = AtomicInteger(0)
-    private val closed = AtomicBoolean(false)
-    private val generation = AtomicLong()
-    fun isCurrent(g: Long): Boolean = !closed.get() && generation.get() == g
+    private val admissions = AvcDecodeQueue()
+    fun isCurrent(g: Long): Boolean = admissions.isCurrent(g)
 
     @Volatile var codecName = ""
         private set
     @Volatile var hardware: Boolean? = null
         private set
-    private val drops=AtomicLong()
-    val droppedFrames:Long get()=drops.get()
-    private val needsIdr=AtomicBoolean(true)
+    val droppedFrames:Long get()=admissions.droppedFrames
+    // Worker-owned, never cleared by an older task on behalf of a later loss.
+    private var needsIdr = true
+    private var workerTicket: AvcDecodeQueue.Ticket? = null
     private var surface: Surface? = null
     private var codec: MediaCodec? = null
     private var width = 0
     private var height = 0
     private var lastErrorAt = 0L
 
-    fun attachSurface(newSurface: Surface?) {
-        if (closed.get()) {
+    // Serialize submission and lifecycle posting, including callers from
+    // different threads. MediaCodec operations remain on the worker.
+    @Synchronized fun attachSurface(newSurface: Surface?) {
+        if (!admissions.invalidate()) {
             newSurface?.release()
             return
         }
-        generation.incrementAndGet()
         handler.post {
             closeCodec()
+            workerTicket = null
+            lastErrorAt = 0L
             surface?.release()
             surface = newSurface
         }
     }
 
-    fun offer(packet: ByteArray) {
-        if (closed.get()) return
-        val g = generation.get()
+    @Synchronized fun offer(packet: ByteArray) {
         val header = AvcPayload.parse(packet) ?: return
-        val w = header.width
-        val h = header.height
-        if (pending.incrementAndGet() > 2) {
-            pending.decrementAndGet()
-            drops.incrementAndGet()
-            needsIdr.set(true)
-            return
-        }
+        val ticket = admissions.admit() ?: return
+        val g = ticket.generation
         val accepted = handler.post {
             try {
-                if (isCurrent(g)) decode(w, h, packet, g)
+                if (isCurrent(g)) {
+                    // The first admitted unit after a producer-side loss
+                    // must not inherit a decoder with missing references.
+                    if (workerTicket != ticket) {
+                        closeCodec()
+                        workerTicket = ticket
+                    }
+                    decode(header.width, header.height, packet, g)
+                }
             } catch (error: Exception) {
                 closeCodec()
                 val now = SystemClock.elapsedRealtime()
@@ -77,10 +76,10 @@ internal class H264SurfaceDecoder(
                     onDecoderError(g, "H.264 解码失败：${error.javaClass.simpleName}")
                 }
             } finally {
-                pending.decrementAndGet()
+                admissions.complete(ticket)
             }
         }
-        if (!accepted) pending.decrementAndGet()
+        if (!accepted) admissions.complete(ticket)
     }
 
     private fun decode(w: Int, h: Int, packet: ByteArray, g: Long) {
@@ -88,7 +87,7 @@ internal class H264SurfaceDecoder(
         if (!target.isValid) return
         // Never decode a dependent P frame after a dropped access unit.
         val idr=containsIdr(packet)
-        if (needsIdr.get() || codec == null || width != w || height != h) {
+        if (needsIdr || codec == null || width != w || height != h) {
             if(!idr) return
             closeCodec()
             val format=MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC,w,h)
@@ -120,7 +119,7 @@ internal class H264SurfaceDecoder(
                     }
                     width=w
                     height=h
-                    needsIdr.set(false)
+                    needsIdr = false
                     break
                 } catch (_:Exception) { try { candidate?.release() } catch (_:Exception) {} }
             }
@@ -130,15 +129,15 @@ internal class H264SurfaceDecoder(
         val accessUnitSize = packet.size - 4
         val inputId = decoder.dequeueInputBuffer(5000L)
         if (inputId < 0) {
-            drops.incrementAndGet()
-            needsIdr.set(true)
+            admissions.recordWorkerDrop(g)
+            needsIdr = true
             return
         }
         val input = decoder.getInputBuffer(inputId)
         if (input == null || input.capacity() < accessUnitSize) {
             decoder.queueInputBuffer(inputId, 0, 0, 0, 0)
-            drops.incrementAndGet()
-            needsIdr.set(true)
+            admissions.recordWorkerDrop(g)
+            needsIdr = true
             return
         }
         input.clear()
@@ -152,9 +151,13 @@ internal class H264SurfaceDecoder(
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                 else -> {
                     if (outputId >= 0) {
-                        val render = info.size > 0 && isCurrent(g)
-                        decoder.releaseOutputBuffer(outputId, render)
-                        if (render && isCurrent(g)) onRendered(g)
+                        // A reset cannot occur between the generation check
+                        // and submission of this output buffer to the Surface.
+                        val rendered = info.size > 0 && admissions.ifCurrent(g) {
+                            decoder.releaseOutputBuffer(outputId, true)
+                        }
+                        if (!rendered) decoder.releaseOutputBuffer(outputId, false)
+                        if (rendered && isCurrent(g)) onRendered(g)
                     }
                 }
             }
@@ -170,7 +173,7 @@ internal class H264SurfaceDecoder(
     }
 
     private fun closeCodec() {
-        needsIdr.set(true)
+        needsIdr = true
         codecName=""
         hardware=null
         val decoder = codec ?: return
@@ -181,21 +184,21 @@ internal class H264SurfaceDecoder(
         try { decoder.release() } catch (_: Exception) {}
     }
 
-    fun reset() {
-        if (!closed.get()) {
-            generation.incrementAndGet()
+    @Synchronized fun reset() {
+        if (admissions.invalidate()) {
             handler.post {
                 closeCodec()
+                workerTicket = null
                 lastErrorAt = 0L
             }
         }
     }
 
-    fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        generation.incrementAndGet()
+    @Synchronized fun close() {
+        if (!admissions.close()) return
         handler.post {
             closeCodec()
+            workerTicket = null
             surface?.release()
             surface = null
             thread.quitSafely()
