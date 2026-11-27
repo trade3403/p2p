@@ -15,14 +15,23 @@ internal class AvcDecodeQueue(private val capacity: Int = 2) {
     private var pending = 0
     private var closed = false
     private var drops = 0L
+    private var format: Pair<Int, Int>? = null
 
     @get:Synchronized
     val droppedFrames: Long get() = drops
 
     @Synchronized fun isCurrent(g: Long): Boolean = !closed && generation == g
 
-    @Synchronized fun admit(): Ticket? {
+    @Synchronized fun admit(width: Int = 0, height: Int = 0): Ticket? {
         if (closed) return null
+        val nextFormat = width to height
+        if (format != nextFormat) {
+            // A new size retires old output callbacks and queued units even
+            // if the old format filled the queue. First format after reset
+            // already belongs to a fresh generation.
+            if (format != null) invalidate()
+            format = nextFormat
+        }
         if (pending >= capacity) {
             drops++
             lossSerial++
@@ -50,6 +59,7 @@ internal class AvcDecodeQueue(private val capacity: Int = 2) {
         generation++
         pending = 0
         lossSerial = 0L
+        format = null
         return true
     }
 

@@ -55,7 +55,7 @@ internal class H264SurfaceDecoder(
 
     @Synchronized fun offer(packet: ByteArray) {
         val header = AvcPayload.parse(packet) ?: return
-        val ticket = admissions.admit() ?: return
+        val ticket = admissions.admit(header.width, header.height) ?: return
         val g = ticket.generation
         val accepted = handler.post {
             try {
@@ -64,9 +64,10 @@ internal class H264SurfaceDecoder(
                     // must not inherit a decoder with missing references.
                     if (workerTicket != ticket) {
                         closeCodec()
+                        if (workerTicket?.generation != g) lastErrorAt = 0L
                         workerTicket = ticket
                     }
-                    decode(header.width, header.height, packet, g)
+                    decode(header, g)
                 }
             } catch (error: Exception) {
                 closeCodec()
@@ -82,13 +83,16 @@ internal class H264SurfaceDecoder(
         if (!accepted) admissions.complete(ticket)
     }
 
-    private fun decode(w: Int, h: Int, packet: ByteArray, g: Long) {
+    private fun decode(unit: AvcPayload, g: Long) {
         val target = surface ?: return
         if (!target.isValid) return
-        // Never decode a dependent P frame after a dropped access unit.
-        val idr=containsIdr(packet)
+        val w = unit.width
+        val h = unit.height
+        val packet = unit.bytes
+        // Only scan for a random-access unit when recovery is necessary.
+        // A fresh decoder cannot use parameter sets from the retired codec.
         if (needsIdr || codec == null || width != w || height != h) {
-            if(!idr) return
+            if (!unit.hasSelfContainedIdr()) return
             closeCodec()
             val format=MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC,w,h)
             if(Build.VERSION.SDK_INT>=30) format.setInteger(MediaFormat.KEY_LOW_LATENCY,1)
@@ -162,14 +166,6 @@ internal class H264SurfaceDecoder(
                 }
             }
         }
-    }
-
-    private fun containsIdr(packet:ByteArray):Boolean {
-        for(i in 4 until packet.size-3) {
-            if(packet[i]==0.toByte() && packet[i+1]==0.toByte() && packet[i+2]==1.toByte()
-                && (packet[i+3].toInt() and 31)==5) return true
-        }
-        return false
     }
 
     private fun closeCodec() {

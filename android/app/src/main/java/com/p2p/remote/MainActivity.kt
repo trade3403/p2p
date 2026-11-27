@@ -907,6 +907,9 @@ class MainActivity : ComponentActivity() {
                                             udpLastFrameAtMs = 0L
                                             transport = "VPS WSS 中转"
                                         }
+                                        if (!h264Active || h264Width != accessUnit.width || h264Height != accessUnit.height) {
+                                            receivingFrames = false
+                                        }
                                         h264Width=accessUnit.width
                                         h264Height=accessUnit.height
                                         h264Active=true

@@ -63,4 +63,29 @@ class AvcDecodeQueueTest {
         assertEquals(2, renders)
         assertEquals(1L, queue.droppedFrames)
     }
+
+    @Test fun resolutionChangeRetiresOldQueueAndRenderEvenAtCapacity() {
+        val queue = AvcDecodeQueue()
+        val oldA = queue.admit(960,720)!!
+        val oldB = queue.admit(960,720)!!
+        val newA = queue.admit(1280,720)!!
+        assertNotEquals(oldA.generation, newA.generation)
+        assertFalse(queue.ifCurrent(oldA.generation) { fail("old resolution rendered") })
+        assertEquals(0L, queue.droppedFrames)
+        queue.complete(oldA)
+        queue.complete(oldB)
+        val newB = queue.admit(1280,720)!!
+        assertEquals(newA, newB)
+        assertNull(queue.admit(1280,720))
+        // Switching back is another generation, not a revival of old tasks.
+        val back = queue.admit(960,720)!!
+        assertNotEquals(oldA.generation, back.generation)
+        assertNotEquals(newA.generation, back.generation)
+        assertEquals(0L, back.lossSerial)
+        queue.complete(newA)
+        queue.complete(newB)
+        assertTrue(queue.ifCurrent(back.generation) {})
+        queue.complete(back)
+        assertEquals(1L, queue.droppedFrames)
+    }
 }

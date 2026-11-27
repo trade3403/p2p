@@ -697,8 +697,10 @@ internal class AndroidRemoteEngine(
                                             udpLastFrameAtMs = 0L
                                             transport = "VPS WSS 中转"
                                         }
-                                        if (!h264Active) receivingFrames=false
                                         if (!h264Active || h264Width!=accessUnit.width || h264Height!=accessUnit.height) {
+                                            // A new format is not connected until the current
+                                            // decoder generation actually submits output.
+                                            receivingFrames=false
                                             h264Width=accessUnit.width
                                             h264Height=accessUnit.height
                                             onVideoSize(h264Width,h264Height)
