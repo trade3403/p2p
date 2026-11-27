@@ -400,7 +400,7 @@ def read_avc_metrics(strict=True):
                 # Keep the field present; strict live AVC validation below
                 # still rejects blank/unknown encoder and decoder names.
                 items=dict(re.findall(r"(?m)^([a-z_]+)=([^\r\n]*)",field))
-                if all(k in items for k in ("codec","frames","fps","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","encoder","decoder","decoder_mode",
+                if all(k in items for k in ("codec","frames","fps","bps","rtt","relay_socket_opens","relay_retry_events","target_bps","target_fps","drops","encoder","decoder","decoder_mode","decoder_recovering",
                         "capture_backend","capture_avg_us","encode_avg_us","send_avg_us","fresh_frames","reused_frames","resize_cache_hits","yuv_cache_hits","host_encoded_frames",
                         "transport","viewer_lan_video_bytes","viewer_relay_video_bytes","host_lan_video_bytes","host_relay_video_bytes","host_relay_suppressed_frames",
                         "transport_phase","host_metadata_current","lan_attempt_ms","lan_fallback_reason","lan_fallback_started",
@@ -421,6 +421,12 @@ def read_avc_metrics(strict=True):
                 "lan_attempt_ms","lan_fallback_relay_open_ms","lan_fallback_first_video_ms","host_lan_video_frames","host_relay_video_frames","host_relay_socket_opens"):
         data[key]=int(data[key])
     data["fps"]=float(data["fps"])
+    # Persist only these fixed diagnostic fields before assertions, including
+    # a failing sample. No credential, clipboard or arbitrary UI text.
+    REPORT["last_video_diagnostic"]={key:data[key] for key in (
+        "codec","frames","fps","bps","rtt","drops","encoder","decoder","decoder_mode",
+        "decoder_recovering","capture_backend","host_metadata_current","transport_phase",
+        "relay_socket_opens","relay_retry_events","host_encoded_frames")}
     if not strict:
         return data
     require(data["codec"]=="H264" and data["frames"]>0,"Actual MediaCodec AVC playback not verified")
@@ -433,6 +439,7 @@ def read_avc_metrics(strict=True):
                 "Invalid measured LAN recovery ordering")
     require(data["encoder"] in ("OpenH264 software","Media Foundation hardware","Media Foundation D3D11 texture") and data["decoder"] not in ("","unknown"),"Actual encoder and decoder not reported")
     require(data["decoder_mode"] in ("hardware","software","unknown"),"Invalid decoder classification")
+    require(data["decoder_recovering"] in ("true","false"),"Missing AVC decoder recovery state")
     require(data["capture_backend"] in ("DXGI","screenshots compatibility"),"Actual host capture backend not reported")
     require(data["capture_avg_us"]>0 and data["encode_avg_us"]>0 and data["send_avg_us"]>0
             and data["fresh_frames"]>0 and data["host_encoded_frames"]>0,"No real host stage measurements")

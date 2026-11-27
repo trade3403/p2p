@@ -208,7 +208,9 @@ internal class AndroidRemoteEngine(
         }
     }
 
-    private fun snapshotMap(): Map<String, Any?> = mapOf(
+    private fun snapshotMap(): Map<String, Any?> {
+        val decoderOutput = if (h264Active) avcDecoder.outputState() else null
+        return mapOf(
         "host_running" to false,
         "viewer_connected" to (online && receivingFrames),
         "viewer_requested" to requested,
@@ -271,8 +273,11 @@ internal class AndroidRemoteEngine(
         "host_metadata_current" to hostMetadataCurrent,
         "avc_rendered_frames" to renderedAvcFrames,
         "avc_received_bytes" to receivedAvcBytes,
-        "avc_decoder" to if(h264Active) avcDecoder.codecName else "",
-        "avc_decoder_hardware" to if(h264Active) avcDecoder.hardware else null,
+        // Identity is the last actual output in the current generation.
+        // A same-format decoder rebuild is separately visible as recovering.
+        "avc_decoder" to (decoderOutput?.lastOutput?.name ?: ""),
+        "avc_decoder_hardware" to decoderOutput?.lastOutput?.hardware,
+        "avc_decoder_recovering" to decoderOutput?.recovering,
         "avc_decoder_drops" to if(hasVideoSurface) avcDecoder.droppedFrames else 0L,
         "rendered_fps" to renderedFps,
         "measured_video_bps" to measuredBps,
@@ -297,7 +302,8 @@ internal class AndroidRemoteEngine(
         "host_relay_socket_opens" to hostRelaySocketOpens,
         "pairing_status" to if (pairingActive) status else "",
         "vault_error" to null,
-    )
+        )
+    }
 
     fun invoke(method: String, arguments: Map<String, Any?>): Map<String, Any?> {
         var ok = true

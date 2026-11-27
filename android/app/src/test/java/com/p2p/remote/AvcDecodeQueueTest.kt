@@ -88,4 +88,48 @@ class AvcDecodeQueueTest {
         queue.complete(back)
         assertEquals(1L, queue.droppedFrames)
     }
+
+    @Test fun outputIdentitySurvivesSameGenerationRecoveryButNotReset() {
+        val queue = AvcDecodeQueue()
+        val a = queue.admit(960,720)!!
+        val software = AvcDecodeQueue.DecoderIdentity("software", false)
+        val hardware = AvcDecodeQueue.DecoderIdentity("hardware", true)
+        assertNull(queue.outputState().lastOutput)
+        assertTrue(queue.outputState().recovering)
+        assertTrue(queue.submitOutput(a.generation, software) {})
+        assertEquals(AvcDecodeQueue.OutputState(software, false),queue.outputState())
+        queue.recordWorkerDrop(a.generation)
+        assertEquals(AvcDecodeQueue.OutputState(software, true),queue.outputState())
+        queue.beginRecovery(a.generation)
+        assertEquals(AvcDecodeQueue.OutputState(software, true),queue.outputState())
+        // No candidate identity until it has actually submitted an output.
+        assertTrue(queue.submitOutput(a.generation, hardware) {})
+        assertEquals(AvcDecodeQueue.OutputState(hardware, false),queue.outputState())
+        val b = queue.admit(1280,720)!!
+        assertNull(queue.outputState().lastOutput)
+        assertTrue(queue.outputState().recovering)
+        assertFalse(queue.submitOutput(a.generation, software) { fail("stale output") })
+        queue.beginRecovery(a.generation)
+        assertTrue(queue.submitOutput(b.generation, software) {})
+        assertEquals(AvcDecodeQueue.OutputState(software, false),queue.outputState())
+        queue.invalidate()
+        assertNull(queue.outputState().lastOutput)
+        assertTrue(queue.outputState().recovering)
+        assertFalse(queue.submitOutput(b.generation, hardware) { fail("retired output") })
+        assertTrue(queue.close())
+        assertNull(queue.outputState().lastOutput)
+    }
+
+    @Test fun failedSurfaceSubmissionDoesNotPublishCandidateIdentity() {
+        val queue = AvcDecodeQueue()
+        val a = queue.admit()!!
+        val identity = AvcDecodeQueue.DecoderIdentity("candidate", null)
+        try {
+            queue.submitOutput(a.generation, identity) { throw IllegalStateException("test") }
+            fail("expected failed submission")
+        } catch (_: IllegalStateException) {
+            assertNull(queue.outputState().lastOutput)
+            assertTrue(queue.outputState().recovering)
+        }
+    }
 }

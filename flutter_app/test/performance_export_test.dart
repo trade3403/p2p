@@ -11,6 +11,7 @@ void main() {
       'rtt_ms': -1,
       'measured_video_bps': double.nan,
       'host_metadata_current': false,
+      'avc_decoder_recovering': true,
       'active_video_codec': 'H264',
       'viewer_transport_phase': 'lan_video',
     }, capturedAt: DateTime.utc(2026, 1, 1))) as Map;
@@ -23,6 +24,7 @@ void main() {
     expect(metrics['measured_video_bps'], isNull);
     expect(metrics['host_relay_video_bytes'], isNull);
     expect(metrics['host_metadata_current'], false);
+    expect(metrics['avc_decoder_recovering'], true);
     expect(metrics['active_video_codec'], 'H264');
     expect(metrics['viewer_transport_phase'], 'lan_video');
   });

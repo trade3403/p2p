@@ -23,10 +23,10 @@ internal class H264SurfaceDecoder(
     private val admissions = AvcDecodeQueue()
     fun isCurrent(g: Long): Boolean = admissions.isCurrent(g)
 
-    @Volatile var codecName = ""
-        private set
-    @Volatile var hardware: Boolean? = null
-        private set
+    // Worker-local candidate identity; never read these separately from UI.
+    private var codecName = ""
+    private var hardware: Boolean? = null
+    fun outputState(): AvcDecodeQueue.OutputState = admissions.outputState()
     val droppedFrames:Long get()=admissions.droppedFrames
     // Worker-owned, never cleared by an older task on behalf of a later loss.
     private var needsIdr = true
@@ -63,6 +63,7 @@ internal class H264SurfaceDecoder(
                     // The first admitted unit after a producer-side loss
                     // must not inherit a decoder with missing references.
                     if (workerTicket != ticket) {
+                        admissions.beginRecovery(g)
                         closeCodec()
                         if (workerTicket?.generation != g) lastErrorAt = 0L
                         workerTicket = ticket
@@ -70,6 +71,7 @@ internal class H264SurfaceDecoder(
                     decode(header, g)
                 }
             } catch (error: Exception) {
+                admissions.beginRecovery(g)
                 closeCodec()
                 val now = SystemClock.elapsedRealtime()
                 if (isCurrent(g) && now - lastErrorAt > 5000) {
@@ -157,7 +159,8 @@ internal class H264SurfaceDecoder(
                     if (outputId >= 0) {
                         // A reset cannot occur between the generation check
                         // and submission of this output buffer to the Surface.
-                        val rendered = info.size > 0 && admissions.ifCurrent(g) {
+                        val rendered = info.size > 0 && admissions.submitOutput(
+                            g, AvcDecodeQueue.DecoderIdentity(codecName, hardware)) {
                             decoder.releaseOutputBuffer(outputId, true)
                         }
                         if (!rendered) decoder.releaseOutputBuffer(outputId, false)

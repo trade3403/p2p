@@ -538,6 +538,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
         'encoder=${s['video_encoder'] ?? 'unknown'}\n'
         'decoder=${s['avc_decoder'] ?? 'unknown'}\n'
         'decoder_mode=$hardware\n'
+        'decoder_recovering=${s['avc_decoder_recovering'] ?? 'unknown'}\n'
         'capture_backend=${s['capture_backend'] ?? 'unknown'}\n'
         'capture_avg_us=${s['capture_avg_us'] ?? 0}\n'
         'encode_avg_us=${s['encode_avg_us'] ?? 0}\n'

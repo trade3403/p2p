@@ -22,6 +22,7 @@ String exportPerformanceSnapshot(Map<String, dynamic> snapshot,
   const flags = [
     'viewer_connected', 'host_metadata_current', 'network_observer_ready',
     'lan_fallback_started', 'host_relay_socket_open', 'avc_decoder_hardware',
+    'avc_decoder_recovering',
   ];
   const enums = <String, List<String>>{
     'active_video_codec': ['none', 'JPEG', 'H264'],

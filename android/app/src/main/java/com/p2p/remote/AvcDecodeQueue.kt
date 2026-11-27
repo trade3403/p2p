@@ -9,6 +9,8 @@ internal class AvcDecodeQueue(private val capacity: Int = 2) {
     init { require(capacity > 0) }
 
     data class Ticket(val generation: Long, val lossSerial: Long)
+    data class DecoderIdentity(val name: String, val hardware: Boolean?)
+    data class OutputState(val lastOutput: DecoderIdentity? = null, val recovering: Boolean = true)
 
     private var generation = 0L
     private var lossSerial = 0L
@@ -16,6 +18,23 @@ internal class AvcDecodeQueue(private val capacity: Int = 2) {
     private var closed = false
     private var drops = 0L
     private var format: Pair<Int, Int>? = null
+    private var output = OutputState()
+
+    @Synchronized fun outputState(): OutputState = output
+
+    @Synchronized fun beginRecovery(g: Long) {
+        if (isCurrent(g)) output = output.copy(recovering = true)
+    }
+
+    // Identity describes the decoder that actually submitted the most recent
+    // output, not a candidate that has merely been configured. Keep identity
+    // and classification together, and retire both on generation changes.
+    @Synchronized fun submitOutput(g: Long, identity: DecoderIdentity, action: () -> Unit): Boolean {
+        if (!isCurrent(g)) return false
+        action()
+        output = OutputState(identity, false)
+        return true
+    }
 
     @get:Synchronized
     val droppedFrames: Long get() = drops
@@ -51,7 +70,10 @@ internal class AvcDecodeQueue(private val capacity: Int = 2) {
     // Called for a MediaCodec input failure on the ordered worker. That
     // worker also immediately requires a new keyframe.
     @Synchronized fun recordWorkerDrop(g: Long) {
-        if (isCurrent(g)) drops++
+        if (isCurrent(g)) {
+            drops++
+            output = output.copy(recovering = true)
+        }
     }
 
     @Synchronized fun invalidate(): Boolean {
@@ -60,6 +82,7 @@ internal class AvcDecodeQueue(private val capacity: Int = 2) {
         pending = 0
         lossSerial = 0L
         format = null
+        output = OutputState()
         return true
     }
 
