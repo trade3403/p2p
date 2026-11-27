@@ -5,6 +5,10 @@ on:
     branches: ['feature/v0.21-h264-performance']
     paths:
       - '.github/workflows/v21-public-e2e.yml'
+      - '.github/workflows/v21-build.yml'
+      - 'qa/release-ui/**'
+      - 'scripts/**'
+      - 'installer/**'
       - 'qa/public-relay/**'
       - 'android/**'
       - 'desktop/**'

@@ -9,6 +9,8 @@ on:
       - 'installer/**'
       - 'scripts/**'
       - 'qa/release-ui/**'
+      - 'qa/public-relay/**'
+      - '.github/workflows/v21-public-e2e.yml'
       - 'flutter_app/**'
       - '.github/workflows/v21-build.yml'
   workflow_dispatch:
