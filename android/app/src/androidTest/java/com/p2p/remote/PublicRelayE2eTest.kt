@@ -978,10 +978,31 @@ class PublicRelayE2eTest {
                     fun matchesSize(v:Map<*,*>) =
                         (v["frame_width"] as Number).toInt()==width &&
                         (v["frame_height"] as Number).toInt()==height
+                    // The public snapshot defines h264_active as
+                    // h264Active && receivingFrames, not codec negotiation.
+                    // Waiting for IDR must therefore report false and
+                    // active_video_codec=none while the LAN remains verified.
+                    val barrierSamples=org.json.JSONArray()
+                    metrics.put("lan_avc_resolution_${width}_barrier_samples",barrierSamples)
+                    var lastBarrierSample=0L
                     await("new resolution waiting for IDR",8_000) {
                         val v=snap()
-                        matchesSize(v) && v["h264_active"]==true &&
+                        val now=SystemClock.elapsedRealtime()
+                        if(now-lastBarrierSample>=250) {
+                            barrierSamples.put(JSONObject()
+                                .put("width",v["frame_width"]).put("height",v["frame_height"])
+                                .put("connected",v["viewer_connected"]).put("h264_active",v["h264_active"])
+                                .put("codec",v["active_video_codec"]).put("phase",v["viewer_transport_phase"])
+                                .put("rendered",v["avc_rendered_frames"])
+                                .put("received_avc_bytes",v["avc_received_bytes"])
+                                .put("fixture_sent",lan.sentVideoPackets)
+                                .put("fixture_switches",lan.appliedVideoSwitches))
+                            lastBarrierSample=now
+                        }
+                        matchesSize(v) && v["h264_active"]==false &&
+                            v["active_video_codec"]=="none" &&
                             v["viewer_connected"]==false &&
+                            v["viewer_transport_phase"]=="lan_verified" &&
                             lan.appliedVideoSwitches==applied+1
                     }
                     val blocked=snap()
@@ -995,6 +1016,12 @@ class PublicRelayE2eTest {
                     val stillBlocked=snap()
                     assertTrue(matchesSize(stillBlocked))
                     assertEquals(false,stillBlocked["viewer_connected"])
+                    assertEquals(false,stillBlocked["h264_active"])
+                    assertEquals("none",stillBlocked["active_video_codec"])
+                    assertEquals("lan_verified",stillBlocked["viewer_transport_phase"])
+                    val blockedBytes=(stillBlocked["avc_received_bytes"] as Number).toLong()-
+                        (blocked["avc_received_bytes"] as Number).toLong()
+                    assertTrue("No received AVC during predictive-only window",blockedBytes>0)
                     val blockedDelta=(stillBlocked["avc_rendered_frames"] as Number).toLong()-blockedRendered
                     assertEquals(0L,blockedDelta)
                     val blockedPackets=lan.sentVideoPackets-blockedSent
@@ -1009,6 +1036,8 @@ class PublicRelayE2eTest {
                     await("actual new-format MediaCodec output",15_000) {
                         val v=snap()
                         matchesSize(v) && v["viewer_connected"]==true &&
+                            v["h264_active"]==true && v["active_video_codec"]=="H264" &&
+                            v["viewer_transport_phase"]=="lan_video" &&
                             v["transport"]=="局域网 P2P 直连" &&
                             (v["avc_rendered_frames"] as Number).toLong()>=blockedRendered+3 &&
                             consumer.frames>resumeSurface &&
@@ -1027,6 +1056,12 @@ class PublicRelayE2eTest {
                         .put("predictive_only_packets",blockedPackets)
                         .put("predictive_only_render_delta",blockedDelta)
                         .put("predictive_only_connected",stillBlocked["viewer_connected"])
+                        .put("predictive_only_h264_active",stillBlocked["h264_active"])
+                        .put("predictive_only_codec",stillBlocked["active_video_codec"])
+                        .put("predictive_only_phase",stillBlocked["viewer_transport_phase"])
+                        .put("predictive_only_received_avc_bytes",blockedBytes)
+                        .put("recovered_codec",recoveredFormat["active_video_codec"])
+                        .put("recovered_phase",recoveredFormat["viewer_transport_phase"])
                         .put("render_delta",(recoveredFormat["avc_rendered_frames"] as Number).toLong()-blockedRendered)
                         .put("surface_delta",consumer.frames-resumeSurface)
                         .put("recovery_ms",SystemClock.elapsedRealtime()-resumeAt)

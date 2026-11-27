@@ -394,6 +394,11 @@ def android():
     if native.get("failed_stage"):
         REPORT["native_failed_stage"]=native["failed_stage"]
     instrumentation=(OUT/"instrumentation.txt").read_text(errors="replace")
+    # Fixed stage identifiers only; do not emit exception contents, secrets,
+    # raw networking details or whole reports into the CI log.
+    if native.get("passed") is not True:
+        failed=native.get("failed_stage","unknown")
+        print("Native failed stage:",failed if isinstance(failed,str) and re.fullmatch(r"[a-zA-Z0-9_]{1,100}",failed) else "unknown",flush=True)
     require(process.returncode==0 and native.get("passed") is True
             and "OK (1 test)" in instrumentation and "INSTRUMENTATION_CODE: -1" in instrumentation,
             "Android native E2E assertions failed; inspect instrumentation.txt")
@@ -416,6 +421,11 @@ def android():
     for switch in switches:
         require(switch.get("predictive_only_packets",0)>=5 and switch.get("predictive_only_render_delta")==0
                 and switch.get("predictive_only_connected") is False
+                and switch.get("predictive_only_h264_active") is False
+                and switch.get("predictive_only_codec")=="none"
+                and switch.get("predictive_only_phase")=="lan_verified"
+                and switch.get("predictive_only_received_avc_bytes",0)>0
+                and switch.get("recovered_codec")=="H264" and switch.get("recovered_phase")=="lan_video"
                 and switch.get("render_delta",0)>=3 and switch.get("surface_delta",0)>0
                 and switch.get("recovery_ms",-1)>=0 and switch.get("same_socket") is True
                 and switch.get("relay_socket_opens")==0 and switch.get("relay_video_bytes")==0
