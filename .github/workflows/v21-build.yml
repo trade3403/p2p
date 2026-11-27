@@ -91,6 +91,16 @@ jobs:
           $last = Get-Content $env:P2P_G2_INPUT_REPORT -Tail 1 | ConvertFrom-Json
           if ($last.stage -ne 'passed') { throw 'G2c input evidence incomplete' }
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate measured Windows Host transport evidence
+        run: |
+          python -m unittest discover -s qa/release-ui -p test_summarize_evidence.py
+          if ($LASTEXITCODE -ne 0) { throw 'Evidence validator unit tests failed' }
+          python qa/release-ui/summarize_evidence.py g1 evidence/windows/g1-lan-video.jsonl evidence/windows/g1-performance-summary.json
+          if ($LASTEXITCODE -ne 0) { throw 'Measured G1 evidence validation failed' }
+
       - name: Build Rust native shared library
         run: |
           cargo build --manifest-path desktop/Cargo.toml --lib --no-default-features --release
@@ -482,6 +492,8 @@ jobs:
           RELAY_ACCESS_TOKEN: ${{ secrets.RELAY_ACCESS_TOKEN }}
           P2P_STABILITY_SECONDS: ${{ ((github.event_name == 'workflow_dispatch' && inputs.stability_minutes == '30') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[soak-30]'))) && '1800' || '300' }}
         run: python qa/release-ui/run.py windows
+      - name: Validate actual Windows release UI report
+        run: python qa/release-ui/summarize_evidence.py windows evidence/release-ui-windows/report.json evidence/release-ui-windows/performance-summary.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -528,6 +540,8 @@ jobs:
           emulator-boot-timeout: 600
           disable-animations: true
           script: python qa/release-ui/run.py android
+      - name: Validate actual Android release UI report
+        run: python qa/release-ui/summarize_evidence.py android evidence/release-ui-android/report.json evidence/release-ui-android/performance-summary.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
