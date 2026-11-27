@@ -79,6 +79,126 @@ def summarize_g1(rows):
             "phases": output, "clipboard_ownership": {"lan_applied": True, "relay_blocked": True}}
 
 
+
+def summarize_g5b2(rows):
+    """Recompute stable LAN measurements from the authenticated observer's raw
+    counters. Metadata observation times and receiver windows are distinct."""
+    stages = ["start", "relay_baseline", "lan_startup", "lan_stable", "relay_resumed", "passed"]
+    require([row.get("stage") for row in rows] == stages, "unexpected AVC handoff stage sequence")
+    require(all(row.get("scope") == "windows_runner_loopback_ws_avc_handoff" for row in rows),
+            "invalid AVC handoff scope")
+    data = {row["stage"]: row["data"] for row in rows}
+    phase = data["lan_stable"]
+    before, after = phase["before"], phase["after"]
+    for snap in (before, after):
+        require(snap.get("active") is True and snap.get("relay_socket_open") is True
+                and counter(snap, "relay_socket_opens") == 1, "invalid stable LAN ownership")
+    counts = {key: delta(before, after, key) for key in (
+        "lan_bytes", "lan_frames", "relay_bytes", "relay_frames", "suppressed")}
+    require(counts["relay_bytes"] == counts["relay_frames"] == 0
+            and counts["suppressed"] > 0, "relay suppression evidence missing")
+    lan, relay = phase["lan"], phase["relay"]
+    require(all(counter(relay, key) == 0 for key in ("bytes", "packets", "jpeg_packets"))
+            and relay.get("pong") is False, "relay transmitted during LAN ownership")
+    packets, received_bytes, decoded = (counter(lan, k) for k in ("packets", "bytes", "decoded_vcl"))
+    window = counter(lan, "elapsed_ms")
+    require(window > 0 and packets >= 2 and received_bytes > 0
+            and 2 <= decoded <= counter(lan, "vcl_packets") <= packets
+            and 0 < counter(lan, "decoded_predictive") <= decoded
+            and counter(lan, "decoded_idr") == 1 and counter(lan, "jpeg_packets") == 0
+            and lan.get("pong") is True and counter(lan, "ws_pings") > 0,
+            "invalid actual AVC receive evidence")
+    # Host and receiver windows have independently sampled boundaries.
+    # Preserve differences explicitly rather than pretending atomic equality.
+    require(counts["lan_frames"] >= 2 and counts["lan_bytes"] > 0, "no Host LAN progress")
+    dimensions = lan["dimensions"]
+    require(isinstance(dimensions, list) and len(dimensions) == 2
+            and all(integer(v, "dimension") > 0 and v % 2 == 0 for v in dimensions),
+            "invalid AVC dimensions")
+    samples = lan["timing_samples"]
+    require(isinstance(samples, list) and len(samples) >= 2, "missing timing metadata")
+    keys = ("capture", "encode", "send", "queue_wait")
+    backends = ("DXGI", "screenshots compatibility")
+    encoders = ("OpenH264 software", "Media Foundation hardware", "Media Foundation D3D11 texture")
+    previous = None
+    for sample in samples:
+        observed = counter(sample, "observed_ms")
+        require(observed <= window and sample.get("encoder") in encoders
+                and sample.get("capture_backend") in backends, "invalid metadata observation")
+        timing = sample["timing"]
+        counter(timing, "queue_drops")
+        for key in keys:
+            counter(timing[key], "total_us")
+            counter(timing[key], "samples")
+        require(timing["send"]["samples"] == timing["queue_wait"]["samples"],
+                "send and queue denominator mismatch")
+        if previous is not None:
+            require(observed > previous["observed_ms"], "metadata time not increasing")
+            delta(previous["timing"], timing, "queue_drops")
+            for key in keys:
+                for field in ("total_us", "samples"):
+                    delta(previous["timing"][key], timing[key], field)
+        previous = sample
+    first, last = samples[0], samples[-1]
+    result = {}
+    for key in keys:
+        total = delta(first["timing"][key], last["timing"][key], "total_us")
+        count = delta(first["timing"][key], last["timing"][key], "samples")
+        require(count > 0, "no stage samples: " + key)
+        result[key] = {"total_us": total, "samples": count, "mean_us": total / count}
+    result.update(metadata_samples=len(samples),
+                  elapsed_observation_ms=last["observed_ms"]-first["observed_ms"],
+                  queue_drops=delta(first["timing"], last["timing"], "queue_drops"),
+                  encoder_first=first["encoder"], encoder_last=last["encoder"],
+                  capture_backend_first=first["capture_backend"], capture_backend_last=last["capture_backend"])
+    rates = dict(receiver_window_ms=window, received_avc_packets=packets, decoded_vcl=decoded,
+                 encrypted_avc_bytes=received_bytes, received_avc_packets_per_second=packets*1000/window,
+                 decoded_vcl_per_second=decoded*1000/window, encrypted_avc_bps=received_bytes*8000/window)
+    def verify_number(actual, expected, label):
+        if type(expected) is int:
+            require(integer(actual, label) == expected, "inconsistent count: " + label)
+        else:
+            require(math.isclose(number(actual, label), expected, rel_tol=1e-9, abs_tol=1e-9),
+                    "inconsistent rate: " + label)
+    reported = phase["performance"]
+    require(reported.get("scope") == "windows_runner_loopback_real_capture_session_timing",
+            "invalid performance scope")
+    for key, value in rates.items():
+        verify_number(reported.get(key), value, key)
+    reported_timing = reported["session_timing"]
+    for key, value in result.items():
+        if isinstance(value, dict):
+            for field, expected in value.items():
+                verify_number(reported_timing[key].get(field), expected, key + "." + field)
+        elif isinstance(value, str):
+            require(reported_timing.get(key) == value, "inconsistent backend: " + key)
+        else:
+            verify_number(reported_timing.get(key), value, key)
+    resumed = data["relay_resumed"]
+    rb, ra = resumed["before"], resumed["after"]
+    require(rb.get("active") is False and ra.get("active") is False
+            and rb.get("relay_socket_open") is True and ra.get("relay_socket_open") is True
+            and counter(rb, "relay_socket_opens") == counter(ra, "relay_socket_opens") == 1,
+            "relay socket not reused")
+    require(all(delta(rb, ra, key) == 0 for key in ("lan_bytes", "lan_frames", "suppressed"))
+            and delta(rb, ra, "relay_frames") >= 2 and delta(rb, ra, "relay_bytes") > 0,
+            "invalid relay resume counters")
+    peer = resumed["relay"]
+    require(counter(peer, "packets") >= 2 and counter(peer, "bytes") > 0
+            and counter(peer, "jpeg_packets") == 0 and counter(peer, "decoded_idr") == 1
+            and counter(peer, "decoded_vcl") == counter(peer, "vcl_packets")
+            and counter(peer, "decoded_predictive") > 0 and peer.get("pong") is True,
+            "invalid resumed AVC evidence")
+    final = data["passed"]["host"]
+    require(final.get("active") is False and final.get("relay_socket_open") is False
+            and counter(final, "relay_socket_opens") == 1, "Host socket not retired")
+    return {"schema_version": 1, "scope": "Windows runner loopback real capture; not physical display latency",
+            "dimensions": dimensions, **rates, "session_timing": result, "host_delta": counts,
+            "host_minus_received_bytes": counts["lan_bytes"]-received_bytes,
+            "host_minus_received_packets": counts["lan_frames"]-packets,
+            "relay_resumed_first_decoded_idr_observation_ms": counter(peer, "first_decoded_idr_ms")}
+
+
 def live(sample):
     require(sample.get("codec") == "H264" and sample.get("transport_phase") == "relay_video"
             and sample.get("host_metadata_current") == "true", "not live authenticated AVC")
@@ -173,6 +293,8 @@ def main():
     raw = Path(source).read_text(encoding="utf-8")
     if role == "g1":
         summary = summarize_g1([json.loads(line) for line in raw.splitlines() if line.strip()])
+    elif role == "g5b2":
+        summary = summarize_g5b2([json.loads(line) for line in raw.splitlines() if line.strip()])
     else:
         require(role in ("windows", "android"), "invalid role")
         summary = summarize_release(json.loads(raw), role)
