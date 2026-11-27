@@ -1,6 +1,42 @@
 import copy
 import unittest
-from summarize_evidence import summarize
+from summarize_evidence import summarize, resolution_observation
+
+
+# Real historical Android artifact 15236289034, run 46080387539.
+# The old schema has reported deltas only, not exact raw boundaries.
+def historical_switches():
+    return [dict(width=w, height=h, predictive_only_packets=5,
+        predictive_only_render_delta=0, predictive_only_connected=False,
+        predictive_only_h264_active=False, predictive_only_codec="none",
+        predictive_only_phase="lan_verified", predictive_only_received_avc_bytes=b,
+        recovered_codec="H264", recovered_phase="lan_video", render_delta=r,
+        surface_delta=r, recovery_ms=t, same_socket=True, relay_socket_opens=0,
+        relay_video_bytes=0, surface_errors=0)
+        for w,h,b,r,t in ((640,360,51432,4,402),(320,240,23592,3,404))]
+
+
+def synthetic_switches():
+    # Constructed counter-consistency unit-test inputs, NOT measured raw evidence.
+    switches = historical_switches()
+    previous = (320,240)
+    for s in switches:
+        target = (s["width"],s["height"])
+        def point(size, playing, rendered, received):
+            return dict(width=size[0],height=size[1],connected=playing,h264_active=playing,
+                codec="H264" if playing else "none", phase="lan_video" if playing else "lan_verified",
+                rendered=rendered,received_avc_bytes=received,lan_video_bytes=received,
+                relay_socket_opens=0,relay_video_bytes=0)
+        end_bytes=1000+s["predictive_only_received_avc_bytes"]
+        s["raw"] = dict(before=point(previous,True,10,900),
+            blocked_start=dict(point(target,False,10,1000),fixture_sent=10),
+            blocked_end=dict(point(target,False,10,end_bytes),fixture_sent=15,authenticated_hellos=1),
+            recovered=dict(point(target,True,10+s["render_delta"],end_bytes+1000),
+                surface_frames=20+s["surface_delta"],authenticated_hellos=1,surface_errors=0,
+                observed_ms=100+s["recovery_ms"]),
+            initial_authenticated_hellos=1,resume_surface_frames=20,resume_ms=100)
+        previous=target
+    return switches
 
 
 def reports():
@@ -24,6 +60,7 @@ def reports():
             lan_video_bytes_during_silence=1, observed_silence_to_public_video_ms=4,
             observed_total_ms=5, relay_open_ms=1, first_video_ms=2),
         "lan_avc_fixture": dict(sample, relay_video_bytes=0, relay_socket_opens=0, surface_errors=0),
+        "lan_avc_resolution_switches": synthetic_switches(),
         "lan_avc_fallback_live_windows": dict(sample, lan_video_byte_delta=0, host_encoded_frame_delta=20),
     }
     return {"passed": True, "metrics": metrics}, {"passed": True, "native_passed": True, "metrics": metrics}
@@ -36,6 +73,41 @@ class EvidenceTests(unittest.TestCase):
         result = summarize(native, job)
         self.assertNotIn("PRIVATE_MARKER", str(result))
         self.assertEqual(result["lan_avc_fixture_emulator_local"]["rendered_fps"], 10)
+
+    def test_historical_observations_and_missing_raw_gate(self):
+        legacy=historical_switches()
+        self.assertEqual(resolution_observation(legacy[0],640,360)["recovery_ms"],402)
+        self.assertEqual(resolution_observation(legacy[1],320,240)["predictive_only_received_avc_bytes"],23592)
+        native,job=reports()
+        native["metrics"]["lan_avc_resolution_switches"]=legacy
+        with self.assertRaisesRegex(ValueError,"missing raw"):
+            summarize(native,job)
+
+    def test_raw_resolution_cross_checks(self):
+        for point,key,value in (
+            ("blocked_start","fixture_sent",11),
+            ("blocked_end","rendered",11),
+            ("blocked_end","received_avc_bytes",999),
+            ("blocked_end","connected",True),
+            ("blocked_end","relay_video_bytes",1),
+            ("recovered","authenticated_hellos",2),
+            ("recovered","surface_errors",1),
+            ("recovered","observed_ms",99),
+            ("recovered","surface_frames",20),
+            ("recovered","width",320),
+        ):
+            with self.subTest(point=point,key=key):
+                native,job=reports()
+                native["metrics"]["lan_avc_resolution_switches"][0]["raw"][point][key]=value
+                with self.assertRaises(ValueError):
+                    summarize(native,job)
+
+    def test_reject_missing_or_reordered_switches(self):
+        for change in (lambda s: s.pop(),lambda s: s.reverse()):
+            native,job=reports()
+            change(native["metrics"]["lan_avc_resolution_switches"])
+            with self.assertRaises(ValueError):
+                summarize(native,job)
 
     def test_reject_rate_mismatch(self):
         native, job = reports()

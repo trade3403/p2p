@@ -40,6 +40,94 @@ def sample(section):
     return result
 
 
+def resolution_observation(section, width, height):
+    """Validate historical reported deltas; not an independent raw-counter gate."""
+    result = integers(section, (
+        "width", "height", "predictive_only_packets", "predictive_only_render_delta",
+        "predictive_only_received_avc_bytes", "render_delta", "surface_delta",
+        "recovery_ms", "relay_socket_opens", "relay_video_bytes", "surface_errors",
+    ))
+    require((result["width"], result["height"]) == (width, height), "resolution order")
+    require(result["predictive_only_packets"] >= 5
+            and result["predictive_only_render_delta"] == 0
+            and result["predictive_only_received_avc_bytes"] > 0
+            and result["render_delta"] >= 3 and result["surface_delta"] > 0,
+            "resolution progress or predictive barrier failed")
+    require(section.get("predictive_only_connected") is False
+            and section.get("predictive_only_h264_active") is False
+            and section.get("predictive_only_codec") == "none"
+            and section.get("predictive_only_phase") == "lan_verified"
+            and section.get("recovered_codec") == "H264"
+            and section.get("recovered_phase") == "lan_video"
+            and section.get("same_socket") is True, "resolution state invariant")
+    require(all(result[key] == 0 for key in (
+        "relay_socket_opens", "relay_video_bytes", "surface_errors",
+    )), "resolution relay or surface invariant")
+    return result
+
+
+def resolution_switch(section, previous, target):
+    result = resolution_observation(section, *target)
+    raw = section.get("raw")
+    require(isinstance(raw, dict), "missing raw resolution evidence")
+    points = []
+    for name, size, playing in (
+        ("before", previous, True), ("blocked_start", target, False),
+        ("blocked_end", target, False), ("recovered", target, True),
+    ):
+        point = raw.get(name)
+        require(isinstance(point, dict), "missing resolution boundary: " + name)
+        counters = integers(point, (
+            "width", "height", "rendered", "received_avc_bytes", "lan_video_bytes",
+            "relay_socket_opens", "relay_video_bytes",
+        ))
+        require((counters["width"], counters["height"]) == size, "boundary resolution")
+        require(point.get("connected") is playing and point.get("h264_active") is playing
+                and point.get("codec") == ("H264" if playing else "none")
+                and point.get("phase") == ("lan_video" if playing else "lan_verified"),
+                "boundary playback state")
+        require(counters["relay_socket_opens"] == counters["relay_video_bytes"] == 0,
+                "boundary relay activity")
+        points.append(counters)
+    before, start, end, recovered = points
+    for a, b in zip(points, points[1:]):
+        require(all(b[key] >= a[key] for key in (
+            "rendered", "received_avc_bytes", "lan_video_bytes",
+        )), "resolution counters regressed")
+    require(recovered["lan_video_bytes"] > before["lan_video_bytes"],
+            "no LAN progress across switch")
+    initial = integers(raw, ("initial_authenticated_hellos", "resume_surface_frames", "resume_ms"))
+    start_extra = integers(raw["blocked_start"], ("fixture_sent",))
+    end_extra = integers(raw["blocked_end"], ("fixture_sent", "authenticated_hellos"))
+    recovery_extra = integers(raw["recovered"], (
+        "surface_frames", "authenticated_hellos", "surface_errors", "observed_ms",
+    ))
+    require(initial["initial_authenticated_hellos"] == end_extra["authenticated_hellos"]
+            == recovery_extra["authenticated_hellos"] == 1, "LAN authentication changed")
+    computed = {
+        "predictive_only_packets": end_extra["fixture_sent"] - start_extra["fixture_sent"],
+        "predictive_only_render_delta": end["rendered"] - start["rendered"],
+        "predictive_only_received_avc_bytes": end["received_avc_bytes"] - start["received_avc_bytes"],
+        "render_delta": recovered["rendered"] - start["rendered"],
+        "surface_delta": recovery_extra["surface_frames"] - initial["resume_surface_frames"],
+        "recovery_ms": recovery_extra["observed_ms"] - initial["resume_ms"],
+        "surface_errors": recovery_extra["surface_errors"],
+        "relay_socket_opens": recovered["relay_socket_opens"],
+        "relay_video_bytes": recovered["relay_video_bytes"],
+    }
+    require(all(result[key] == value for key, value in computed.items()),
+            "resolution reported delta differs from raw counters")
+    return dict(result, same_socket=True, lan_video_byte_delta=
+                recovered["lan_video_bytes"] - before["lan_video_bytes"])
+
+
+def resolution_switches(metrics):
+    switches = metrics.get("lan_avc_resolution_switches")
+    require(isinstance(switches, list) and len(switches) == 2, "missing resolution switches")
+    sizes = [(320, 240), (640, 360), (320, 240)]
+    return [resolution_switch(s, sizes[i], sizes[i+1]) for i, s in enumerate(switches)]
+
+
 def summarize(native, job):
     require(native.get("passed") is True and job.get("passed") is True
             and job.get("native_passed") is True, "E2E not passed")
@@ -100,13 +188,14 @@ def summarize(native, job):
     require(fallback_result["lan_video_byte_delta"] == 0
             and fallback_result["host_encoded_frame_delta"] > 0, "fallback transport invariant failed")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": "Android emulator and CI Windows; not physical LAN or display latency",
         "system_network_outage": outage_result,
         "multi_candidate_lan": candidate_result,
         "lan_stalled_verification": stalled,
         "lan_authenticated_heartbeat_timeout": heartbeat,
         "lan_avc_fixture_emulator_local": fixture_result,
+        "lan_avc_resolution_switches_emulator_local": resolution_switches(metrics),
         "lan_avc_fallback_live_windows_public": fallback_result,
     }
 

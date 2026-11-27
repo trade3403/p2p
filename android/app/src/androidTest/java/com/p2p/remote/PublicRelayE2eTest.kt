@@ -1017,9 +1017,11 @@ class PublicRelayE2eTest {
                     assertTrue("No received AVC during predictive-only window",blockedBytes>0)
                     val blockedDelta=(stillBlocked["avc_rendered_frames"] as Number).toLong()-blockedRendered
                     assertEquals(0L,blockedDelta)
-                    val blockedPackets=lan.sentVideoPackets-blockedSent
-                    assertTrue(lan.sentVideoPackets>sent)
-                    assertEquals(helloCount,lan.authenticatedHellos)
+                    val blockedEndSent=lan.sentVideoPackets
+                    val blockedPackets=blockedEndSent-blockedSent
+                    val blockedEndHellos=lan.authenticatedHellos
+                    assertTrue(blockedEndSent>sent)
+                    assertEquals(helloCount,blockedEndHellos)
                     assertEquals(0L,(stillBlocked["relay_socket_opens"] as Number).toLong())
                     assertEquals(0L,(stillBlocked["viewer_relay_video_bytes"] as Number).toLong())
                     stage="lan_avc_resolution_${width}_recovery"
@@ -1037,14 +1039,40 @@ class PublicRelayE2eTest {
                             lan.appliedVideoSwitches==applied+2
                     }
                     val recoveredFormat=snap()
-                    assertEquals(helloCount,lan.authenticatedHellos)
+                    val recoveredAt=SystemClock.elapsedRealtime()
+                    val recoveredSurface=consumer.frames
+                    val recoveredHellos=lan.authenticatedHellos
+                    val recoveredErrors=consumer.errors
+                    assertEquals(helloCount,recoveredHellos)
                     assertEquals(before["relay_socket_opens"],recoveredFormat["relay_socket_opens"])
                     assertEquals(0L,(recoveredFormat["viewer_relay_video_bytes"] as Number).toLong())
                     assertEquals(0L,consumer.errors)
                     assertNull(lan.failureType)
                     assertTrue((recoveredFormat["viewer_lan_video_bytes"] as Number).toLong()>
                         (before["viewer_lan_video_bytes"] as Number).toLong())
+                    // Export exact boundary observations, not reconstructed
+                    // counters or periodic samples that may miss the barrier.
+                    fun boundary(v:Map<*,*>) = JSONObject()
+                        .put("width",v["frame_width"]).put("height",v["frame_height"])
+                        .put("connected",v["viewer_connected"]).put("h264_active",v["h264_active"])
+                        .put("codec",v["active_video_codec"]).put("phase",v["viewer_transport_phase"])
+                        .put("rendered",v["avc_rendered_frames"])
+                        .put("received_avc_bytes",v["avc_received_bytes"])
+                        .put("lan_video_bytes",v["viewer_lan_video_bytes"])
+                        .put("relay_socket_opens",v["relay_socket_opens"])
+                        .put("relay_video_bytes",v["viewer_relay_video_bytes"])
                     val evidence=JSONObject()
+                        .put("raw",JSONObject()
+                            .put("before",boundary(before))
+                            .put("blocked_start",boundary(blocked).put("fixture_sent",blockedSent))
+                            .put("blocked_end",boundary(stillBlocked).put("fixture_sent",blockedEndSent)
+                                .put("authenticated_hellos",blockedEndHellos))
+                            .put("recovered",boundary(recoveredFormat).put("surface_frames",recoveredSurface)
+                                .put("authenticated_hellos",recoveredHellos).put("surface_errors",recoveredErrors)
+                                .put("observed_ms",recoveredAt))
+                            .put("initial_authenticated_hellos",helloCount)
+                            .put("resume_surface_frames",resumeSurface)
+                            .put("resume_ms",resumeAt))
                         .put("width",width).put("height",height)
                         .put("predictive_only_packets",blockedPackets)
                         .put("predictive_only_render_delta",blockedDelta)
@@ -1056,12 +1084,12 @@ class PublicRelayE2eTest {
                         .put("recovered_codec",recoveredFormat["active_video_codec"])
                         .put("recovered_phase",recoveredFormat["viewer_transport_phase"])
                         .put("render_delta",(recoveredFormat["avc_rendered_frames"] as Number).toLong()-blockedRendered)
-                        .put("surface_delta",consumer.frames-resumeSurface)
-                        .put("recovery_ms",SystemClock.elapsedRealtime()-resumeAt)
-                        .put("same_socket",lan.authenticatedHellos==helloCount)
+                        .put("surface_delta",recoveredSurface-resumeSurface)
+                        .put("recovery_ms",recoveredAt-resumeAt)
+                        .put("same_socket",recoveredHellos==helloCount)
                         .put("relay_socket_opens",recoveredFormat["relay_socket_opens"])
                         .put("relay_video_bytes",recoveredFormat["viewer_relay_video_bytes"])
-                        .put("surface_errors",consumer.errors)
+                        .put("surface_errors",recoveredErrors)
                     switches.put(evidence)
                     success("Actual MediaCodec resolution recovery on same encrypted LAN: "+evidence.toString())
                 }
