@@ -1,3 +1,4 @@
+import json
 import unittest
 from summarize_evidence import summarize_g1, summarize_release
 
@@ -16,6 +17,7 @@ def g1():
         row("relay_baseline", dict(before=host(False, 0, 0, 0), after=host(False, 0, 3, 0), relay=peer(3))),
         row("lan_settle", {}),
         row("lan_stable", dict(before=host(True, 1, 3, 1), after=host(True, 4, 3, 4), lan=peer(3), relay=peer(0))),
+        row("clipboard_ownership", dict(lan_applied=True, relay_blocked=True)),
         row("relay_resumed", dict(before=host(False, 4, 3, 4), after=host(False, 4, 6, 4), relay=peer(3))),
         row("passed", dict(host=host(False, 4, 6, 4, False))),
     ]
@@ -42,11 +44,43 @@ class EvidenceTests(unittest.TestCase):
         result = summarize_g1(g1())
         self.assertEqual(result["phases"]["lan_stable"]["relay_bytes"], 0)
 
+    def test_actual_g1_regression(self):
+        # Numeric/boolean CI log evidence, job 140574912947; not a new measurement.
+        raw = """{"data":{"host":{"active":false,"lan_bytes":0,"lan_frames":0,"relay_bytes":0,"relay_frames":0,"relay_socket_open":false,"relay_socket_opens":0,"suppressed":0}},"scope":"windows_runner_loopback_ws_jpeg","stage":"start"}
+{"data":{"after":{"active":false,"lan_bytes":0,"lan_frames":0,"relay_bytes":3445753,"relay_frames":23,"relay_socket_open":true,"relay_socket_opens":1,"suppressed":0},"before":{"active":false,"lan_bytes":0,"lan_frames":0,"relay_bytes":0,"relay_frames":0,"relay_socket_open":false,"relay_socket_opens":0,"suppressed":0},"relay":{"bytes":3445753,"frames":23,"pong":true,"ws_pings":0}},"scope":"windows_runner_loopback_ws_jpeg","stage":"relay_baseline"}
+{"data":{"host":{"active":true,"lan_bytes":1198532,"lan_frames":8,"relay_bytes":3445753,"relay_frames":23,"relay_socket_open":true,"relay_socket_opens":1,"suppressed":8},"lan":{"bytes":1198532,"frames":8,"pong":false,"ws_pings":0},"relay":{"bytes":0,"frames":0,"pong":false,"ws_pings":0}},"scope":"windows_runner_loopback_ws_jpeg","stage":"lan_settle"}
+{"data":{"accepted_jpeg_codec_controls":1,"after":{"active":true,"lan_bytes":4494601,"lan_frames":30,"relay_bytes":3445753,"relay_frames":23,"relay_socket_open":true,"relay_socket_opens":1,"suppressed":30},"before":{"active":true,"lan_bytes":1198532,"lan_frames":8,"relay_bytes":3445753,"relay_frames":23,"relay_socket_open":true,"relay_socket_opens":1,"suppressed":8},"lan":{"bytes":3296069,"frames":22,"pong":true,"ws_pings":3},"relay":{"bytes":0,"frames":0,"pong":false,"ws_pings":0}},"scope":"windows_runner_loopback_ws_jpeg","stage":"lan_stable"}
+{"data":{"lan_applied":true,"relay_blocked":true},"scope":"windows_runner_loopback_ws_jpeg","stage":"clipboard_ownership"}
+{"data":{"after":{"active":false,"lan_bytes":6442189,"lan_frames":43,"relay_bytes":6891506,"relay_frames":46,"relay_socket_open":true,"relay_socket_opens":1,"suppressed":43},"before":{"active":false,"lan_bytes":6442189,"lan_frames":43,"relay_bytes":3445753,"relay_frames":23,"relay_socket_open":true,"relay_socket_opens":1,"suppressed":43},"relay":{"bytes":3445753,"frames":23,"pong":true,"ws_pings":0}},"scope":"windows_runner_loopback_ws_jpeg","stage":"relay_resumed"}
+{"data":{"host":{"active":false,"lan_bytes":6442189,"lan_frames":43,"relay_bytes":6891506,"relay_frames":46,"relay_socket_open":false,"relay_socket_opens":1,"suppressed":43}},"scope":"windows_runner_loopback_ws_jpeg","stage":"passed"}"""
+        result = summarize_g1([json.loads(line) for line in raw.splitlines()])
+        self.assertEqual(result["phases"]["lan_stable"]["lan_bytes"], 3296069)
+        self.assertEqual(result["phases"]["lan_stable"]["relay_bytes"], 0)
+        self.assertEqual(result["clipboard_ownership"],
+                         {"lan_applied": True, "relay_blocked": True})
+
     def test_g1_bad_peer(self):
         rows = g1()
         rows[3]["data"]["relay"]["bytes"] = 1
         with self.assertRaises(ValueError):
             summarize_g1(rows)
+
+    def test_missing_or_misordered_ownership_rejected(self):
+        rows = g1()
+        del rows[4]
+        with self.assertRaises(ValueError):
+            summarize_g1(rows)
+        rows = g1()
+        rows[4], rows[5] = rows[5], rows[4]
+        with self.assertRaises(ValueError):
+            summarize_g1(rows)
+
+    def test_invalid_ownership_rejected(self):
+        for key in ("lan_applied", "relay_blocked"):
+            rows = g1()
+            rows[4]["data"][key] = False
+            with self.assertRaises(ValueError):
+                summarize_g1(rows)
 
     def test_release(self):
         result = summarize_release(report(), "android")

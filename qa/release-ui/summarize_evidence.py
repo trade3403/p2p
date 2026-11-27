@@ -36,11 +36,15 @@ def delta(before, after, key):
 
 
 def summarize_g1(rows):
-    stages = ["start", "relay_baseline", "lan_settle", "lan_stable", "relay_resumed", "passed"]
+    stages = ["start", "relay_baseline", "lan_settle", "lan_stable",
+              "clipboard_ownership", "relay_resumed", "passed"]
     require([row.get("stage") for row in rows] == stages, "unexpected G1 stage sequence")
     require(all(row.get("scope") == "windows_runner_loopback_ws_jpeg" for row in rows),
             "invalid G1 scope")
     data = {row["stage"]: row["data"] for row in rows}
+    ownership = data["clipboard_ownership"]
+    require(ownership.get("lan_applied") is True and ownership.get("relay_blocked") is True,
+            "clipboard ownership evidence incomplete")
     output = {}
     for stage, active, transport in (
         ("relay_baseline", False, "relay"), ("lan_stable", True, "lan"),
@@ -72,7 +76,7 @@ def summarize_g1(rows):
     require(final.get("active") is False and final.get("relay_socket_open") is False
             and counter(final, "relay_socket_opens") == 1, "Host socket not retired")
     return {"schema_version": 1, "scope": "Windows runner loopback WebSocket JPEG",
-            "phases": output}
+            "phases": output, "clipboard_ownership": {"lan_applied": True, "relay_blocked": True}}
 
 
 def live(sample):
