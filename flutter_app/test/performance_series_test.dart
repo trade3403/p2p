@@ -38,4 +38,59 @@ void main() {
     expect(series.stopReason, 'sample_limit');
     expect(series.count, PerformanceSeries.maxSamples);
   });
+
+  test('host interval rates use actual elapsed time and observed LAN endpoints', () {
+    final series = PerformanceSeries(host: true, startedAt: now);
+    Map<String, dynamic> sample(int lan, int relay) => {
+      'host_running': true, 'host_lan_active': true,
+      'host_relay_socket_open': true,
+      'host_lan_video_bytes': lan, 'host_relay_video_bytes': relay,
+    };
+    series.add(sample(100, 50), elapsedMs: 10, capturedAt: now);
+    series.add(sample(1100, 50), elapsedMs: 2510, capturedAt: now);
+    series.add(sample(2100, 100), elapsedMs: 4510, capturedAt: now);
+    series.add(sample(10, 0), elapsedMs: 6510, capturedAt: now);
+    series.add(sample(100, 0), elapsedMs: 12510, capturedAt: now);
+    final report = jsonDecode(series.export()) as Map;
+    final analysis = report['analysis'] as Map;
+    final intervals = analysis['intervals'] as List;
+    expect(intervals[0]['duration_ms'], 2500);
+    expect(intervals[0]['rates_bps_or_count_per_second']['host_lan_video_bytes'], 3200);
+    expect(intervals[0]['counter_deltas']['host_relay_video_bytes'], 0);
+    expect(intervals[2]['decreased_counters'], contains('host_lan_video_bytes'));
+    expect(intervals[2]['counter_deltas']['host_lan_video_bytes'], isNull);
+    expect(intervals[3]['long_sampling_gap'], true);
+    expect(analysis['lan_endpoint_observed_intervals'], 2);
+    expect(analysis['lan_endpoint_observed_zero_relay_intervals'], 1);
+    expect(analysis['lan_endpoint_observed_nonzero_relay_intervals'], 1);
+    expect(analysis['connected_rtt_mean_ms'], isNull);
+  });
+
+  test('viewer transport changes and missing metrics are not LAN evidence', () {
+    final series = PerformanceSeries(host: false, startedAt: now);
+    series.add({
+      'viewer_connected': true, 'viewer_transport_phase': 'lan_video',
+      'viewer_lan_video_bytes': 100, 'viewer_relay_video_bytes': 0,
+      'viewer_lan_video_frames': 5, 'avc_rendered_frames': 10, 'rtt_ms': 10,
+    }, elapsedMs: 0, capturedAt: now);
+    series.add({
+      'viewer_connected': true, 'viewer_transport_phase': 'relay_video',
+      'viewer_lan_video_bytes': 200, 'viewer_lan_video_frames': 9,
+      'avc_rendered_frames': 20, 'rtt_ms': 30,
+    }, elapsedMs: 2000, capturedAt: now);
+    series.add({'viewer_connected': false, 'rtt_ms': 1000},
+        elapsedMs: 4000, capturedAt: now);
+    final analysis = (jsonDecode(series.export()) as Map)['analysis'] as Map;
+    final intervals = analysis['intervals'] as List;
+    expect(intervals[0]['same_observed_transport'], false);
+    expect(intervals[0]['counter_deltas']['viewer_relay_video_bytes'], isNull);
+    expect(intervals[0]['rates_bps_or_count_per_second']['viewer_lan_video_frames'], 2);
+    expect(intervals[0]['rates_bps_or_count_per_second']['avc_rendered_frames'], 5);
+    expect(analysis['lan_endpoint_observed_intervals'], 0);
+    expect(analysis['connected_rtt_sample_count'], 2);
+    expect(analysis['connected_rtt_min_ms'], 10);
+    expect(analysis['connected_rtt_mean_ms'], 20);
+    expect(analysis['connected_rtt_max_ms'], 30);
+  });
+
 }
