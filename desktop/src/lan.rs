@@ -152,6 +152,7 @@ impl<'a> ActiveLan<'a> {
         if active.load(Ordering::SeqCst) { return None; }
         state.advance();
         active.store(true, Ordering::SeqCst);
+        gate.advance_video_epoch();
         Some(Self { active, gate })
     }
 }
@@ -160,6 +161,7 @@ impl Drop for ActiveLan<'_> {
         let mut state = self.gate.lock();
         state.advance();
         self.active.store(false, Ordering::SeqCst);
+        self.gate.advance_video_epoch();
     }
 }
 
@@ -252,6 +254,31 @@ mod tests {
         drop(next);
         assert!(!flag.load(Ordering::SeqCst));
     }
+    #[test]
+    fn transport_video_epoch_tracks_only_successful_lan_lease_transitions() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let input = std::sync::atomic::AtomicBool::new(false);
+        let gate = host::ControlGate::default();
+        let epoch = gate.video_epoch();
+        let original = epoch.load(Ordering::SeqCst);
+        {
+            let _owner = ActiveLan::acquire(&flag, &gate).unwrap();
+            assert_eq!(epoch.load(Ordering::SeqCst), original + 1);
+            assert!(ActiveLan::acquire(&flag, &gate).is_none());
+            gate.set_input(&input, true);
+            gate.set_input(&input, false);
+            gate.set_clipboard(&input, true);
+            assert_eq!(epoch.load(Ordering::SeqCst), original + 1);
+        }
+        assert!(!flag.load(Ordering::SeqCst));
+        assert_eq!(epoch.load(Ordering::SeqCst), original + 2);
+        // A previously captured frame remains stale even after the flag returns
+        // to the same false value, with no sampling during the lease.
+        assert_ne!(original, epoch.load(Ordering::SeqCst));
+        drop(ActiveLan::acquire(&flag, &gate).unwrap());
+        assert_eq!(epoch.load(Ordering::SeqCst), original + 4);
+    }
+
     #[test]
     fn advertised_candidates_are_private_deduplicated_bounded_and_primary_first() {
         let primary = Ipv4Addr::new(192,168,9,2);

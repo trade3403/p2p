@@ -45,6 +45,9 @@ impl TransportVideoStats {
 #[derive(Default)]
 pub struct ControlGate {
     state: std::sync::Mutex<ControlState>,
+    // Independent of input permissions. Only a successful LAN lease
+    // acquisition or release changes the video transport generation.
+    video_epoch: Arc<AtomicU64>,
 }
 #[derive(Default)]
 pub(crate) struct ControlState {
@@ -92,6 +95,16 @@ impl ControlState {
 impl ControlGate {
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, ControlState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub(crate) fn video_epoch(&self) -> Arc<AtomicU64> {
+        self.video_epoch.clone()
+    }
+
+    // Called by ActiveLan under the same gate lock as the active flag.
+    pub(crate) fn advance_video_epoch(&self) {
+        self.video_epoch.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
+            |value| value.checked_add(1)).expect("video transport epoch exhausted");
     }
 
     // Permission transitions linearize with native input execution. Even a
@@ -272,10 +285,23 @@ impl LanHeartbeat {
 // reference data the receiver never got. Resume only at a self-contained IDR.
 #[derive(Default)]
 struct RelayAvcRecovery {
+    observed_epoch: Option<u64>,
     waiting: bool,
     reset_requested: bool,
 }
 impl RelayAvcRecovery {
+    // Even a complete LAN acquire/release between two frame observations
+    // invalidates the relay decoder's reference picture history.
+    fn observe_epoch(&mut self, epoch: u64) {
+        if self.observed_epoch != Some(epoch) {
+            if self.observed_epoch.is_some() {
+                self.waiting = true;
+                self.reset_requested = false;
+            }
+            self.observed_epoch = Some(epoch);
+        }
+    }
+
     fn suppressed(&mut self, kind: u8) {
         if kind == protocol::AVC {
             self.waiting = true;
@@ -285,7 +311,8 @@ impl RelayAvcRecovery {
     fn allow(&mut self, kind: u8, bytes: &[u8], reset: &AtomicBool) -> bool {
         if !self.waiting || kind != protocol::AVC { return true; }
         if self_contained_avc_idr(bytes) {
-            *self = Self::default();
+            self.waiting = false;
+            self.reset_requested = false;
             return true;
         }
         if !self.reset_requested {
@@ -352,7 +379,9 @@ where
     let actual_encoder=Arc::new(AtomicU32::new(0));
     let video_stats=Arc::new(crate::video::VideoStats::default());
     let encoder_reset = Arc::new(AtomicBool::new(false));
+    let video_epoch = config.control_gate.video_epoch();
     let mut relay_avc_recovery = RelayAvcRecovery::default();
+    relay_avc_recovery.observe_epoch(video_epoch.load(Ordering::SeqCst));
     let mut frames = crate::video::spawn_frames(
         config.monitor_index.clone(),
         config.h264_enabled.clone(),
@@ -364,6 +393,7 @@ where
         actual_encoder.clone(),
         video_stats.clone(),
         encoder_reset.clone(),
+        video_epoch.clone(),
     );
     // Refresh bounded candidates while sharing, only in encrypted metadata.
     #[cfg(windows)]
@@ -404,12 +434,27 @@ where
                     || (is_lan_session && !config.lan_direct.load(Ordering::SeqCst)) { break; }
                 // When an authenticated LAN viewer is active, do not waste
                 // uplink bandwidth relaying frames to the VPS.
-                let Some((kind, bytes)) = frame else {
+                let Some((frame_epoch, (kind, bytes))) = frame else {
                     return Err(anyhow!("screen capture worker exited unexpectedly"));
                 };
-                if !is_lan_session && config.lan_active.load(Ordering::SeqCst) {
+                // Read ownership and generation together. Do not hold the gate
+                // across a socket await; an already-started send cannot be recalled.
+                let (lan_active, current_epoch) = {
+                    let _gate = config.control_gate.lock();
+                    (config.lan_active.load(Ordering::SeqCst),
+                        video_epoch.load(Ordering::SeqCst))
+                };
+                if !is_lan_session {
+                    relay_avc_recovery.observe_epoch(current_epoch);
+                }
+                if !is_lan_session && lan_active {
                     config.transport_video.relay_suppressed_frames.fetch_add(1, Ordering::Relaxed);
                     relay_avc_recovery.suppressed(kind);
+                    continue;
+                }
+                // A queued or still-encoding frame from the previous ownership
+                // generation cannot restart video, even if it contains an IDR.
+                if frame_epoch != current_epoch || is_lan_session != lan_active {
                     continue;
                 }
                 if !is_lan_session && config.udp_active.load(Ordering::SeqCst) {
@@ -1199,6 +1244,29 @@ mod transport_video_tests {
         assert!(gate.allow(protocol::AVC, &key, &reset));
         assert!(gate.allow(protocol::AVC, &p, &reset));
         gate.suppressed(protocol::AVC);
+        assert!(!gate.allow(protocol::AVC, &p, &reset));
+        assert!(reset.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn rapid_transport_epoch_change_without_suppressed_packet_requires_idr() {
+        let mut gate = RelayAvcRecovery::default();
+        let reset = AtomicBool::new(false);
+        let p = [0,2,0,2,0,0,1,0x61,0x80];
+        let key = [0,2,0,2,0,0,1,0x67,0x80,0,0,1,0x68,0x80,0,0,1,0x65,0x80];
+        gate.observe_epoch(0);
+        assert!(gate.allow(protocol::AVC, &p, &reset));
+        // No suppressed() call: both LAN transitions occurred between samples.
+        gate.observe_epoch(2);
+        assert!(!gate.allow(protocol::AVC, &p, &reset));
+        assert!(reset.swap(false, Ordering::AcqRel));
+        gate.observe_epoch(2);
+        assert!(!gate.allow(protocol::AVC, &p, &reset));
+        assert!(!reset.load(Ordering::Acquire));
+        assert!(gate.allow(protocol::AVC, &key, &reset));
+        gate.observe_epoch(2);
+        assert!(gate.allow(protocol::AVC, &p, &reset));
+        gate.observe_epoch(4);
         assert!(!gate.allow(protocol::AVC, &p, &reset));
         assert!(reset.load(Ordering::Acquire));
     }

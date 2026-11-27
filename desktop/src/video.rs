@@ -75,7 +75,8 @@ pub fn spawn_frames(
     actual_encoder: Arc<AtomicU32>,
     stats: Arc<VideoStats>,
     encoder_reset: Arc<AtomicBool>,
-) -> mpsc::Receiver<Frame> {
+    video_epoch: Arc<AtomicU64>,
+) -> mpsc::Receiver<(u64, Frame)> {
     let (tx, rx) = mpsc::channel(2);
     thread::spawn(move || {
         let mut encoder: Option<openh264::encoder::Encoder> = None;
@@ -90,6 +91,7 @@ pub fn spawn_frames(
         let mut previous_monitor = usize::MAX;
         let mut frames_since_reset = 0u32;
         let mut previous_profile = (0u32,0u32);
+        let mut previous_epoch = None;
 
         while !tx.is_closed() {
             if udp_active.load(Ordering::Relaxed) {
@@ -101,6 +103,10 @@ pub fn spawn_frames(
                 continue;
             }
             let started = Instant::now();
+            // Tag work before capture/encoding. Never retag an in-flight frame
+            // with a generation read after capture.
+            let frame_epoch = video_epoch.load(Ordering::SeqCst);
+            let epoch_changed = previous_epoch != Some(frame_epoch);
             // Session-local JPEG override does not modify the owner's H.264 preference.
             let active_h264 = h264.load(Ordering::Relaxed)
                 && !force_jpeg.load(Ordering::Relaxed);
@@ -109,6 +115,7 @@ pub fn spawn_frames(
                            target_fps.load(Ordering::Relaxed).clamp(5,30));
             let requested_reset = encoder_reset.swap(false, Ordering::AcqRel);
             if active_h264 != previous_h264
+                || epoch_changed
                 || (active_h264 && requested_reset)
                 || selected != previous_monitor
                 || (active_h264 && ((gpu.is_none() && hardware.is_none() && frames_since_reset >= profile.1) || previous_profile != profile))
@@ -118,22 +125,25 @@ pub fn spawn_frames(
                 encoder = None;
                 hardware = None;
                 gpu=None;
-                if active_h264!=previous_h264 || selected!=previous_monitor {
+                if epoch_changed || active_h264!=previous_h264 || selected!=previous_monitor {
                     desktop_capture.clear();
                     pixels.clear();
+                }
+                if active_h264!=previous_h264 || selected!=previous_monitor {
                     gpu_failed=false;
                 }
                 frames_since_reset = 0;
                 previous_h264 = active_h264;
                 previous_monitor = selected;
                 previous_profile = profile;
+                previous_epoch = Some(frame_epoch);
             }
 
             match capture(selected, active_h264, profile, &mut encoder, &mut hardware,
                           &mut hardware_failed, &actual_encoder, &mut desktop_capture, &mut pixels, &mut gpu, &mut gpu_failed, &stats) {
                 Ok(Some(frame)) => {
                     frames_since_reset += 1;
-                    match tx.try_send(frame) {
+                    match tx.try_send((frame_epoch, frame)) {
                         Ok(()) => (),
                         Err(mpsc::error::TrySendError::Full(_)) => {
                             drops.fetch_add(1, Ordering::Relaxed);
@@ -184,7 +194,8 @@ pub fn spawn_frames(
     _actual_encoder: Arc<AtomicU32>,
     _stats: Arc<VideoStats>,
     _encoder_reset: Arc<AtomicBool>,
-) -> mpsc::Receiver<Frame> {
+    _video_epoch: Arc<AtomicU64>,
+) -> mpsc::Receiver<(u64, Frame)> {
     let (_tx, rx) = mpsc::channel(1);
     rx
 }
