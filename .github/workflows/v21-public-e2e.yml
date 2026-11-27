@@ -105,6 +105,10 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: python qa/public-relay/run.py android
+      - name: Validate and summarize measured Android evidence
+        run: |
+          python -m unittest discover -s qa/public-relay -p test_summarize_evidence.py
+          python qa/public-relay/summarize_evidence.py evidence/public-relay-android/report.json evidence/public-relay-android/job-report.json evidence/public-relay-android/performance-summary.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
