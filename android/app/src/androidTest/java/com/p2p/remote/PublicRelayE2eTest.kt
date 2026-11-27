@@ -362,8 +362,6 @@ class PublicRelayE2eTest {
         val lastState = AtomicReference("")
         val lastJpeg = AtomicReference<ByteArray>()
         val frames = AtomicLong()
-        var lastRecord = 0L
-        var recorded = 0
         var stage = "initialize"
         var engine: AndroidRemoteEngine? = null
         var avcConsumer: AvcSurfaceConsumer? = null
@@ -437,11 +435,6 @@ class PublicRelayE2eTest {
                                     lastState.set(name)
                                     lastJpeg.set(bytes)
                                     frames.incrementAndGet()
-                                    val now = SystemClock.elapsedRealtime()
-                                    if (recorded < 450 && now-lastRecord >= 180) {
-                                        File(out,String.format(java.util.Locale.US,"frame-%05d.jpg",recorded++)).writeBytes(bytes)
-                                        lastRecord=now
-                                    }
                                 }
                             }
                         }
@@ -1284,7 +1277,8 @@ class PublicRelayE2eTest {
         } finally {
             engine?.let { main { it.close() } }
             avcConsumer?.close()
-            metrics.put("verified_frames",frames.get()).put("recorded_frames",recorded)
+            metrics.put("verified_frames",frames.get())
+            report.put("recording_enabled",false)
             report.put("metrics",metrics).put("steps",steps)
             File(out,"report.json").writeText(report.toString(2))
         }

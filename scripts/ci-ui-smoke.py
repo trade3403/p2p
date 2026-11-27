@@ -12,7 +12,7 @@ from android_ui_ready import foreground_state, start_release_app
 platform = sys.argv[1]
 out = pathlib.Path("evidence") / platform
 out.mkdir(parents=True, exist_ok=True)
-report = {"platform": platform, "scope": "offline navigation smoke; no remote session", "steps": [], "passed": False}
+report = {"platform": platform, "scope": "offline navigation smoke; no remote session", "steps": [], "passed": False, "recording_enabled": False}
 previous = None
 
 def check(name, image):
@@ -36,7 +36,6 @@ def android():
     apk = next(pathlib.Path("apk").rglob("app-release.apk"))
     adb("install", "-r", str(apk))
     package = "com.p2p.remote.p2p_remote_ui"
-    recording = subprocess.Popen(["adb", "shell", "screenrecord", "--time-limit", "90", "/sdcard/p2p-ci.mp4"])
     try:
         def capture():
             return Image.open(io.BytesIO(adb("exec-out", "screencap", "-p", stdout=subprocess.PIPE).stdout)).convert("RGB")
@@ -58,42 +57,13 @@ def android():
                 raise AssertionError("App lost foreground input focus at "+name)
             check(name,current)
     finally:
-        subprocess.run(["adb", "shell", "pkill", "-2", "screenrecord"], check=False)
-        try:
-            recording.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            recording.terminate()
-        adb("pull", "/sdcard/p2p-ci.mp4", str(out / "Android-UI-Test.mp4"))
         with (out / "logcat.txt").open("w", encoding="utf-8") as log:
             subprocess.run(["adb", "logcat", "-d", "-t", "1500"], stdout=log, check=False)
 
 def windows():
     import pyautogui as gui
-    import imageio_ffmpeg
-    import threading
     exe = next(pathlib.Path("dist/v0.21-windows").glob("p2p_remote_ui.exe")).resolve()
     proc = subprocess.Popen([str(exe)], cwd=exe.parent)
-    stop = threading.Event()
-    errors = []
-    def record():
-        writer = None
-        try:
-            first = gui.screenshot().convert("RGB")
-            w, h = first.size
-            w, h = w // 2 * 2, h // 2 * 2
-            writer = imageio_ffmpeg.write_frames(str(out / "Windows-UI-Test.mp4"), (w, h), fps=4, codec="libx264", pix_fmt_in="rgb24", pix_fmt_out="yuv420p")
-            writer.send(None)
-            while not stop.is_set():
-                start = time.monotonic()
-                writer.send(gui.screenshot().convert("RGB").crop((0, 0, w, h)).tobytes())
-                stop.wait(max(0, .25 - (time.monotonic() - start)))
-        except Exception as exc:
-            errors.append(str(exc))
-        finally:
-            if writer:
-                writer.close()
-    worker = threading.Thread(target=record, daemon=True)
-    worker.start()
     try:
         window = None
         for _ in range(40):
@@ -191,13 +161,9 @@ def windows():
             check(name,capture())
             report.setdefault("verified_windows_pages",[]).append({"page":name,"label":label,"marker":marker})
     finally:
-        stop.set()
-        worker.join(20)
         if proc.poll() is None:
             proc.terminate()
             proc.wait(timeout=15)
-    if errors or not (out / "Windows-UI-Test.mp4").exists():
-        raise AssertionError("Recording failed: " + repr(errors))
 
 try:
     {"windows": windows, "android": android}[platform]()

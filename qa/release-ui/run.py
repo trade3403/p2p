@@ -22,7 +22,6 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-import imageio_ffmpeg
 from PIL import Image, ImageChops, ImageStat
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"scripts"))
 from android_ui_ready import foreground_state, start_release_app
@@ -33,7 +32,7 @@ TOKEN=os.environ.get("RELAY_ACCESS_TOKEN","").strip()
 ROLE=sys.argv[1]
 OUT=Path("evidence/release-ui-"+ROLE)
 OUT.mkdir(parents=True,exist_ok=True)
-REPORT={"role":ROLE,"scope":"actual release client UI on dedicated GitHub runner","passed":False,"steps":[]}
+REPORT={"role":ROLE,"scope":"actual release client UI on dedicated GitHub runner","passed":False,"steps":[],"recording_enabled":False}
 STAGE="initialization"
 WS=None
 KEY=None
@@ -78,7 +77,7 @@ def rendezvous(role):
     WS.settimeout(.3)
     # The Relay's read deadline is refreshed only by a PONG. websocket-client
     # processes server PING and sends PONG while reading, not while UI sampling.
-    # One reader owns the socket for the entire test, including recordings and
+    # One reader owns the socket for the entire test, including UI assertions and
     # weak-network sampling. The UI thread consumes only authenticated messages.
     COORD_READER=threading.Thread(target=coordinator_reader,name="coordinator-reader",daemon=True)
     COORD_READER.start()
@@ -152,46 +151,40 @@ def changed_cells(before,after):
     require(len(cells)>=12,"Actual Windows state change lacks visual contrast")
     return cells
 
-class Recording:
-    """Actual OS screen captures at a fixed sampling rate; no remote-frame fabrication."""
-    def __init__(self,capture,name):
+class VisualSampler:
+    """In-memory screenshot fingerprints only during a visual feedback trial.
+
+    No video writer, image sequence, or continuous screen recording. Keep
+    the real OS screenshot comparisons and monotonic timing unchanged.
+    """
+    def __init__(self,capture):
         self.capture=capture
-        self.name=name
         self.stop=threading.Event()
         self.error=None
-        self.frames=0
         self.worker=None
         self.observation_lock=threading.Lock()
         self.observation=None
+
     def observe(self,bounds):
+        require(self.worker is None,"Visual sampler already active")
+        self.stop.clear()
+        self.error=None
         with self.observation_lock:
             self.observation=(tuple(bounds),[])
-    def samples(self):
-        with self.observation_lock:
-            return list(self.observation[1]) if self.observation else []
-    def stop_observing(self):
-        with self.observation_lock:
-            self.observation=None
-    def start(self):
         self.worker=threading.Thread(target=self.run,daemon=True)
         self.worker.start()
+
+    def samples(self):
+        require(self.error is None,"Actual screenshot sampling failed")
+        with self.observation_lock:
+            return list(self.observation[1]) if self.observation else []
+
     def run(self):
-        writer=None
         try:
-            img=self.capture().convert("RGB")
-            # Landscape canvas gives full-screen remote operation a readable recording.
-            # Portrait pairing remains visible, centered without cropping or stretching.
-            w,h=(1920,1080) if ROLE=="android" else (img.width//2*2,img.height//2*2)
-            writer=imageio_ffmpeg.write_frames(str(OUT/self.name),(w,h),fps=4,
-                codec="libx264",pix_fmt_in="rgb24",pix_fmt_out="yuv420p",
-                output_params=["-movflags","+faststart","-crf","19"])
-            writer.send(None)
             while not self.stop.is_set():
                 start=time.monotonic()
                 img=self.capture().convert("RGB")
                 captured=time.monotonic()
-                # Reuse the real recording capture rather than running another
-                # screenshot loop concurrently with the remote interaction.
                 with self.observation_lock:
                     if self.observation is not None:
                         bounds,samples=self.observation
@@ -199,30 +192,20 @@ class Recording:
                             sig=visual_signature(img,bounds)
                             if sig is not None:
                                 samples.append((start,captured,sig))
-                # Keep original screen proportions across real portrait/landscape changes.
-                img.thumbnail((w,h))
-                canvas=Image.new("RGB",(w,h))
-                canvas.paste(img,((w-img.width)//2,(h-img.height)//2))
-                writer.send(canvas.tobytes())
-                self.frames+=1
                 self.stop.wait(max(0,.25-(time.monotonic()-start)))
-        except Exception as e:
-            self.error=type(e).__name__
-        finally:
-            if writer:
-                try: writer.close()
-                except Exception as e: self.error=type(e).__name__
-    def finish(self,strict):
+        except Exception as exc:
+            self.error=type(exc).__name__
+
+    def stop_observing(self):
         self.stop.set()
-        if self.worker: self.worker.join(30)
-        if strict:
-            require(self.worker is not None and not self.worker.is_alive() and not self.error,"OS screen recording failed")
-            require(self.frames>=16,"Screen recording too short")
-            count,duration=imageio_ffmpeg.count_frames_and_secs(str(OUT/self.name))
-            require(count==self.frames and duration>0,"Recording decode verification failed")
-            REPORT["recording"]={"file":self.name,"frames":count,"duration_seconds":duration,"capture_fps":4}
-        else:
-            REPORT["partial_recording_frames"]=self.frames
+        if self.worker:
+            self.worker.join(35)
+            require(not self.worker.is_alive(),"Visual sampler did not stop")
+            self.worker=None
+        with self.observation_lock:
+            self.observation=None
+        require(self.error is None,"Actual screenshot sampling failed")
+
 
 def adb(*args,data=None,check=True):
     return subprocess.run(["adb",*args],input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=check,timeout=30)
@@ -332,7 +315,8 @@ def remote_point(bounds,xy):
     return [str(round(bounds[0]+xy[0]*(bounds[2]-bounds[0]))),
             str(round(bounds[1]+xy[1]*(bounds[3]-bounds[1])))]
 
-def visual_click_trials(rec):
+def visual_click_trials():
+    rec=VisualSampler(android_capture)
     results=[]
     for trial in ("maximize","restore"):
         target=await_message("visual_target",seconds=35)
@@ -378,7 +362,7 @@ def visual_click_trials(rec):
                             "distance_to_after":round(new,2),
                             "verified_host_rect":verified["rect"]}
                 return None
-            result=wait("Actual new window state in Android recording: "+trial,first_visible,15)
+            result=wait("Actual new window state in Android screenshot samples: "+trial,first_visible,15)
             results.append(result)
             REPORT["visual_feedback_trials"]=results
             snapshot(android_capture,"04b-visual-"+trial)
@@ -605,7 +589,6 @@ def stability_step():
 
 def android():
     global STAGE
-    rec=None
     success=False
     try:
         STAGE="install_release_apk"
@@ -633,8 +616,6 @@ def android():
         passed("Installed release Flutter APK and configured public relay through actual UI")
         STAGE="pairing"
         pair=await_message("pair",seconds=240,repeat="ready")
-        rec=Recording(android_capture,"Android-Release-UI.mp4")
-        rec.start()
         snapshot(android_capture,"01-pairing-form")
         android_field("9位设备号",pair["number"],identifier="p2p_remote_device_number")
         android_field("6位动态验证码",pair["code"],identifier="p2p_remote_pairing_code")
@@ -687,7 +668,7 @@ def android():
         snapshot(android_capture,"04-notepad-remote-text")
         passed("Remote text verified by Windows independently")
         STAGE="visual_feedback"
-        visual_click_trials(rec)
+        visual_click_trials()
         STAGE="actual_avc_performance"
         # Read only user-visible diagnostics backed by actual decoder callbacks.
         # Existing functional assertions and videos remain mandatory.
@@ -749,16 +730,12 @@ def android():
         find_android("请求连接",enabled=False,seconds=30,scroll=True)
         snapshot(android_capture,"05-disconnected")
         passed("Disconnected from full-screen actual app")
-        STAGE="recording"
-        rec.finish(True)
-        rec=None
         STAGE="host_confirmation"
         send("done")
         await_message("ack",seconds=300)
         success=True
         REPORT["passed"]=True
     finally:
-        if rec: rec.finish(False)
         # Clear test-only credential from the disposable installed app after capture.
         adb("shell","am","force-stop",PACKAGE,check=False)
         adb("shell","pm","clear",PACKAGE,check=False)
@@ -775,7 +752,6 @@ def windows():
     # UI automation is limited to the isolated GitHub Windows desktop.
     require(os.name=="nt","Windows runner required")
     ctypes.windll.user32.SetProcessDPIAware()
-    rec=None
     proc=None
     note=None
     window=None
@@ -869,8 +845,6 @@ def windows():
         STAGE="pairing"
         rendezvous("host")
         await_message("ready",seconds=300)
-        rec=Recording(capture,"Windows-Release-UI.mp4")
-        rec.start()
         snapshot(capture,"01-host-home")
         click("启动本机共享")
         number=clipboard_from("复制设备号",r"\d{9}")
@@ -1061,7 +1035,7 @@ def windows():
         STAGE="direct_keyboard"
         # Read real Notepad content without selecting, copying, moving the
         # caret or sending local keyboard input while remote input is in flight.
-        # The previous recording showed -LIVE9, -LIVE, and -LIVE OK, then just
+        # The previous screenshot sequence showed -LIVE9, -LIVE, and -LIVE OK, then just
         # T after the final poll. Ctrl+A/C polling could race remote typing.
         def direct_readback(expected):
             if ctypes.windll.user32.GetForegroundWindow()!=note._hWnd:
@@ -1123,14 +1097,10 @@ def windows():
         passed("Exact live typing and editing independently read from Notepad")
         STAGE="host_confirmation"
         await_message("done",seconds=300)
-        # Recording must be valid before the peer receives final success.
-        rec.finish(True)
-        rec=None
         send("ack")
         success=True
         REPORT["passed"]=True
     finally:
-        if rec: rec.finish(False)
         pyperclip.copy("")
         if note:
             # Disposable CI document only. Do not save user content.

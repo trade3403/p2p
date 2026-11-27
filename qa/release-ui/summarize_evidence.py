@@ -226,7 +226,15 @@ def summarize_release(report, role):
     duration = counter(report, "requested_stability_seconds")
     require(duration in (300, 1800), "unexpected stability duration")
     summary = {"schema_version": 1, "scope": "release UI on CI runners; not physical display latency",
-               "role": role, "recording": recording(report), "requested_stability_seconds": duration}
+               "role": role, "requested_stability_seconds": duration}
+    if report.get("recording_enabled") is False:
+        require("recording" not in report and "partial_recording_frames" not in report,
+                "unexpected recording evidence when disabled")
+        summary["recording_enabled"] = False
+    else:
+        # Backward-compatible validation of historical recordings only.
+        summary["recording_enabled"] = True
+        summary["recording"] = recording(report)
     if role == "windows":
         elapsed = number(report.get("peer_stability_elapsed_seconds"), "peer duration")
         count = counter(report, "peer_stability_sample_count")

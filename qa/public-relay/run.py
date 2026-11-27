@@ -233,36 +233,15 @@ def adb(*args, data=None, check=True):
     return subprocess.run(["adb",*args],input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=check)
 
 def pull_evidence():
-    # Collect first, encode separately. Always retain original frames if encoding fails.
+    # Only milestone screenshots and structured reports; no video frame sequence.
     listing=adb("shell","run-as","com.p2p.remote","ls","files/e2e",check=False)
     for name in listing.stdout.decode(errors="replace").splitlines():
         name=name.strip()
-        if not (name in ("report.json","phase.txt","ready.jpg","clicked.jpg","key.jpg","recovered.jpg")
-                or (name.startswith("frame-") and name.endswith(".jpg") and name[6:-4].isdigit())):
+        if name not in ("report.json","phase.txt","ready.jpg","clicked.jpg","key.jpg","recovered.jpg"):
             continue
         data=adb("exec-out","run-as","com.p2p.remote","cat","files/e2e/"+name,check=False)
         if data.returncode==0 and data.stdout:
             (OUT/name).write_bytes(data.stdout)
-def encode_evidence(expected_frames):
-    import imageio_ffmpeg
-    require(isinstance(expected_frames,int) and expected_frames>0,"No recorded frames in native report")
-    frames=sorted(OUT.glob("frame-*.jpg"))
-    require([f.name for f in frames]==[f"frame-{i:05d}.jpg" for i in range(expected_frames)],
-            "Missing or noncontiguous received video frames")
-    video=OUT/"Android-Received-Remote-Video.mp4"
-    result=subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),"-hide_banner","-loglevel","error","-y",
-        "-framerate","5","-i",str(OUT/"frame-%05d.jpg"),"-c:v","libx264","-pix_fmt","yuv420p",
-        str(video)],capture_output=True)
-    (OUT/"ffmpeg-log.txt").write_bytes(result.stderr)
-    require(result.returncode==0 and video.is_file() and video.stat().st_size>0,
-            "Could not encode received video MP4")
-    frame_count,duration=imageio_ffmpeg.count_frames_and_secs(str(video))
-    require(frame_count==expected_frames and duration>0,"MP4 decoded frame count differs from recorded evidence")
-    REPORT["video"]={"frames":frame_count,"duration_seconds":duration,"playback_fps":5}
-    for frame in frames:
-        frame.unlink()
-
-
 def make_lan_avc_fixture(ffmpeg,width=320,height=240):
     # Real encoded test pattern, not Windows capture or measured host performance.
     # AUD starts each access unit; closed GOPs repeat SPS/PPS for safe looping.
@@ -431,8 +410,7 @@ def android():
                 and switch.get("relay_socket_opens")==0 and switch.get("relay_video_bytes")==0
                 and switch.get("surface_errors")==0,
                 "Mandatory AVC resolution recovery evidence incomplete")
-    STAGE="video_encoding"
-    encode_evidence(native["metrics"]["recorded_frames"])
+    REPORT["recording_enabled"]=False
     STAGE="host_confirmation"
     end=time.monotonic()+15
     last=0

@@ -128,6 +128,27 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(result["stability"]["average_output_fps"], 10)
         self.assertNotIn("PRIVATE_MARKER", str(result))
 
+    def test_release_recording_disabled(self):
+        raw = report()
+        del raw["recording"]
+        raw["recording_enabled"] = False
+        result = summarize_release(raw, "android")
+        self.assertFalse(result["recording_enabled"])
+        self.assertNotIn("recording", result)
+        self.assertEqual(result["stability"]["average_output_fps"], 10)
+        raw["recording"] = {"frames": 20}
+        with self.assertRaises(ValueError):
+            summarize_release(raw, "android")
+
+    def test_windows_recording_disabled(self):
+        raw = dict(role="windows", passed=True, requested_stability_seconds=300,
+                   recording_enabled=False, peer_stability_elapsed_seconds=301,
+                   peer_stability_sample_count=10, avc_stability_text_verified=True)
+        self.assertFalse(summarize_release(raw, "windows")["recording_enabled"])
+        raw["avc_stability_text_verified"] = False
+        with self.assertRaises(ValueError):
+            summarize_release(raw, "windows")
+
     def test_reconnect_rejected(self):
         raw = report()
         raw["avc_stability"]["samples"][3]["relay_socket_opens"] = 2
