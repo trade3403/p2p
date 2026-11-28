@@ -499,6 +499,7 @@ where
                         "count": count.min(16), "selected": selected,
                         "lan_ipv4": lan_candidates.first(),
                         "lan_ipv4_candidates": &lan_candidates,
+                        "lan_readmission_v5": !is_lan_session && config.lan_direct.load(Ordering::SeqCst),
                         "allow_input": config.allow_input.load(Ordering::SeqCst),
                         "allow_clipboard": config.allow_clipboard.load(Ordering::SeqCst),
                         "video_target_bps": bitrate.load(Ordering::Relaxed),

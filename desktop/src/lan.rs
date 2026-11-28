@@ -23,6 +23,22 @@ const CHALLENGE_PAYLOAD: &[u8] = b"P2P-LAN-CHALLENGE-v4";
 const PROOF_PAYLOAD: &[u8] = b"P2P-LAN-PROOF-v4";
 const READY_PAYLOAD: &[u8] = b"P2P-LAN-READY-v4";
 const NONCE_LEN: usize = 32;
+const HELLO_V5: &[u8] = b"P2P-LAN-HELLO-v5";
+const CHALLENGE_V5: &[u8] = b"P2P-LAN-CHALLENGE-v5";
+const PROOF_V5: &[u8] = b"P2P-LAN-PROOF-v5";
+const PREPARED_V5: &[u8] = b"P2P-LAN-PREPARED-v5";
+const COMMIT_V5: &[u8] = b"P2P-LAN-COMMIT-v5";
+const READY_V5: &[u8] = b"P2P-LAN-READY-v5";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HandshakeVersion { V4, V5 }
+
+impl HandshakeVersion {
+    fn hello(self) -> &'static [u8] { match self { Self::V4 => HELLO_PAYLOAD, Self::V5 => HELLO_V5 } }
+    fn challenge(self) -> &'static [u8] { match self { Self::V4 => CHALLENGE_PAYLOAD, Self::V5 => CHALLENGE_V5 } }
+    fn proof(self) -> &'static [u8] { match self { Self::V4 => PROOF_PAYLOAD, Self::V5 => PROOF_V5 } }
+    fn ready(self) -> &'static [u8] { match self { Self::V4 => READY_PAYLOAD, Self::V5 => READY_V5 } }
+}
 
 fn transcript(prefix: &[u8], client: &[u8], server: &[u8]) -> Vec<u8> {
     [prefix, client, server].concat()
@@ -30,9 +46,16 @@ fn transcript(prefix: &[u8], client: &[u8], server: &[u8]) -> Vec<u8> {
 
 // Domain separation binds the business key to both fresh nonces.
 fn business_key(secret: &[u8;32], client: &[u8], server: &[u8]) -> [u8;32] {
+    versioned_business_key(secret, client, server, HandshakeVersion::V4)
+}
+
+fn versioned_business_key(secret: &[u8;32], client: &[u8], server: &[u8], version: HandshakeVersion) -> [u8;32] {
     use hmac::{Hmac, Mac};
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret).expect("32-byte HMAC key");
-    mac.update(b"P2P-LAN-BUSINESS-v4");
+    mac.update(match version {
+        HandshakeVersion::V4 => b"P2P-LAN-BUSINESS-v4",
+        HandshakeVersion::V5 => b"P2P-LAN-BUSINESS-v5",
+    });
     mac.update(client);
     mac.update(server);
     mac.finalize().into_bytes().into()
@@ -92,6 +115,24 @@ pub fn authorized_hello(secret: &[u8;32], packet: &[u8]) -> bool {
     hello_nonce(secret, packet).is_some()
 }
 
+// Decode only the two supported literal HELLO transcripts. Version is bound
+// to every subsequent message and the derived business key.
+fn versioned_hello(secret: &[u8;32], packet: &[u8]) -> Option<(HandshakeVersion, [u8;32])> {
+    let (kind, bytes) = protocol::decrypt(secret, packet).ok()?;
+    if kind != HELLO { return None; }
+    for version in [HandshakeVersion::V4, HandshakeVersion::V5] {
+        if let Some(nonce) = bytes.strip_prefix(version.hello()) {
+            return Some((version, nonce.try_into().ok()?));
+        }
+    }
+    None
+}
+
+fn matches_step(secret: &[u8;32], packet: &[u8], prefix: &[u8], client: &[u8], server: &[u8]) -> bool {
+    matches!(protocol::decrypt(secret, packet),
+        Ok((HELLO, bytes)) if bytes == transcript(prefix, client, server))
+}
+
 async fn accept_authorized(
     stream: TcpStream,
     config: &HostConfig,
@@ -107,8 +148,8 @@ async fn accept_authorized(
     let Message::Binary(packet) = incoming else {
         return Err(anyhow!("LAN authorization requires encrypted binary hello"));
     };
-    let client_nonce = hello_nonce(&config.secret, &packet)
-        .ok_or_else(|| anyhow!("invalid LAN v4 hello"))?;
+    let (version, client_nonce) = versioned_hello(&config.secret, &packet)
+        .ok_or_else(|| anyhow!("invalid LAN hello"))?;
     if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
         return Err(anyhow!("LAN sharing was stopped during authorization"));
     }
@@ -116,7 +157,7 @@ async fn accept_authorized(
     // authorize a different socket, even when the initial hello is replayed.
     let server_nonce = protocol::new_secret();
     let challenge = protocol::encrypt(&config.secret, READY,
-        &transcript(CHALLENGE_PAYLOAD, &client_nonce, &server_nonce))?;
+        &transcript(version.challenge(), &client_nonce, &server_nonce))?;
     tokio::time::timeout(Duration::from_secs(4), socket.send(Message::Binary(challenge)))
         .await.context("LAN challenge send timed out")??;
     let incoming = tokio::time::timeout(Duration::from_secs(4), socket.next())
@@ -125,18 +166,41 @@ async fn accept_authorized(
     let Message::Binary(proof) = incoming else {
         return Err(anyhow!("LAN challenge requires encrypted binary proof"));
     };
-    if !matches_proof(&config.secret, &proof, &client_nonce, &server_nonce) {
+    if !matches_step(&config.secret, &proof, version.proof(), &client_nonce, &server_nonce) {
         return Err(anyhow!("invalid LAN challenge proof"));
     }
     // A stop/disable may occur while the handshake is awaiting network I/O.
     if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
         return Err(anyhow!("LAN sharing was stopped during authorization"));
     }
+    if version == HandshakeVersion::V5 {
+        // PREPARED authenticates the candidate but never grants video or
+        // input ownership. The relay remains active while the peer decides.
+        let prepared = protocol::encrypt(&config.secret, READY,
+            &transcript(PREPARED_V5, &client_nonce, &server_nonce))?;
+        tokio::time::timeout(Duration::from_secs(4), socket.send(Message::Binary(prepared)))
+            .await.context("LAN prepared send timed out")??;
+        let incoming = tokio::time::timeout(Duration::from_secs(4), socket.next())
+            .await.context("LAN commit timed out")?
+            .ok_or_else(|| anyhow!("LAN candidate closed before commit"))??;
+        let Message::Binary(commit) = incoming else {
+            return Err(anyhow!("LAN commit requires encrypted binary message"));
+        };
+        if !matches_step(&config.secret, &commit, COMMIT_V5, &client_nonce, &server_nonce) {
+            return Err(anyhow!("invalid LAN commit"));
+        }
+        if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
+            return Err(anyhow!("LAN sharing stopped before commit"));
+        }
+        if config.lan_active.load(Ordering::SeqCst) {
+            return Err(anyhow!("LAN ownership already active"));
+        }
+    }
     let ack = protocol::encrypt(&config.secret, READY,
-        &transcript(READY_PAYLOAD, &client_nonce, &server_nonce))?;
+        &transcript(version.ready(), &client_nonce, &server_nonce))?;
     tokio::time::timeout(Duration::from_secs(4), socket.send(Message::Binary(ack)))
         .await.context("LAN ready send timed out")??;
-    Ok((socket, business_key(&config.secret, &client_nonce, &server_nonce)))
+    Ok((socket, versioned_business_key(&config.secret, &client_nonce, &server_nonce, version)))
 }
 
 // Ownership is scoped to the authorized session future, including error,
@@ -320,6 +384,114 @@ mod tests {
     #[tokio::test]
     async fn loopback_websocket_rejects_proof_after_sharing_stops() {
         exercise_handshake(true).await;
+    }
+
+    #[tokio::test]
+    async fn staged_v5_valid_commit_preserves_ownership_until_authorized() {
+        exercise_staged(0).await;
+    }
+
+    #[tokio::test]
+    async fn staged_v5_rejects_wrong_transcript_commit() {
+        exercise_staged(1).await;
+    }
+
+    #[tokio::test]
+    async fn staged_v5_rejects_commit_after_sharing_stops() {
+        exercise_staged(2).await;
+    }
+
+    #[tokio::test]
+    async fn staged_v5_cancel_does_not_acquire_ownership() {
+        exercise_staged(3).await;
+    }
+
+    // Actual TCP/WebSocket handshake, not a mock transport. The separate
+    // production lease tests cover real video and input ownership transitions.
+    async fn exercise_staged(mode: u8) {
+        use std::sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize}, Arc, mpsc};
+        use tokio_tungstenite::connect_async;
+        let key = protocol::new_secret();
+        let (messages, _rx) = mpsc::channel();
+        let config = HostConfig {
+            server: "wss://example.com".into(), relay_token: String::new(), secret: key,
+            running: Arc::new(AtomicBool::new(true)),
+            allow_input: Arc::new(AtomicBool::new(false)),
+            allow_clipboard: Arc::new(AtomicBool::new(false)),
+            monitor_index: Arc::new(AtomicUsize::new(0)),
+            lan_direct: Arc::new(AtomicBool::new(true)),
+            lan_active: Arc::new(AtomicBool::new(false)),
+            control_gate: Arc::new(host::ControlGate::default()),
+            allow_udp_probe: Arc::new(AtomicBool::new(false)),
+            allow_udp_preview: Arc::new(AtomicBool::new(false)),
+            udp_active: Arc::new(AtomicBool::new(false)),
+            h264_enabled: Arc::new(AtomicBool::new(false)),
+            target_fps: Arc::new(AtomicU32::new(6)),
+            sent_frames: Arc::new(AtomicU64::new(0)),
+            dropped_frames: Arc::new(AtomicU64::new(0)),
+            transport_video: Arc::new(host::TransportVideoStats::default()),
+            messages,
+        };
+        let running = config.running.clone();
+        let active = config.lan_active.clone();
+        let epoch = config.control_gate.video_epoch();
+        let initial_epoch = epoch.load(Ordering::SeqCst);
+        let listener = TcpListener::bind(("127.0.0.1",0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            accept_authorized(stream, &config).await.map(|(_, key)| key)
+        });
+        let (mut viewer, _) = connect_async(format!("ws://{address}/direct")).await.unwrap();
+        let client = protocol::new_secret();
+        viewer.send(Message::Binary(protocol::encrypt(&key, HELLO,
+            &transcript(HELLO_V5, &client, &[])).unwrap())).await.unwrap();
+        let challenge = tokio::time::timeout(Duration::from_secs(5), viewer.next())
+            .await.unwrap().unwrap().unwrap().into_data();
+        let (kind, bytes) = protocol::decrypt(&key, &challenge).unwrap();
+        assert_eq!(kind, READY);
+        let prefix = transcript(CHALLENGE_V5, &client, &[]);
+        let server = bytes.strip_prefix(prefix.as_slice()).unwrap();
+        assert_eq!(server.len(), NONCE_LEN);
+        viewer.send(Message::Binary(protocol::encrypt(&key, HELLO,
+            &transcript(PROOF_V5, &client, server)).unwrap())).await.unwrap();
+        let prepared = tokio::time::timeout(Duration::from_secs(5), viewer.next())
+            .await.unwrap().unwrap().unwrap().into_data();
+        assert_eq!(protocol::decrypt(&key, &prepared).unwrap(),
+            (READY, transcript(PREPARED_V5, &client, server)));
+        assert!(!active.load(Ordering::SeqCst));
+        assert_eq!(epoch.load(Ordering::SeqCst), initial_epoch);
+        assert!(!task.is_finished());
+        if mode == 3 {
+            viewer.close(None).await.unwrap();
+        } else {
+            if mode == 2 { running.store(false, Ordering::SeqCst); }
+            let commit = if mode == 1 {
+                transcript(COMMIT_V5, &client, &[0;32])
+            } else {
+                transcript(COMMIT_V5, &client, server)
+            };
+            viewer.send(Message::Binary(protocol::encrypt(&key, HELLO, &commit).unwrap()))
+                .await.unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(5), viewer.next()).await.unwrap();
+            if mode == 0 {
+                let packet = reply.unwrap().unwrap().into_data();
+                assert_eq!(protocol::decrypt(&key, &packet).unwrap(),
+                    (READY, transcript(READY_V5, &client, server)));
+            } else {
+                assert!(!matches!(reply, Some(Ok(Message::Binary(_)))));
+            }
+        }
+        let result = tokio::time::timeout(Duration::from_secs(6), task).await.unwrap().unwrap();
+        if mode == 0 {
+            let expected = versioned_business_key(&key, &client, server, HandshakeVersion::V5);
+            assert_eq!(result.unwrap(), expected);
+            assert_ne!(expected, business_key(&key, &client, server));
+        } else {
+            assert!(result.is_err());
+        }
+        assert!(!active.load(Ordering::SeqCst));
+        assert_eq!(epoch.load(Ordering::SeqCst), initial_epoch);
     }
 
     async fn exercise_handshake(stop_before_proof: bool) {
