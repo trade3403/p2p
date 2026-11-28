@@ -113,14 +113,42 @@ struct PixelCache {
     // Owns only a scaled image or compatibility screenshot. At native
     // DXGI resolution the worker borrows the readback buffer directly.
     rgba: Option<image::RgbaImage>,
-    yuv: Option<openh264::formats::YUVBuffer>,
+    yuv: I420Cache,
 }
 #[cfg(windows)]
 impl PixelCache {
     fn clear(&mut self) {
         self.geometry=None;
         self.rgba=None;
-        self.yuv=None;
+        self.yuv.invalidate();
+    }
+}
+
+// Keep allocation identity separate from pixel provenance. Every fresh
+// screenshot invalidates content, even when the allocation is reusable.
+#[cfg(windows)]
+#[derive(Default)]
+struct I420Cache {
+    buffer: Option<openh264::formats::YUVBuffer>,
+    size: Option<(usize,usize)>,
+    valid: bool,
+}
+#[cfg(windows)]
+impl I420Cache {
+    fn invalidate(&mut self) {self.valid=false;}
+    fn refresh(&mut self, raw:&image::RgbaImage) {
+        use openh264::formats::{RgbaSliceU8,YUVBuffer};
+        self.valid=false;
+        let size=(raw.width() as usize,raw.height() as usize);
+        if self.size!=Some(size) || self.buffer.is_none() {
+            self.buffer=Some(YUVBuffer::new(size.0,size.1));
+            self.size=Some(size);
+        }
+        self.buffer.as_mut().unwrap().read_rgb(RgbaSliceU8::new(raw.as_raw(),size));
+        self.valid=true;
+    }
+    fn current(&self)->Option<&openh264::formats::YUVBuffer> {
+        if self.valid {self.buffer.as_ref()} else {None}
     }
 }
 
@@ -322,7 +350,6 @@ fn capture(
     use image::{codecs::jpeg::JpegEncoder, RgbaImage};
     use openh264::{
         encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode},
-        formats::{RgbaSliceU8, YUVBuffer},
         OpenH264API,
     };
     use crate::dxgi_capture::{desktop_allowed,Read};
@@ -415,7 +442,7 @@ fn capture(
             if scaled.is_some() {stats.stages.resize_cpu.record(resize_start);}
             scaled
         };
-        cache.yuv=None;
+        cache.yuv.invalidate();
         cache.geometry=Some(geometry);
     } else if cache.rgba.is_some() {
         // Count only actual cached resized images; native-size reuse needs
@@ -462,15 +489,14 @@ fn capture(
             stats.stages.encoder_init.record(init);
             *encoder = Some(created?);
         }
-        if reused && cache.yuv.is_some() {
+        if reused && cache.yuv.current().is_some() {
             stats.yuv_cache_hits.fetch_add(1,Ordering::Relaxed);
         } else {
             let convert=Instant::now();
-            let source=RgbaSliceU8::new(image.as_raw(),(w as usize,h as usize));
-            cache.yuv=Some(YUVBuffer::from_rgb_source(source));
+            cache.yuv.refresh(image);
             stats.stages.color_i420.record(convert);
         }
-        let yuv=cache.yuv.as_ref().context("YUV frame missing")?;
+        let yuv=cache.yuv.current().context("YUV frame missing")?;
         let codec=Instant::now();
         let encoded = encoder.as_mut().context("encoder unavailable")?.encode(yuv);
         let bytes = encoded.map(|stream|stream.to_vec());
@@ -571,6 +597,42 @@ mod tests {
         let src=image::RgbaImage::from_pixel(64,64,image::Rgba([14,25,36,255]));
         assert_eq!(resize_avc(&src,8,8),
             image::imageops::resize(&src,8,8,image::imageops::FilterType::Triangle));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn i420_allocation_reused_but_content_invalidated_and_reconverted() {
+        use openh264::formats::{RgbaSliceU8,YUVBuffer,YUVSource};
+        let mut cache=I420Cache::default();
+        assert!(cache.current().is_none());
+        let first=image::RgbaImage::from_pixel(64,48,image::Rgba([200,20,10,255]));
+        cache.refresh(&first);
+        let initial=cache.current().unwrap().y().as_ptr();
+        let old=cache.current().unwrap().y().to_vec();
+        cache.invalidate();
+        assert!(cache.current().is_none());
+        let second=image::RgbaImage::from_fn(64,48,|x,y|image::Rgba([
+            (x*3) as u8,(y*5) as u8,((x+y)*2) as u8,255]));
+        cache.refresh(&second);
+        let actual=cache.current().unwrap();
+        let expected=YUVBuffer::from_rgb_source(RgbaSliceU8::new(second.as_raw(),(64,48)));
+        assert_eq!(actual.y().as_ptr(),initial);
+        assert_ne!(actual.y(),old.as_slice());
+        assert_eq!(actual.y(),expected.y());
+        assert_eq!(actual.u(),expected.u());
+        assert_eq!(actual.v(),expected.v());
+        cache.invalidate();
+        let resized=image::RgbaImage::from_pixel(32,24,image::Rgba([9,17,250,255]));
+        cache.refresh(&resized);
+        let actual=cache.current().unwrap();
+        assert_eq!(actual.y().len(),32*24);
+        assert_eq!(actual.u().len(),32*24/4);
+        let expected=YUVBuffer::from_rgb_source(RgbaSliceU8::new(resized.as_raw(),(32,24)));
+        assert_eq!(actual.y(),expected.y());
+        assert_eq!(actual.u(),expected.u());
+        assert_eq!(actual.v(),expected.v());
+        cache.invalidate();
+        assert!(cache.current().is_none());
     }
 
     #[cfg(windows)]

@@ -62,3 +62,8 @@ cc = "1"
 lto = false
 codegen-units = 16
 strip = true
+
+# Optimize the dependency's pixel conversion in development builds as well.
+# Release already optimizes this crate; no global test-profile change.
+[profile.dev.package.openh264]
+opt-level = 3
