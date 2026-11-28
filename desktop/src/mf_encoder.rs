@@ -26,17 +26,23 @@ impl HardwareEncoder {
             output:vec![0;2*1024*1024-4],w,h,nv12_valid:false})
     }
     pub fn dimensions(&self)->(u32,u32){(self.w,self.h)}
-    pub fn encode(&mut self,rgba:&[u8],reuse:bool)->Option<Vec<u8>> {
+    pub fn encode(&mut self,rgba:&[u8],reuse:bool,stages:&crate::video::EncodeStages)->Option<Vec<u8>> {
         if !reuse || !self.nv12_valid {
             self.nv12_valid=false;
-            rgba_to_nv12(rgba,self.w as usize,self.h as usize,&mut self.nv12)?;
+            let convert=std::time::Instant::now();
+            let converted=rgba_to_nv12(rgba,self.w as usize,self.h as usize,&mut self.nv12);
+            stages.color_nv12.record(convert);
+            converted?;
             self.nv12_valid=true;
         }
+        let codec=std::time::Instant::now();
         let mut n=0;
         let result=unsafe {p2p_mf_encode(self.handle.as_ptr(),self.nv12.as_ptr(),self.nv12.len(),
             self.output.as_mut_ptr(),self.output.len(),&mut n)};
-        if result!=0 || n==0 || n>self.output.len(){return None;}
-        Some(self.output[..n].to_vec())
+        let bytes=if result!=0 || n==0 || n>self.output.len(){None}
+            else {Some(self.output[..n].to_vec())};
+        stages.codec_mf_cpu.record(codec);
+        bytes
     }
 }
 impl Drop for HardwareEncoder {

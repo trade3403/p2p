@@ -80,7 +80,35 @@ def summarize_g1(rows):
 
 
 
-def summarize_g5b2(rows):
+ENCODE_STAGES = ("resize_cpu", "color_i420", "color_nv12", "codec_software", "codec_mf_cpu", "codec_mf_gpu", "codec_jpeg", "gpu_capture_convert", "encoder_init")
+def summarize_encode_stages(samples):
+    previous = None
+    for sample in samples:
+        stages = sample["timing"].get("encode_stages")
+        require(isinstance(stages, dict) and set(stages) == set(ENCODE_STAGES),
+                "missing or unknown encode stages")
+        for key in ENCODE_STAGES:
+            total = counter(stages[key], "total_us")
+            count = counter(stages[key], "samples")
+            require(count > 0 or total == 0, "nonzero time without stage samples")
+            if previous is not None:
+                dt = delta(previous[key], stages[key], "total_us")
+                dc = delta(previous[key], stages[key], "samples")
+                require(dc > 0 or dt == 0, "stage time increased without samples")
+        previous = stages
+    first = samples[0]["timing"]["encode_stages"]
+    last = samples[-1]["timing"]["encode_stages"]
+    result = {}
+    for key in ENCODE_STAGES:
+        total = delta(first[key], last[key], "total_us")
+        count = delta(first[key], last[key], "samples")
+        result[key] = dict(total_us=total, samples=count, mean_us=total/count if count else None)
+    require(sum(result[k]["samples"] for k in ("codec_software","codec_mf_cpu","codec_mf_gpu")) > 0,
+            "no actual AVC codec operations")
+    return result
+
+
+def summarize_g5b2(rows, require_encode_stages=False):
     """Recompute stable LAN measurements from the authenticated observer's raw
     counters. Metadata observation times and receiver windows are distinct."""
     stages = ["start", "relay_baseline", "lan_startup", "lan_stable", "relay_resumed", "passed"]
@@ -151,6 +179,22 @@ def summarize_g5b2(rows):
                   queue_drops=delta(first["timing"], last["timing"], "queue_drops"),
                   encoder_first=first["encoder"], encoder_last=last["encoder"],
                   capture_backend_first=first["capture_backend"], capture_backend_last=last["capture_backend"])
+    if require_encode_stages or any("encode_stages" in s["timing"] for s in samples):
+        stages = summarize_encode_stages(samples)
+        reported_stages = phase["performance"]["session_timing"].get("encode_stages")
+        require(isinstance(reported_stages, dict) and set(reported_stages) == set(stages),
+                "missing reported encode stages")
+        for key, expected in stages.items():
+            actual = reported_stages[key]
+            for field in ("total_us", "samples"):
+                require(counter(actual, field) == expected[field], "encode stage count mismatch")
+            if expected["mean_us"] is None:
+                require(actual.get("mean_us") is None, "unobserved stage mean must be null")
+            else:
+                require(math.isclose(number(actual.get("mean_us"), key), expected["mean_us"],
+                                     rel_tol=1e-9, abs_tol=1e-9), "encode stage mean mismatch")
+    else:
+        stages = None
     rates = dict(receiver_window_ms=window, received_avc_packets=packets, decoded_vcl=decoded,
                  encrypted_avc_bytes=received_bytes, received_avc_packets_per_second=packets*1000/window,
                  decoded_vcl_per_second=decoded*1000/window, encrypted_avc_bps=received_bytes*8000/window)
@@ -192,7 +236,9 @@ def summarize_g5b2(rows):
     final = data["passed"]["host"]
     require(final.get("active") is False and final.get("relay_socket_open") is False
             and counter(final, "relay_socket_opens") == 1, "Host socket not retired")
-    return {"schema_version": 1, "scope": "Windows runner loopback real capture; not physical display latency",
+    if stages is not None:
+        result["encode_stages"] = stages
+    return {"schema_version": 2 if stages is not None else 1, "scope": "Windows runner loopback real capture; not physical display latency",
             "dimensions": dimensions, **rates, "session_timing": result, "host_delta": counts,
             "host_minus_received_bytes": counts["lan_bytes"]-received_bytes,
             "host_minus_received_packets": counts["lan_frames"]-packets,
@@ -301,8 +347,9 @@ def main():
     raw = Path(source).read_text(encoding="utf-8")
     if role == "g1":
         summary = summarize_g1([json.loads(line) for line in raw.splitlines() if line.strip()])
-    elif role == "g5b2":
-        summary = summarize_g5b2([json.loads(line) for line in raw.splitlines() if line.strip()])
+    elif role in ("g5b2", "g6"):
+        summary = summarize_g5b2([json.loads(line) for line in raw.splitlines() if line.strip()],
+                                  require_encode_stages=role=="g6")
     else:
         require(role in ("windows", "android"), "invalid role")
         summary = summarize_release(json.loads(raw), role)

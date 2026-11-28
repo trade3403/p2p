@@ -19,9 +19,39 @@ pub struct VideoStats {
     pub yuv_cache_hits: AtomicU64,
     pub capture: Timing,
     pub encode: Timing,
+    pub stages: EncodeStages,
     pub send: Timing,
     pub queue_wait: Timing,
     pub queue_drops: AtomicU64,
+}
+
+// Actual operations, not estimates. Zero samples means unobserved.
+#[derive(Default)]
+pub struct EncodeStages {
+    pub resize_cpu: Timing,
+    pub color_i420: Timing,
+    pub color_nv12: Timing,
+    pub codec_software: Timing,
+    pub codec_mf_cpu: Timing,
+    pub codec_mf_gpu: Timing,
+    pub codec_jpeg: Timing,
+    pub gpu_capture_convert: Timing,
+    pub encoder_init: Timing,
+}
+impl EncodeStages {
+    pub fn snapshot(&self) -> std::collections::BTreeMap<&'static str, TimingSample> {
+        [
+            ("resize_cpu",self.resize_cpu.snapshot()),
+            ("color_i420",self.color_i420.snapshot()),
+            ("color_nv12",self.color_nv12.snapshot()),
+            ("codec_software",self.codec_software.snapshot()),
+            ("codec_mf_cpu",self.codec_mf_cpu.snapshot()),
+            ("codec_mf_gpu",self.codec_mf_gpu.snapshot()),
+            ("codec_jpeg",self.codec_jpeg.snapshot()),
+            ("gpu_capture_convert",self.gpu_capture_convert.snapshot()),
+            ("encoder_init",self.encoder_init.snapshot()),
+        ].into_iter().collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -292,7 +322,9 @@ fn capture(
         if gpu.as_ref().is_some_and(|g|!g.matches(geometry,profile)){*gpu=None;}
         if gpu.is_none() {
             desktop_capture.clear();cache.clear();*hardware=None;*encoder=None;
+            let init=Instant::now();
             *gpu=GpuEncoder::new(geometry,profile,dimensions(info.width,info.height));
+            stats.stages.encoder_init.record(init);
             if gpu.is_none(){*gpu_failed=true;}
         }
         if let Some(g)=gpu.as_mut() {
@@ -307,6 +339,10 @@ fn capture(
                     else{stats.reused_frames.fetch_add(1,Ordering::Relaxed);}
                     stats.capture.record_us(capture_us);
                     stats.encode.record_us(encode_us);
+                    // GPU read includes capture, video processor resize and
+                    // conversion. Do not invent separate GPU stage durations.
+                    stats.stages.gpu_capture_convert.record_us(capture_us);
+                    stats.stages.codec_mf_gpu.record_us(encode_us);
                     actual_encoder.store(3,Ordering::Relaxed);
                     return Ok(Some((protocol::AVC,packet)));
                 }
@@ -345,13 +381,18 @@ fn capture(
     stats.capture.record(capture_start);
     let encode_start=Instant::now();
     if !reused {
+        let resize_start=Instant::now();
         cache.rgba=if let Some(rgba)=fallback {
             // Compatibility capture already owns its source buffer.
-            Some(scale_if_needed(&rgba)?.unwrap_or(rgba))
+            let scaled=scale_if_needed(&rgba)?;
+            if scaled.is_some() {stats.stages.resize_cpu.record(resize_start);}
+            Some(scaled.unwrap_or(rgba))
         } else {
             // DXGI owns the raw image throughout this synchronous encode.
             // Resize directly from it, or borrow it at matching dimensions.
-            scale_if_needed(desktop_capture.image().context("DXGI frame missing")?)?
+            let scaled=scale_if_needed(desktop_capture.image().context("DXGI frame missing")?)?;
+            if scaled.is_some() {stats.stages.resize_cpu.record(resize_start);}
+            scaled
         };
         cache.yuv=None;
         cache.geometry=Some(geometry);
@@ -368,11 +409,13 @@ fn capture(
         // Hardware is classified only after a successfully emitted, validated AVC unit.
         if hardware.as_ref().is_some_and(|e|e.dimensions()!=(w,h)) { *hardware=None; }
         if hardware.is_none() && !*hardware_failed {
+            let init=Instant::now();
             *hardware=crate::mf_encoder::HardwareEncoder::new(w,h,profile.1,profile.0);
+            stats.stages.encoder_init.record(init);
             if hardware.is_none() { *hardware_failed=true; }
         }
         if let Some(hw)=hardware.as_mut() {
-            if let Some(bytes)=hw.encode(image.as_raw(),reused) {
+            if let Some(bytes)=hw.encode(image.as_raw(),reused,&stats.stages) {
                 let mut packet=Vec::with_capacity(bytes.len()+4);
                 packet.extend_from_slice(&(w as u16).to_be_bytes());
                 packet.extend_from_slice(&(h as u16).to_be_bytes());
@@ -393,17 +436,25 @@ fn capture(
                 .intra_frame_period(IntraFramePeriod::from_num_frames(profile.1))
                 .rate_control_mode(RateControlMode::Bitrate)
                 .skip_frames(false);
-            *encoder = Some(Encoder::with_api_config(OpenH264API::from_source(), options)?);
+            let init=Instant::now();
+            let created=Encoder::with_api_config(OpenH264API::from_source(), options);
+            stats.stages.encoder_init.record(init);
+            *encoder = Some(created?);
         }
         if reused && cache.yuv.is_some() {
             stats.yuv_cache_hits.fetch_add(1,Ordering::Relaxed);
         } else {
+            let convert=Instant::now();
             let source=RgbaSliceU8::new(image.as_raw(),(w as usize,h as usize));
             cache.yuv=Some(YUVBuffer::from_rgb_source(source));
+            stats.stages.color_i420.record(convert);
         }
         let yuv=cache.yuv.as_ref().context("YUV frame missing")?;
-        let stream = encoder.as_mut().context("encoder unavailable")?.encode(yuv)?;
-        let bytes = stream.to_vec();
+        let codec=Instant::now();
+        let encoded = encoder.as_mut().context("encoder unavailable")?.encode(yuv);
+        let bytes = encoded.map(|stream|stream.to_vec());
+        stats.stages.codec_software.record(codec);
+        let bytes=bytes?;
         if bytes.is_empty() { return Ok(None); }
         let mut output = Vec::with_capacity(bytes.len() + 4);
         output.extend_from_slice(&(w as u16).to_be_bytes());
@@ -415,7 +466,10 @@ fn capture(
         Ok(Some((protocol::AVC, output)))
     } else {
         let mut bytes = Vec::new();
-        JpegEncoder::new_with_quality(&mut bytes, 58).encode_image(image)?;
+        let codec=Instant::now();
+        let encoded=JpegEncoder::new_with_quality(&mut bytes, 58).encode_image(image);
+        stats.stages.codec_jpeg.record(codec);
+        encoded?;
         actual_encoder.store(0,Ordering::Relaxed);
         stats.encode.record(encode_start);
         Ok(Some((protocol::FRAME, bytes)))

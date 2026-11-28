@@ -60,6 +60,29 @@ class EvidenceTests(unittest.TestCase):
         self.assertAlmostEqual(result["session_timing"]["encode"]["mean_us"], 342435.04761904763)
         self.assertEqual(result["host_delta"]["relay_bytes"], 0)
 
+    def test_g6_encode_stages(self):
+        # Synthetic stage-counter additions to historical report for validator tests only.
+        from summarize_evidence import ENCODE_STAGES
+        rows = actual_g5b2()
+        with self.assertRaises(ValueError):
+            summarize_g5b2(rows, require_encode_stages=True)
+        stable = rows[3]["data"]
+        for i, sample in enumerate(stable["lan"]["timing_samples"]):
+            sample["timing"]["encode_stages"] = {
+                key: dict(total_us=i*100 if key=="codec_software" else 0,
+                          samples=i if key=="codec_software" else 0) for key in ENCODE_STAGES}
+        stages = {key: dict(total_us=400 if key=="codec_software" else 0,
+                            samples=4 if key=="codec_software" else 0,
+                            mean_us=100.0 if key=="codec_software" else None)
+                  for key in ENCODE_STAGES}
+        stable["performance"]["session_timing"]["encode_stages"] = stages
+        result=summarize_g5b2(rows,require_encode_stages=True)
+        self.assertEqual(result["session_timing"]["encode_stages"]["codec_software"]["mean_us"],100)
+        self.assertIsNone(result["session_timing"]["encode_stages"]["codec_mf_gpu"]["mean_us"])
+        stages["codec_mf_gpu"]["mean_us"]=0
+        with self.assertRaises(ValueError):
+            summarize_g5b2(rows,require_encode_stages=True)
+
     def test_g5b2_rejects_missing_or_inconsistent_measurements(self):
         def stable(rows): return rows[3]["data"]
         mutations = [

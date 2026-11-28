@@ -521,6 +521,7 @@ where
                             "capture": capture_timing, "encode": encode_timing,
                             "send": send_timing, "queue_wait": queue_timing,
                             "queue_drops": video_stats.queue_drops.load(Ordering::Relaxed),
+                            "encode_stages": video_stats.stages.snapshot(),
                         },
                         "fresh_frames": video_stats.fresh_frames.load(Ordering::Relaxed),
                         "reused_frames": video_stats.reused_frames.load(Ordering::Relaxed),

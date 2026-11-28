@@ -846,6 +846,7 @@ struct SessionTiming {
     send: crate::video::TimingSample,
     queue_wait: crate::video::TimingSample,
     queue_drops: u64,
+    encode_stages: std::collections::BTreeMap<String,crate::video::TimingSample>,
 }
 #[derive(Debug, serde::Serialize)]
 struct SessionTimingObservation {
@@ -874,12 +875,25 @@ fn timing_interval(samples: &[SessionTimingObservation]) -> serde_json::Value {
     let (a,b) = (&first.timing,&last.timing);
     assert_eq!(a.send.samples,a.queue_wait.samples);
     assert_eq!(b.send.samples,b.queue_wait.samples);
+    let mut stages=std::collections::BTreeMap::new();
+    for (name, end) in &b.encode_stages {
+        let first=a.encode_stages.get(name).expect("missing initial stage");
+        for pair in samples.windows(2) {
+            assert!(pair[1].timing.encode_stages[name].delta(pair[0].timing.encode_stages[name]).is_some());
+        }
+        let d=end.delta(*first).expect("encode stage counter regressed");
+        assert!(d.samples>0 || d.total_us==0);
+        stages.insert(name.clone(),serde_json::json!({"total_us":d.total_us,"samples":d.samples,
+            "mean_us":if d.samples>0 {Some(d.total_us as f64/d.samples as f64)} else {None}}));
+    }
+    assert_eq!(stages.len(),9);
     serde_json::json!({
         "elapsed_observation_ms":last.observed_ms-first.observed_ms,
         "metadata_samples":samples.len(),
         "capture":stage(a.capture,b.capture),"encode":stage(a.encode,b.encode),
         "send":stage(a.send,b.send),"queue_wait":stage(a.queue_wait,b.queue_wait),
         "queue_drops":b.queue_drops-a.queue_drops,
+        "encode_stages":stages,
         "encoder_first":first.encoder,"encoder_last":last.encoder,
         "capture_backend_first":first.capture_backend,"capture_backend_last":last.capture_backend
     })
