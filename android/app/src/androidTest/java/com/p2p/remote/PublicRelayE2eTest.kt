@@ -756,11 +756,13 @@ class PublicRelayE2eTest {
                         val relay=main { field.get(engine) as WebSocket }
                         val prior=snap()
                         val upgrade=AndroidRemoteEngine::class.java.getDeclaredMethod("tryAdvertisedLan",
-                            WebSocket::class.java,List::class.java).apply { isAccessible=true }
+                            WebSocket::class.java,List::class.java,Boolean::class.javaPrimitiveType!!).apply { isAccessible=true }
                         val started=SystemClock.elapsedRealtime()
                         // Only the metadata source is injected; ranking, socket
                         // creation, encryption, timeout and retry are production.
-                        main { upgrade.invoke(engine,relay,listOf(firstAddress,secondAddress)) }
+                        // This fixture exercises the original v4 initial upgrade, not
+                        // the separate v5 readmission protocol.
+                        main { upgrade.invoke(engine,relay,listOf(firstAddress,secondAddress),false) }
                         stage="multi_candidate_first_stalled"
                         await("first real candidate authenticated HELLO",8_000) { first.authenticatedHellos==1L }
                         stage="multi_candidate_second_verified"
