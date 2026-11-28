@@ -68,3 +68,11 @@ impl DesktopCapture {
         if desktop_allowed(){Read::Fallback}else{self.clear();Read::Blocked}
     }
 }
+
+#[cfg(test)]
+#[test]
+fn d3d11_warp_resource_reuse_and_fresh_readback() {
+    extern "C" {fn p2p_dxgi_test_resource_reuse()->i32;}
+    // Real WARP textures; this does not establish GPU/MFT availability.
+    assert_eq!(unsafe {p2p_dxgi_test_resource_reuse()},1);
+}

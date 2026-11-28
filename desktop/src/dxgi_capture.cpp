@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <cwchar>
+#include <initializer_list>
 using Microsoft::WRL::ComPtr;
 namespace {
 bool normal_desktop(HDESK d) {
@@ -35,9 +36,29 @@ struct Capture {
     ComPtr<ID3D11VideoContext> vc;
     ComPtr<ID3D11VideoProcessorEnumerator> ve;
     ComPtr<ID3D11VideoProcessor> vp;
+    // The BGRA input is only consumed by the video processor on this
+    // immediate context; it is never passed to an MFT.
+    ComPtr<ID3D11Texture2D> bgra;
+    ComPtr<ID3D11VideoProcessorInputView> input_view;
     ComPtr<ID3D11Texture2D> nv12;
     UINT ow=0,oh=0;
 };
+bool ensure_bgra(Capture& s) {
+    if(s.bgra) return true;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width=s.w;td.Height=s.h;td.MipLevels=1;td.ArraySize=1;
+    td.Format=DXGI_FORMAT_B8G8R8A8_UNORM;td.SampleDesc.Count=1;
+    td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    return SUCCEEDED(s.device->CreateTexture2D(&td,nullptr,&s.bgra));
+}
+bool ensure_staging(Capture& s) {
+    if(s.staging) return true;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width=s.w;td.Height=s.h;td.MipLevels=1;td.ArraySize=1;
+    td.Format=DXGI_FORMAT_B8G8R8A8_UNORM;td.SampleDesc.Count=1;
+    td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    return SUCCEEDED(s.device->CreateTexture2D(&td,nullptr,&s.staging));
+}
 struct FrameGuard {
     IDXGIOutputDuplication* duplication;
     ~FrameGuard(){ if(duplication) duplication->ReleaseFrame(); }
@@ -78,11 +99,7 @@ extern "C" void* p2p_dxgi_create(int32_t x,int32_t y,uint32_t w,uint32_t h) noex
                 s->duplication->GetDesc(&dd);
                 if(dd.ModeDesc.Width!=w || dd.ModeDesc.Height!=h ||
                    dd.ModeDesc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM) return nullptr;
-                D3D11_TEXTURE2D_DESC td{};
-                td.Width=w; td.Height=h; td.MipLevels=1; td.ArraySize=1;
-                td.Format=DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count=1;
-                td.Usage=D3D11_USAGE_STAGING; td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-                if(FAILED(s->device->CreateTexture2D(&td,nullptr,&s->staging))) return nullptr;
+                // GPU-only sessions never need a CPU-readable staging texture.
                 s->w=w;s->h=h;
                 return s.release();
             }
@@ -107,7 +124,9 @@ extern "C" int p2p_dxgi_read(void* handle,uint8_t* rgba,size_t n) noexcept {
         ComPtr<ID3D11Texture2D> texture;
         if(FAILED(resource.As(&texture))) return -1;
         D3D11_TEXTURE2D_DESC td{};texture->GetDesc(&td);
-        if(td.Width!=s.w || td.Height!=s.h || td.Format!=DXGI_FORMAT_B8G8R8A8_UNORM) return -1;
+        if(td.Width!=s.w || td.Height!=s.h || td.Format!=DXGI_FORMAT_B8G8R8A8_UNORM ||
+           td.MipLevels!=1 || td.ArraySize!=1 || td.SampleDesc.Count!=1 || td.SampleDesc.Quality!=0) return -1;
+        if(!ensure_staging(s)) return -1;
         s.context->CopyResource(s.staging.Get(),texture.Get());
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if(FAILED(s.context->Map(s.staging.Get(),0,D3D11_MAP_READ,0,&mapped))) return -1;
@@ -148,6 +167,9 @@ extern "C" void* p2p_dxgi_gpu_device(void* handle,uint32_t w,uint32_t h,uint32_t
            FAILED(s.ve->CheckVideoProcessorFormat(DXGI_FORMAT_NV12,&out)) ||
            !(in&D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) || !(out&D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) ||
            FAILED(s.vd->CreateVideoProcessor(s.ve.Get(),0,&s.vp))) return nullptr;
+        // Input views belong to the processor enumerator, and cached
+        // output must not survive a processor/profile rebuild.
+        s.input_view.Reset();s.bgra.Reset();s.nv12.Reset();
         s.ow=w;s.oh=h;
         RECT src{0,0,LONG(s.w),LONG(s.h)},dst{0,0,LONG(w),LONG(h)};
         s.vc->VideoProcessorSetStreamFrameFormat(s.vp.Get(),0,D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
@@ -178,15 +200,16 @@ extern "C" int p2p_dxgi_gpu_read(void* handle,void** texture) noexcept {
         ComPtr<ID3D11Texture2D> source;
         if(FAILED(resource.As(&source))) return -1;
         D3D11_TEXTURE2D_DESC sd{};source->GetDesc(&sd);
-        if(sd.Width!=s.w || sd.Height!=s.h || sd.Format!=DXGI_FORMAT_B8G8R8A8_UNORM) return -1;
-        // GPU copy before ReleaseFrame; VP input views may reject duplication textures.
-        sd.Usage=D3D11_USAGE_DEFAULT;sd.CPUAccessFlags=0;sd.MiscFlags=0;sd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-        ComPtr<ID3D11Texture2D> bgra;
-        if(FAILED(s.device->CreateTexture2D(&sd,nullptr,&bgra))) return -1;
-        s.context->CopyResource(bgra.Get(),source.Get());
-        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};iv.ViewDimension=D3D11_VPIV_DIMENSION_TEXTURE2D;
-        ComPtr<ID3D11VideoProcessorInputView> input;
-        if(FAILED(s.vd->CreateVideoProcessorInputView(bgra.Get(),s.ve.Get(),&iv,&input))) return -1;
+        if(sd.Width!=s.w || sd.Height!=s.h || sd.Format!=DXGI_FORMAT_B8G8R8A8_UNORM ||
+           sd.MipLevels!=1 || sd.ArraySize!=1 || sd.SampleDesc.Count!=1 || sd.SampleDesc.Quality!=0) return -1;
+        // Same immediate context orders the previous VP read before this
+        // copy. The MFT only receives the separate immutable NV12 output.
+        if(!ensure_bgra(s)) return -1;
+        if(!s.input_view) {
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};iv.ViewDimension=D3D11_VPIV_DIMENSION_TEXTURE2D;
+            if(FAILED(s.vd->CreateVideoProcessorInputView(s.bgra.Get(),s.ve.Get(),&iv,&s.input_view))) return -1;
+        }
+        s.context->CopyResource(s.bgra.Get(),source.Get());
         D3D11_TEXTURE2D_DESC td{};
         td.Width=s.ow;td.Height=s.oh;td.MipLevels=1;td.ArraySize=1;td.SampleDesc.Count=1;
         td.Format=DXGI_FORMAT_NV12;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET;
@@ -196,10 +219,43 @@ extern "C" int p2p_dxgi_gpu_read(void* handle,void** texture) noexcept {
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ov{};ov.ViewDimension=D3D11_VPOV_DIMENSION_TEXTURE2D;
         ComPtr<ID3D11VideoProcessorOutputView> output;
         if(FAILED(s.vd->CreateVideoProcessorOutputView(nv.Get(),s.ve.Get(),&ov,&output))) return -1;
-        D3D11_VIDEO_PROCESSOR_STREAM stream{};stream.Enable=TRUE;stream.pInputSurface=input.Get();
+        D3D11_VIDEO_PROCESSOR_STREAM stream{};stream.Enable=TRUE;stream.pInputSurface=s.input_view.Get();
         if(FAILED(s.vc->VideoProcessorBlt(s.vp.Get(),output.Get(),0,1,&stream))) return -1;
         if(!interactive()) return -2;
         s.nv12=nv;*texture=s.nv12.Get();return 1;
     } catch(...) {return -1;}
 }
 extern "C" void p2p_dxgi_destroy(void* handle) noexcept { delete static_cast<Capture*>(handle); }
+
+// Regression on WARP (software D3D11), not a physical GPU performance test.
+// Verify the production resource helpers with real texture copies/readback.
+extern "C" int p2p_dxgi_test_resource_reuse() noexcept {
+    try {
+        Capture s;
+        s.w=64;s.h=32;
+        if(FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,
+            &s.device,nullptr,&s.context))) return 0;
+        if(s.staging || s.bgra || !ensure_bgra(s) || s.staging) return 0;
+        auto* identity=s.bgra.Get();
+        if(!ensure_bgra(s) || s.bgra.Get()!=identity || s.staging) return 0;
+        if(!ensure_staging(s)) return 0;
+        auto* staging=s.staging.Get();
+        if(!ensure_staging(s) || s.staging.Get()!=staging) return 0;
+        for(uint8_t value : {uint8_t(17),uint8_t(231)}) {
+            uint8_t pixels[64*32*4];
+            for(auto& byte:pixels) byte=value;
+            s.context->UpdateSubresource(s.bgra.Get(),0,nullptr,pixels,64*4,0);
+            s.context->CopyResource(s.staging.Get(),s.bgra.Get());
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if(FAILED(s.context->Map(s.staging.Get(),0,D3D11_MAP_READ,0,&mapped))) return 0;
+            MapGuard map{s.context.Get(),s.staging.Get()};
+            if(!mapped.pData || mapped.RowPitch<64*4) return 0;
+            for(UINT y=0;y<32;++y) {
+                auto* row=static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch;
+                for(UINT x=0;x<64*4;++x) if(row[x]!=value) return 0;
+            }
+        }
+        return 1;
+    } catch(...) {return 0;}
+}
