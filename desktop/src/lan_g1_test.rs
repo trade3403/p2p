@@ -202,8 +202,8 @@ async fn windows_real_host_lan_suppresses_relay_video() {
         let lan_task = tokio::task::spawn_local(async move {
             let (stream, address) = lan_listener.accept().await.unwrap();
             assert!(is_lan_address(address.ip()));
-            let (socket, key) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
-            serve_authorized_session(&lan_config, socket, key, address.ip()).await;
+            let (socket, key, lease) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
+            serve_authorized_session(&lan_config, socket, key, address.ip(), lease).await;
         });
         let (mut socket, _) = timeout(Duration::from_secs(10),
             connect_async(format!("ws://{lan_address}/direct"))).await.unwrap().unwrap();
@@ -350,8 +350,8 @@ async fn windows_real_host_lan_exit_cleanup() {
             let lan_config = config.clone();
             let task = tokio::task::spawn_local(async move {
                 let (stream, address) = listener.accept().await.unwrap();
-                let (socket, key) = accept_authorized(stream, &lan_config).await.unwrap();
-                serve_authorized_session(&lan_config, socket, key, address.ip()).await;
+                let (socket, key, lease) = accept_authorized(stream, &lan_config).await.unwrap();
+                serve_authorized_session(&lan_config, socket, key, address.ip(), lease).await;
             });
             let (mut socket, _) = timeout(Duration::from_secs(10),
                 connect_async(format!("ws://{address}/direct"))).await.unwrap().unwrap();
@@ -652,8 +652,8 @@ async fn windows_real_host_input_handoff() {
         let lan_task = tokio::task::spawn_local(async move {
             let (stream, address) = lan_listener.accept().await.unwrap();
             assert!(is_lan_address(address.ip()));
-            let (socket, key) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
-            serve_authorized_session(&lan_config, socket, key, address.ip()).await;
+            let (socket, key, lease) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
+            serve_authorized_session(&lan_config, socket, key, address.ip(), lease).await;
         });
         let (mut socket, _) = timeout(Duration::from_secs(10),
             connect_async(format!("ws://{lan_address}/direct"))).await.unwrap().unwrap();
@@ -1000,8 +1000,8 @@ async fn windows_real_host_lan_avc_and_relay_recovery() {
         let lan_task = tokio::task::spawn_local(async move {
             let (stream, address) = lan_listener.accept().await.unwrap();
             assert!(is_lan_address(address.ip()));
-            let (socket, key) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
-            serve_authorized_session(&lan_config, socket, key, address.ip()).await;
+            let (socket, key, lease) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
+            serve_authorized_session(&lan_config, socket, key, address.ip(), lease).await;
         });
         let (mut socket, _) = timeout(Duration::from_secs(10),
             connect_async(format!("ws://{lan_address}/direct"))).await.unwrap().unwrap();
@@ -1153,8 +1153,8 @@ async fn windows_real_host_negotiated_avc_handoff() {
         let lan_task = tokio::task::spawn_local(async move {
             let (stream, address) = lan_listener.accept().await.unwrap();
             assert!(is_lan_address(address.ip()));
-            let (socket, key) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
-            serve_authorized_session(&lan_config, socket, key, address.ip()).await;
+            let (socket, key, lease) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
+            serve_authorized_session(&lan_config, socket, key, address.ip(), lease).await;
         });
         let (mut socket, _) = timeout(Duration::from_secs(10),
             connect_async(format!("ws://{lan_address}/direct"))).await.unwrap().unwrap();

@@ -57,6 +57,9 @@ class LanReadmissionCandidateTest {
         val commits = AtomicInteger()
         val failure = AtomicReference<String>()
         val actualKey = AtomicReference<ByteArray>()
+        val promotedSocket = AtomicReference<WebSocket>()
+        val fixtureSocket = AtomicReference<WebSocket>()
+        val businessReceived = CountDownLatch(1)
         val fixtureError = AtomicReference<Throwable>()
         val fixtureClient = AtomicReference<ByteArray>()
         server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
@@ -87,6 +90,7 @@ class LanReadmissionCandidateTest {
                     val packet = encryptEnginePacket(root,7,response)
                     if (tamper && step == 2) packet[packet.lastIndex] = (packet.last().toInt() xor 1).toByte()
                     check(webSocket.send(packet.toByteString()))
+                    fixtureSocket.set(webSocket)
                 } catch (t: Throwable) {
                     fixtureError.set(t)
                     webSocket.cancel()
@@ -101,7 +105,15 @@ class LanReadmissionCandidateTest {
             val c = LanReadmissionCandidate(http,Request.Builder().url(server.url("/direct")).build(),
                 root,clock,15_000L,{ task -> owner.execute(task) },
                 { prepared.countDown() },
-                { _, key -> actualKey.set(key); done.countDown() },
+                { pending, key ->
+                    actualKey.set(key)
+                    promotedSocket.set(pending.promote(object : WebSocketListener() {
+                        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                            if (bytes.toByteArray().contentEquals(ByteArray(300){42})) businessReceived.countDown()
+                        }
+                    }))
+                    done.countDown()
+                },
                 { _, reason -> failure.set(reason); done.countDown() })
             candidate = c
             owner.submit { c.start() }.get(5,TimeUnit.SECONDS)
@@ -126,10 +138,14 @@ class LanReadmissionCandidateTest {
                     mac.update(prefix("BUSINESS"))
                     mac.update(fixtureClient.get())
                     assertArrayEquals(mac.doFinal(host),actualKey.get())
+                    assertNotNull(promotedSocket.get())
+                    assertTrue(fixtureSocket.get().send(ByteArray(300){42}.toByteString()))
+                    assertTrue(businessReceived.await(5,TimeUnit.SECONDS))
                 }
             }
             assertNull(fixtureError.get())
         } finally {
+            promotedSocket.get()?.cancel()
             candidate?.let { c -> owner.submit { c.cancel() }.get(5,TimeUnit.SECONDS) }
             http.dispatcher.executorService.shutdown()
             http.connectionPool.evictAll()

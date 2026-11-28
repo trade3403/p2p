@@ -59,8 +59,9 @@ internal class AndroidRemoteEngine(
     private var networkRetryWakes = 0L
     private val networkObserver = AndroidNetworkObserver(context, main) { change -> onNetworkChanged(change) }
     private val lanAttempt = LanCandidatePlan()
-    // Admission observation only until parallel authenticated handoff is wired.
     private val lanReadmission = LanReadmissionPolicy()
+    private var readmissionCandidate: LanReadmissionCandidate? = null
+    private var readmissionReservation: LanReadmissionPolicy.Reservation? = null
     private var usingLan = false
     @Volatile private var lanVerified = false
     private var transport = "未连接"
@@ -544,8 +545,23 @@ internal class AndroidRemoteEngine(
         val handshake = if (tryLan) LanHandshake() else null
         val replayGuard = if (tryLan) LanSequence() else null
         lanSequence = replayGuard
-        val videoCounters = transportVideo
-        val ws = client.newWebSocket(request, object : WebSocketListener() {
+        val ws = client.newWebSocket(request,
+            sessionListener(tryLan, candidate, handshake, replayGuard, transportVideo))
+        socket = ws
+        if (candidate != null) main.postDelayed({
+            if (socket === ws && requested && !lanVerified) expireLanCandidate(ws)
+        }, (candidate.deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+    }
+
+    // The v5 candidate installs this same business listener after READY.
+    // Its v4 handshake callback is never invoked for a promoted socket.
+    private fun sessionListener(
+        tryLan: Boolean,
+        candidate: LanCandidatePlan.Attempt?,
+        handshake: LanHandshake?,
+        replayGuard: LanSequence?,
+        videoCounters: TransportVideo,
+    ): WebSocketListener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 main.post {
                     if (socket === webSocket && requested) {
@@ -595,7 +611,7 @@ internal class AndroidRemoteEngine(
                 }
                 // Handle LAN handshake before the decoder gate; all transcript
                 // state is owned by the main thread and bound to this socket.
-                if (tryLan && bytes.size > 0 && (bytes[0].toInt() and 255) == 7) {
+                if (tryLan && handshake != null && bytes.size > 0 && (bytes[0].toInt() and 255) == 7) {
                     try {
                         val key = secret ?: return
                         val (kind, payload) = decryptEnginePacket(key, bytes.toByteArray())
@@ -791,6 +807,8 @@ internal class AndroidRemoteEngine(
             override fun onFailure(webSocket: WebSocket, error: Throwable, response: Response?) {
                 main.post {
                     if (socket !== webSocket || !requested) return@post
+                    cancelReadmission()
+                    lanReadmission.networkChanged(SystemClock.elapsedRealtime())
                     socket = null
                     lanBusinessKey = null
                     lanSequence = null
@@ -833,6 +851,8 @@ internal class AndroidRemoteEngine(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 main.post {
                     if (socket !== webSocket || !requested) return@post
+                    cancelReadmission()
+                    lanReadmission.networkChanged(SystemClock.elapsedRealtime())
                     socket = null
                     lanBusinessKey = null
                     lanSequence = null
@@ -859,12 +879,7 @@ internal class AndroidRemoteEngine(
                     }
                 }
             }
-        })
-        socket = ws
-        if (candidate != null) main.postDelayed({
-            if (socket === ws && requested && !lanVerified) expireLanCandidate(ws)
-        }, (candidate.deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
-    }
+        }
 
     // Timeout is handled directly on the main thread; do not wait for an
     // OkHttp failure callback. A late callback cannot affect the next socket.
@@ -908,10 +923,11 @@ internal class AndroidRemoteEngine(
         if (!requested || socket !== current || usingLan) return
         val eligible = LanEndpoint.eligibleAdvertised(candidates)
         if (lanAttempt.attempted) {
-            // Recheck current subnet and authenticated metadata on each observation.
-            // Never close WSS or send a probe in this diagnostic-only batch.
-            lanReadmission.observe(SystemClock.elapsedRealtime(),
-                online && receivingFrames && udpLastFrameAtMs == 0L && stagedSupported, eligible)
+            val now = SystemClock.elapsedRealtime()
+            lanReadmission.observe(now, healthyRelay(current, now) && stagedSupported, eligible)
+            val pending = readmissionReservation
+            if (pending != null && !lanReadmission.isFresh(pending, now)) cancelReadmission()
+            if (readmissionCandidate == null) startReadmission(current, now)
             return
         }
         if (eligible.isEmpty()) return
@@ -937,10 +953,106 @@ internal class AndroidRemoteEngine(
         openConnection(selected)
     }
 
+    private fun healthyRelay(relay: WebSocket, now: Long): Boolean =
+        requested && socket === relay && !usingLan && online && receivingFrames &&
+            udpLastFrameAtMs == 0L && now - lastFrameAtMs <= 8000L
+
+    private fun cancelReadmission() {
+        val old = readmissionCandidate
+        readmissionCandidate = null
+        readmissionReservation?.let { lanReadmission.complete(it, SystemClock.elapsedRealtime(), false) }
+        readmissionReservation = null
+        old?.cancel()
+    }
+
+    private fun startReadmission(relay: WebSocket, now: Long) {
+        if (!healthyRelay(relay, now) || readmissionCandidate != null) return
+        val root = secret ?: return
+        val reservation = lanReadmission.reserve(now) ?: return
+        // One address per bounded batch; rotate through current ranked candidates.
+        val address = reservation.candidates[(lanReadmission.reservations - 1) % reservation.candidates.size]
+        val endpoint = LanEndpoint.url(address)
+        if (endpoint == null || !LanEndpoint.isOnLocalSubnet(address)) {
+            lanReadmission.complete(reservation, now, false)
+            return
+        }
+        val deadline = now + 4000L
+        val candidate = LanReadmissionCandidate(
+            client, Request.Builder().url(endpoint).build(), root,
+            { SystemClock.elapsedRealtime() }, deadline, { task -> main.post { task() } },
+            onPrepared = { pending ->
+                val t = SystemClock.elapsedRealtime()
+                if (readmissionCandidate !== pending || !healthyRelay(relay, t) ||
+                    !lanReadmission.isFresh(reservation, t) || !LanEndpoint.isOnLocalSubnet(address)) {
+                    if (readmissionCandidate === pending) cancelReadmission() else pending.cancel()
+                } else if (!pending.commit() && readmissionCandidate === pending) cancelReadmission()
+            },
+            onReady = { pending, key ->
+                val t = SystemClock.elapsedRealtime()
+                if (readmissionCandidate !== pending || !healthyRelay(relay, t) ||
+                    !lanReadmission.isFresh(reservation, t) || !LanEndpoint.isOnLocalSubnet(address)) {
+                    key.fill(0)
+                    if (readmissionCandidate === pending) cancelReadmission() else pending.cancel()
+                } else {
+                    val sequence = LanSequence()
+                    val listener = sessionListener(true, null, null, sequence, transportVideo)
+                    val promoted = pending.promote(listener)
+                    if (promoted == null) {
+                        key.fill(0)
+                        cancelReadmission()
+                    } else {
+                        // Main-thread linearization: retire WSS identity before its
+                        // close callbacks; clear permissions and decoder generation.
+                        readmissionCandidate = null
+                        readmissionReservation = null
+                        lanReadmission.complete(reservation, t, true)
+                        stopWatchdog()
+                        udpProbe?.stop()
+                        udpProbe = null
+                        udpAttempted = false
+                        udpLastFrameAtMs = 0L
+                        receivingFrames = false
+                        hostAllowsInput = null
+                        hostAllowsClipboard = null
+                        clearLiveDiagnostics()
+                        h264Active = false
+                        frame = null
+                        rttMs = null
+                        lastPingTimeMs = 0L
+                        avcDecoder.reset()
+                        usingLan = true
+                        lanAdvertised = true
+                        currentLanAddress = address
+                        lanBusinessKey = key
+                        lanSequence = sequence
+                        lanVerified = true
+                        lanFailureHint = null
+                        online = true
+                        socket = promoted
+                        transport = "局域网 P2P 直连"
+                        status = "局域网已恢复 · 等待已验证画面"
+                        relay.cancel()
+                        startWatchdog()
+                        startLanHeartbeat(promoted, address)
+                    }
+                }
+            },
+            onFailed = { pending, _ ->
+                if (readmissionCandidate === pending) cancelReadmission()
+            },
+        )
+        readmissionCandidate = candidate
+        readmissionReservation = reservation
+        candidate.start()
+        main.postDelayed({ if (readmissionCandidate === candidate) candidate.expire() },
+            (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+    }
+
     private fun onNetworkChanged(change: NetworkChangePolicy.Change) {
         if (closed || !requested) return
         networkChanges++
-        lanReadmission.networkChanged()
+        cancelReadmission()
+        lanReadmission.networkChanged(SystemClock.elapsedRealtime())
         val ws = socket
         val address = currentLanAddress
         if (usingLan && lanAdvertised && ws != null && address != null) {
@@ -1027,8 +1139,11 @@ internal class AndroidRemoteEngine(
                     sampleDrops=drops
                 }
                 if (!usingLan) {
-                    if (!online || !receivingFrames || udpLastFrameAtMs != 0L) {
-                        lanReadmission.observe(SystemClock.elapsedRealtime(), false, emptyList())
+                    val now = SystemClock.elapsedRealtime()
+                    val relay = socket
+                    if (relay == null || !healthyRelay(relay, now)) {
+                        cancelReadmission()
+                        lanReadmission.observe(now, false, emptyList())
                     }
                     sendPing()
                 }
@@ -1249,6 +1364,7 @@ internal class AndroidRemoteEngine(
     private fun disconnect() {
         clearLiveDiagnostics()
         requested = false
+        cancelReadmission()
         lanBusinessKey = null
         lanSequence = null
         udpProbe?.stop()

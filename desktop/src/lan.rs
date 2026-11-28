@@ -133,10 +133,10 @@ fn matches_step(secret: &[u8;32], packet: &[u8], prefix: &[u8], client: &[u8], s
         Ok((HELLO, bytes)) if bytes == transcript(prefix, client, server))
 }
 
-async fn accept_authorized(
+async fn accept_authorized<'a>(
     stream: TcpStream,
-    config: &HostConfig,
-) -> Result<(WebSocketStream<TcpStream>, [u8;32])> {
+    config: &'a HostConfig,
+) -> Result<(WebSocketStream<TcpStream>, [u8;32], Option<ActiveLan<'a>>)> {
     if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
         return Err(anyhow!("LAN sharing is not active"));
     }
@@ -196,11 +196,21 @@ async fn accept_authorized(
             return Err(anyhow!("LAN ownership already active"));
         }
     }
+    // v5 READY confirms the exclusive transport lease, not merely proof.
+    // RAII releases the lease on failed ACK or cancellation. v4 keeps its
+    // existing acquisition path for compatibility.
+    let lease = if version == HandshakeVersion::V5 {
+        Some(ActiveLan::acquire(&config.lan_active, &config.control_gate)
+            .ok_or_else(|| anyhow!("LAN ownership already active"))?)
+    } else { None };
+    if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
+        return Err(anyhow!("LAN sharing stopped before ready"));
+    }
     let ack = protocol::encrypt(&config.secret, READY,
         &transcript(version.ready(), &client_nonce, &server_nonce))?;
     tokio::time::timeout(Duration::from_secs(4), socket.send(Message::Binary(ack)))
         .await.context("LAN ready send timed out")??;
-    Ok((socket, versioned_business_key(&config.secret, &client_nonce, &server_nonce, version)))
+    Ok((socket, versioned_business_key(&config.secret, &client_nonce, &server_nonce, version), lease))
 }
 
 // Ownership is scoped to the authorized session future, including error,
@@ -236,13 +246,14 @@ async fn serve_authorized_session(
     socket: WebSocketStream<TcpStream>,
     key: [u8;32],
     address: IpAddr,
+    lease: Option<ActiveLan<'_>>,
 ) {
     if !config.running.load(Ordering::SeqCst) || !config.lan_direct.load(Ordering::SeqCst) {
         return;
     }
     // The production listener serializes handshakes, but also enforce exclusive
     // ownership here so a competing caller cannot overwrite or clear it.
-    let Some(_active) = ActiveLan::acquire(&config.lan_active, &config.control_gate) else { return; };
+    let Some(_active) = lease.or_else(|| ActiveLan::acquire(&config.lan_active, &config.control_gate)) else { return; };
     let _ = config.messages.send(format!("局域网直连已验证 · 对端 {}", address));
     let mut lan_config = config.clone();
     lan_config.secret = key;
@@ -277,8 +288,8 @@ pub fn spawn(config: HostConfig) {
                             continue;
                         }
                         match accept_authorized(stream, &config).await {
-                            Ok((socket, key)) => {
-                                serve_authorized_session(&config, socket, key, address.ip()).await;
+                            Ok((socket, key, lease)) => {
+                                serve_authorized_session(&config, socket, key, address.ip(), lease).await;
                             }
                             Err(_) => {
                                 // Do not echo untrusted handshakes or secret-related
@@ -440,7 +451,14 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            accept_authorized(stream, &config).await.map(|(_, key)| key)
+            let (socket, key, lease) = accept_authorized(stream, &config).await?;
+            assert!(lease.is_some());
+            assert!(config.lan_active.load(Ordering::SeqCst));
+            // Hold lease until client closes, proving READY was sent after acquisition.
+            let mut socket = socket;
+            let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
+            drop(lease);
+            Ok::<_, anyhow::Error>(key)
         });
         let (mut viewer, _) = connect_async(format!("ws://{address}/direct")).await.unwrap();
         let client = protocol::new_secret();
@@ -478,6 +496,9 @@ mod tests {
                 let packet = reply.unwrap().unwrap().into_data();
                 assert_eq!(protocol::decrypt(&key, &packet).unwrap(),
                     (READY, transcript(READY_V5, &client, server)));
+                assert!(active.load(Ordering::SeqCst));
+                assert_eq!(epoch.load(Ordering::SeqCst), initial_epoch + 1);
+                viewer.close(None).await.unwrap();
             } else {
                 assert!(!matches!(reply, Some(Ok(Message::Binary(_)))));
             }
@@ -491,7 +512,7 @@ mod tests {
             assert!(result.is_err());
         }
         assert!(!active.load(Ordering::SeqCst));
-        assert_eq!(epoch.load(Ordering::SeqCst), initial_epoch);
+        assert_eq!(epoch.load(Ordering::SeqCst), initial_epoch + if mode == 0 { 2 } else { 0 });
     }
 
     async fn exercise_handshake(stop_before_proof: bool) {
@@ -524,7 +545,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let Ok((mut socket, key)) = accept_authorized(stream, &config).await else { return false; };
+            let Ok((mut socket, key, lease)) = accept_authorized(stream, &config).await else { return false; };
+            assert!(lease.is_none());
             let mut sender = protocol::SequenceSender::new(protocol::HOST_DIRECTION);
             let mut guard = protocol::ReplayGuard::new(protocol::VIEW_DIRECTION);
             // Exercise real encrypted WebSocket traffic after READY, without a Relay.

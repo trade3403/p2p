@@ -26,7 +26,8 @@ internal class LanReadmissionCandidate(
     private val onReady: (LanReadmissionCandidate, ByteArray) -> Unit,
     private val onFailed: (LanReadmissionCandidate, String) -> Unit,
 ) {
-    private enum class Stage { NEW, CONNECTING, PROOF, PREPARED, COMMIT, READY, CLOSED }
+    private enum class Stage { NEW, CONNECTING, PROOF, PREPARED, COMMIT, READY, PROMOTED, CLOSED }
+    @Volatile private var delegate: WebSocketListener? = null
     private var stage = Stage.NEW
     private var socket: WebSocket? = null
     private val key = root.copyOf()
@@ -54,31 +55,45 @@ internal class LanReadmissionCandidate(
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                // Only small authenticated handshake packets are accepted by
-                // this candidate. Business messages cannot reach the engine.
-                if (bytes.size > 256) {
-                    dispatch { if (current(webSocket)) fail("unexpected_packet") }
-                    return
-                }
+                delegate?.let { it.onMessage(webSocket, bytes); return }
+                // Drop early business data rather than enqueue unbounded frames
+                // on the UI thread. The new decoder requests fresh H264 on promotion.
+                if (bytes.size > 256 || (bytes.size > 0 && (bytes[0].toInt() and 255) != 7)) return
                 dispatch {
-                    if (current(webSocket)) receive(bytes.toByteArray())
+                    if (stage != Stage.PROMOTED && current(webSocket)) receive(bytes.toByteArray())
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                dispatch { if (current(webSocket)) fail("unexpected_packet") }
+                delegate?.let { it.onMessage(webSocket, text); return }
+                dispatch { if (stage != Stage.PROMOTED && current(webSocket)) fail("unexpected_packet") }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                dispatch { if (current(webSocket)) fail("transport_failure") }
+                delegate?.let { it.onFailure(webSocket, t, response); return }
+                dispatch {
+                    val active = delegate
+                    if (active != null) active.onFailure(webSocket, t, response)
+                    else if (current(webSocket)) fail("transport_failure")
+                }
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                dispatch { if (current(webSocket)) fail("peer_closed") }
+                delegate?.let { it.onClosing(webSocket, code, reason); return }
+                dispatch {
+                    val active = delegate
+                    if (active != null) active.onClosing(webSocket, code, reason)
+                    else if (current(webSocket)) fail("peer_closed")
+                }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                dispatch { if (current(webSocket)) fail("peer_closed") }
+                delegate?.let { it.onClosed(webSocket, code, reason); return }
+                dispatch {
+                    val active = delegate
+                    if (active != null) active.onClosed(webSocket, code, reason)
+                    else if (current(webSocket)) fail("peer_closed")
+                }
             }
         })
     }
@@ -147,12 +162,22 @@ internal class LanReadmissionCandidate(
         return true
     }
 
+    /** Transfer ownership once. The original listener forwards subsequent
+     * business callbacks on OkHttp's network thread, not the main queue. */
+    fun promote(listener: WebSocketListener): WebSocket? {
+        if (stage != Stage.READY || now() >= deadlineMs) return null
+        val active = socket ?: return null
+        stage = Stage.PROMOTED
+        delegate = listener
+        return active
+    }
+
     fun expire() {
-        if (stage != Stage.CLOSED && now() >= deadlineMs) fail("timeout")
+        if (stage != Stage.CLOSED && stage != Stage.PROMOTED && now() >= deadlineMs) fail("timeout")
     }
 
     fun cancel() {
-        if (stage == Stage.CLOSED) return
+        if (stage == Stage.CLOSED || stage == Stage.PROMOTED) return
         stage = Stage.CLOSED
         key.fill(0)
         val old = socket

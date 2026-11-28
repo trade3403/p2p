@@ -42,7 +42,8 @@ internal class LanReadmissionPolicy {
 
     // Network changes invalidate even an otherwise identical advertisement.
     // They do not bypass cooldown or renew the retry budget.
-    fun networkChanged() {
+    fun networkChanged(now: Long) {
+        if (inFlight) nextAllowedAt = maxOf(nextAllowedAt, now + delayMs(reservations))
         generation++
         eligible = emptyList()
         stableSince = null
@@ -85,6 +86,9 @@ internal class LanReadmissionPolicy {
     // Reject stale completions after disconnect, network change or replacement.
     fun isCurrent(reservation: Reservation): Boolean =
         inFlight && generation == reservation.generation
+
+    fun isFresh(reservation: Reservation, now: Long): Boolean =
+        isCurrent(reservation) && lastObservedAt?.let { now - it in 0..FRESH_MS } == true
 
     fun complete(reservation: Reservation, now: Long, success: Boolean): Boolean {
         if (!isCurrent(reservation)) return false
