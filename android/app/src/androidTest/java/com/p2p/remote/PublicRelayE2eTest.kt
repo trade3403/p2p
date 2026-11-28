@@ -86,7 +86,8 @@ class PublicRelayE2eTest {
     private class LanPeer(private val root: ByteArray, private val jpeg: ByteArray,
         private val avc: List<ByteArray> = emptyList(),
         private val stallHandshake: Boolean = false,
-        private val bindAddress: String? = null) : AutoCloseable {
+        private val bindAddress: String? = null,
+        private val staged: Boolean = false) : AutoCloseable {
         private val server = MockWebServer()
         private val worker = Executors.newSingleThreadScheduledExecutor()
         private val peer = AtomicReference<WebSocket>()
@@ -152,7 +153,10 @@ class PublicRelayE2eTest {
         }
         val address: String
 
-        private fun prefix(kind: String) = "P2P-LAN-$kind-v4".toByteArray(Charsets.UTF_8)
+        private val commits = AtomicLong()
+        val authenticatedCommits: Long get() = commits.get()
+        private var proofReceived = false
+        private fun prefix(kind: String) = "P2P-LAN-$kind-v${if (staged) 5 else 4}".toByteArray(Charsets.UTF_8)
         private fun encode(key: ByteArray, kind: Int, body: ByteArray, nonce: ByteArray =
             ByteArray(12).also { random.nextBytes(it) }): ByteString {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -222,10 +226,17 @@ class PublicRelayE2eTest {
                             if (stallHandshake) return
                             check(webSocket.send(encode(root,7,prefix("CHALLENGE")+fresh+host)))
                         } else {
-                            require(body.contentEquals(prefix("PROOF")+current+host))
+                            if (staged && !proofReceived) {
+                                require(body.contentEquals(prefix("PROOF")+current+host))
+                                proofReceived = true
+                                check(webSocket.send(encode(root,7,prefix("PREPARED")+current+host)))
+                                return
+                            }
+                            require(body.contentEquals(prefix(if (staged) "COMMIT" else "PROOF")+current+host))
+                            if (staged) commits.incrementAndGet()
                             val mac = Mac.getInstance("HmacSHA256")
                             mac.init(SecretKeySpec(root,"HmacSHA256"))
-                            val key = mac.doFinal("P2P-LAN-BUSINESS-v4".toByteArray(Charsets.UTF_8)+current+host)
+                            val key = mac.doFinal(prefix("BUSINESS")+current+host)
                             business = key
                             check(webSocket.send(encode(root,7,prefix("READY")+current+host)))
                             // JPEG compatibility starts immediately. AVC starts
@@ -813,6 +824,112 @@ class PublicRelayE2eTest {
                         success("First actual candidate stalled authentication; second authenticated and carried video without intermediate WSS; verified close recovered public Windows")
                         command("disconnectViewer")
                     }
+                }
+                // Separate ephemeral room and actual public WSS fixture;
+                // no reflection into admission state or metadata injection.
+                stage="readmission_fixture_start"
+                phase("readmission_fixture_start")
+                await("isolated public fixture connected",30_000) {
+                    File(out,"readmission-ready.txt").exists()
+                }
+                val fixtureRoot=cfg.getString("readmission_key").chunked(2)
+                    .map { it.toInt(16).toByte() }.toByteArray()
+                val raw=ByteBuffer.wrap(File(ctx.filesDir,"ci-lan-avc.bin").readBytes())
+                val recoveryUnits=mutableListOf<ByteArray>()
+                while(raw.hasRemaining()) {
+                    val size=raw.int
+                    require(size in 9..raw.remaining())
+                    recoveryUnits.add(ByteArray(size).also { raw.get(it) })
+                }
+                assertEquals(20,recoveryUnits.size)
+                val surface=AvcSurfaceConsumer()
+                val viewer=main { AndroidRemoteEngine(ctx,{}, { _,_ -> }).also { it.attachVideoSurface(surface.surface) } }
+                fun recoverySnap()=main { viewer.snapshotResponse()["snapshot"] as Map<*,*> }
+                fun counter(v:Map<*,*>,name:String)=(v[name] as Number).toLong()
+                val evidence=JSONObject().put("scope","actual public WSS isolated fixture and emulator-local encrypted LAN v4/v5 peers; FFmpeg AVC, not Windows capture")
+                metrics.put("lan_auto_readmission",evidence)
+                val boundaries=org.json.JSONArray()
+                evidence.put("boundaries",boundaries)
+                val started=SystemClock.elapsedRealtime()
+                fun boundary(name:String,v:Map<*,*>) {
+                    boundaries.put(JSONObject().put("name",name)
+                        .put("elapsed_ms",SystemClock.elapsedRealtime()-started)
+                        .put("phase",v["viewer_transport_phase"]).put("codec",v["active_video_codec"])
+                        .put("connected",v["viewer_connected"]).put("input_allowed",v["viewer_allow_input"])
+                        .put("rendered",v["avc_rendered_frames"]).put("surface_frames",surface.frames)
+                        .put("surface_errors",surface.errors)
+                        .put("lan_bytes",v["viewer_lan_video_bytes"]).put("relay_bytes",v["viewer_relay_video_bytes"])
+                        .put("relay_opens",v["relay_socket_opens"]).put("retry_events",v["relay_retry_events"])
+                        .put("batches",v["lan_readmission_batches"]))
+                }
+                try {
+                    LanPeer(fixtureRoot,jpeg,recoveryUnits,bindAddress=firstAddress).use { initial ->
+                        LanPeer(fixtureRoot,jpeg,recoveryUnits,bindAddress=secondAddress,staged=true).use { next ->
+                            val connect=AndroidRemoteEngine::class.java.getDeclaredMethod("connect",
+                                String::class.java,String::class.java,String::class.java,String::class.java).apply { isAccessible=true }
+                            stage="readmission_initial_lan"
+                            main { connect.invoke(viewer,cfg.getString("server"),cfg.getString("token"),
+                                cfg.getString("readmission_key"),initial.address) }
+                            await("initial actual LAN AVC",25_000) {
+                                val v=recoverySnap()
+                                v["viewer_transport_phase"]=="lan_video" && v["active_video_codec"]=="H264" &&
+                                    surface.frames>0 && initial.authenticatedPongs>0
+                            }
+                            val before=recoverySnap()
+                            boundary("initial_lan",before)
+                            assertEquals(0L,counter(before,"relay_socket_opens"))
+                            initial.interrupt()
+                            stage="readmission_public_fallback"
+                            await("actual public fixture AVC before readmission",25_000) {
+                                val v=recoverySnap()
+                                v["viewer_transport_phase"]=="relay_video" && v["active_video_codec"]=="H264" &&
+                                    counter(v,"viewer_relay_video_bytes")>0 && v["host_metadata_current"]==true
+                            }
+                            val relay=recoverySnap()
+                            boundary("relay_video",relay)
+                            assertEquals(1L,counter(relay,"relay_socket_opens"))
+                            assertEquals(0L,next.authenticatedCommits)
+                            val relaySocket=main { field.get(viewer) as WebSocket }
+                            stage="readmission_automatic_lan"
+                            await("automatic v5 LAN AVC without reconnect command",35_000) {
+                                val v=recoverySnap()
+                                v["viewer_transport_phase"]=="lan_video" && v["active_video_codec"]=="H264" &&
+                                    counter(v,"avc_rendered_frames")>counter(relay,"avc_rendered_frames") &&
+                                    counter(v,"viewer_lan_video_bytes")>counter(relay,"viewer_lan_video_bytes") &&
+                                    next.authenticatedCommits==1L && next.authenticatedPongs>0 &&
+                                    main { field.get(viewer)!==relaySocket }
+                            }
+                            val restored=recoverySnap()
+                            boundary("restored_lan",restored)
+                            Thread.sleep(3000)
+                            val stable=recoverySnap()
+                            boundary("stable_lan",stable)
+                            assertEquals("lan_video",stable["viewer_transport_phase"])
+                            assertEquals("H264",stable["active_video_codec"])
+                            assertEquals(true,stable["viewer_connected"])
+                            assertEquals(false,stable["viewer_allow_input"])
+                            assertEquals(1L,counter(stable,"lan_readmission_batches"))
+                            assertEquals(counter(relay,"relay_socket_opens"),counter(stable,"relay_socket_opens"))
+                            assertEquals(counter(relay,"relay_retry_events"),counter(stable,"relay_retry_events"))
+                            assertEquals(counter(restored,"viewer_relay_video_bytes"),counter(stable,"viewer_relay_video_bytes"))
+                            assertTrue(counter(stable,"viewer_lan_video_bytes")>counter(restored,"viewer_lan_video_bytes"))
+                            assertTrue(counter(stable,"avc_rendered_frames")>counter(restored,"avc_rendered_frames"))
+                            assertEquals(0L,surface.errors.toLong())
+                            assertEquals(1L,next.authenticatedHellos)
+                            assertEquals(1L,next.authenticatedCommits)
+                            assertNull(next.failureType)
+                            evidence.put("v5_hellos",next.authenticatedHellos)
+                                .put("v5_commits",next.authenticatedCommits)
+                                .put("v5_pongs",next.authenticatedPongs)
+                                .put("v5_codec_requests",next.authenticatedCodecRequests)
+                                .put("automatic_socket_replacement",true)
+                            success("Actual isolated public WSS AVC fallback and automatic v5 LAN AVC readmission; no manual reconnect or new WSS open")
+                        }
+                    }
+                } finally {
+                    main { viewer.close() }
+                    surface.close()
+                    fixtureRoot.fill(0)
                 }
             } finally {
                 phase("multi_candidate_cleanup")

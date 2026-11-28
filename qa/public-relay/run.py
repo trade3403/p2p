@@ -290,6 +290,75 @@ def candidate_aliases(enable, installed, interface=None):
         installed.clear()
         require(not failures,"Cannot remove emulator test IPv4 alias")
 
+class ReadmissionRelayFixture:
+    """Independent ephemeral public room; actual encrypted test-pattern AVC.
+    Never sends input or exposes root/room/token. Not a Windows Host."""
+    def __init__(self, root, fixture):
+        self.root=root
+        self.units=[]
+        offset=0
+        while offset<len(fixture):
+            size=struct.unpack_from(">I",fixture,offset)[0]
+            self.units.append(fixture[offset+4:offset+4+size])
+            offset+=4+size
+        require(len(self.units)==20 and offset==len(fixture),"Invalid recovery fixture")
+        self.stop=threading.Event()
+        self.ready=threading.Event()
+        self.error=None
+        self.thread=threading.Thread(target=self.run,daemon=True)
+
+    def run(self):
+        ws=None
+        try:
+            room=hashlib.sha256(b"p2p-v02-room:"+self.root).hexdigest()
+            ws=websocket.create_connection("wss://"+HOST+"/relay?room="+room+"&role=host",
+                header=["Authorization: Bearer "+TOKEN],timeout=12,enable_multithread=True)
+            ws.settimeout(.05)
+            aes=AESGCM(self.root)
+            def packet(kind,body):
+                aad=bytes([kind])
+                nonce=secrets.token_bytes(12)
+                ws.send_binary(aad+nonce+aes.encrypt(nonce,body,aad))
+            meta=json.dumps({"count":1,"selected":0,"allow_input":False,
+                "allow_clipboard":False,"lan_readmission_v5":True,
+                "lan_ipv4_candidates":["10.203.71.3"]}).encode()
+            self.ready.set()
+            index=0
+            next_frame=next_meta=time.monotonic()
+            while not self.stop.is_set():
+                now=time.monotonic()
+                if now>=next_meta:
+                    packet(4,meta)
+                    next_meta=now+.5
+                if now>=next_frame:
+                    packet(5,self.units[index])
+                    index=(index+1)%len(self.units)
+                    next_frame=now+.1
+                try:
+                    raw=ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    continue
+                if isinstance(raw,bytes) and len(raw)>=30 and raw[0]==8:
+                    try:
+                        body=aes.decrypt(raw[1:13],raw[13:],raw[:1])
+                    except Exception:
+                        continue
+                    if len(body)==8: packet(9,body)
+        except Exception as exc:
+            if not self.stop.is_set(): self.error=type(exc).__name__
+        finally:
+            self.ready.set()
+            if ws:
+                try: ws.close()
+                except Exception: pass
+
+    def close(self):
+        self.stop.set()
+        self.thread.join(timeout=15)
+        require(not self.thread.is_alive(),"Recovery fixture did not stop")
+        require(self.error is None,"Recovery public fixture failed")
+
+
 def android():
     global STAGE,WS
     STAGE="video_encoder_preflight"
@@ -323,7 +392,9 @@ def android():
             break
     require(pair,"Host did not provide a current CI pairing window")
     REPORT["pairing_offer_remaining_seconds"]=int(pair["expires_at"]-time.time())
+    readmission_root=secrets.token_bytes(32)
     config={"server":"wss://"+HOST,"token":TOKEN,"number":pair["number"],"code":pair["code"],
+            "readmission_key":readmission_root.hex(),
             "expires_at":pair["expires_at"],"disposable_emulator_network_test":True}
     # Transfer over adb stdin into the disposable app's private directory.
     # Never pass credentials as CLI arguments, test properties or artifacts.
@@ -335,7 +406,8 @@ def android():
             "com.p2p.remote.PublicRelayE2eTest","com.p2p.remote.test/androidx.test.runner.AndroidJUnitRunner"],
             stdout=log,stderr=subprocess.STDOUT)
         # Include mandatory emulator radio outage and bounded recovery.
-        end=time.monotonic()+540
+        end=time.monotonic()+660
+        readmission_fixture=None
         aliases=[]
         aliases_ready=False
         aliases_cleaned=False
@@ -350,7 +422,15 @@ def android():
                     candidate_aliases(True,aliases,interface)
                     adb("shell","run-as","com.p2p.remote","touch","files/e2e/candidate-ready.txt")
                     aliases_ready=True
+                elif phase==b"readmission_fixture_start" and readmission_fixture is None:
+                    readmission_fixture=ReadmissionRelayFixture(readmission_root,fixture)
+                    readmission_fixture.thread.start()
+                    require(readmission_fixture.ready.wait(20) and readmission_fixture.error is None,
+                            "Recovery public fixture not ready")
+                    adb("shell","run-as","com.p2p.remote","touch","files/e2e/readmission-ready.txt")
                 elif phase==b"multi_candidate_cleanup" and not aliases_cleaned:
+                    if readmission_fixture:
+                        readmission_fixture.close()
                     candidate_aliases(False,aliases)
                     adb("shell","run-as","com.p2p.remote","touch","files/e2e/candidate-cleaned.txt")
                     aliases_cleaned=True
@@ -361,7 +441,11 @@ def android():
                 process.terminate()
                 process.wait(timeout=10)
             try:
-                if aliases: candidate_aliases(False,aliases)
+                try:
+                    if readmission_fixture and not readmission_fixture.stop.is_set():
+                        readmission_fixture.close()
+                finally:
+                    if aliases: candidate_aliases(False,aliases)
             finally:
                 STAGE="evidence_collection"
                 pull_evidence()
@@ -394,6 +478,22 @@ def android():
                 "verified_candidate_disconnect_recovers_public")),
             "Mandatory actual multi-candidate evidence incomplete")
     require(aliases_ready and aliases_cleaned and not aliases,"Candidate alias lifecycle incomplete")
+    recovery=native.get("metrics",{}).get("lan_auto_readmission",{})
+    require(recovery.get("automatic_socket_replacement") is True and
+            recovery.get("v5_hellos")==1 and recovery.get("v5_commits")==1 and
+            recovery.get("v5_pongs",0)>0 and recovery.get("v5_codec_requests",0)>0,
+            "Mandatory automatic v5 readmission evidence incomplete")
+    boundaries=recovery.get("boundaries",[])
+    require([v.get("name") for v in boundaries]==["initial_lan","relay_video","restored_lan","stable_lan"],
+            "Mandatory readmission boundaries missing")
+    initial,relay,restored,stable=boundaries
+    require([v.get("phase") for v in boundaries]==["lan_video","relay_video","lan_video","lan_video"] and
+            all(v.get("codec")=="H264" and v.get("connected") is True and v.get("input_allowed") is False
+                and v.get("surface_errors")==0 for v in boundaries) and
+            initial["relay_opens"]==0 and relay["relay_opens"]==restored["relay_opens"]==stable["relay_opens"]==1 and
+            stable["relay_bytes"]==restored["relay_bytes"] and stable["lan_bytes"]>restored["lan_bytes"] and
+            stable["rendered"]>restored["rendered"] and stable["surface_frames"]>restored["surface_frames"] and
+            stable["batches"]==1,"Automatic readmission transport/decoder evidence invalid")
     switches=native.get("metrics",{}).get("lan_avc_resolution_switches",[])
     require(len(switches)==2 and [(s.get("width"),s.get("height")) for s in switches]==[(640,360),(320,240)],
             "Mandatory AVC resolution switch evidence missing")
