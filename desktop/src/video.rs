@@ -135,12 +135,33 @@ pub fn dimensions(source_w: u32, source_h: u32) -> (u32, u32) {
 }
 
 #[cfg(windows)]
-fn scale_if_needed(raw: &image::RgbaImage) -> anyhow::Result<Option<image::RgbaImage>> {
+extern "C" {
+    fn p2p_resize_rgba_triangle(input:*const u8,input_len:usize,sw:u32,sh:u32,
+        output:*mut u8,output_len:usize,dw:u32,dh:u32)->i32;
+}
+
+#[cfg(windows)]
+fn resize_avc(raw:&image::RgbaImage,w:u32,h:u32)->image::RgbaImage {
+    let (sw,sh)=raw.dimensions();
+    if w>=2 && h>=2 && sw>=w && sh>=h && sw<=4*w && sh<=4*h &&
+        sw<=8192 && sh<=8192 && u64::from(sw)*u64::from(sh)<=34_000_000 {
+        let mut out=image::RgbaImage::new(w,h);
+        let result=unsafe {p2p_resize_rgba_triangle(raw.as_raw().as_ptr(),raw.as_raw().len(),sw,sh,
+            out.as_mut_ptr(),out.len(),w,h)};
+        if result==1 {return out;}
+    }
+    image::imageops::resize(raw,w,h,image::imageops::FilterType::Triangle)
+}
+
+#[cfg(windows)]
+fn scale_if_needed(raw: &image::RgbaImage, h264:bool) -> anyhow::Result<Option<image::RgbaImage>> {
     let (raw_w,raw_h)=raw.dimensions();
     let (w,h)=dimensions(raw_w,raw_h);
     if w<2||h<2 {return Err(anyhow::anyhow!("display has invalid dimensions"));}
     Ok(if (raw_w,raw_h)==(w,h) {None} else {
-        Some(image::imageops::resize(raw,w,h,image::imageops::FilterType::Triangle))
+        Some(if h264 {resize_avc(raw,w,h)} else {
+            image::imageops::resize(raw,w,h,image::imageops::FilterType::Triangle)
+        })
     })
 }
 
@@ -384,13 +405,13 @@ fn capture(
         let resize_start=Instant::now();
         cache.rgba=if let Some(rgba)=fallback {
             // Compatibility capture already owns its source buffer.
-            let scaled=scale_if_needed(&rgba)?;
+            let scaled=scale_if_needed(&rgba,h264)?;
             if scaled.is_some() {stats.stages.resize_cpu.record(resize_start);}
             Some(scaled.unwrap_or(rgba))
         } else {
             // DXGI owns the raw image throughout this synchronous encode.
             // Resize directly from it, or borrow it at matching dimensions.
-            let scaled=scale_if_needed(desktop_capture.image().context("DXGI frame missing")?)?;
+            let scaled=scale_if_needed(desktop_capture.image().context("DXGI frame missing")?,h264)?;
             if scaled.is_some() {stats.stages.resize_cpu.record(resize_start);}
             scaled
         };
@@ -514,14 +535,42 @@ mod tests {
     #[test]
     fn scale_only_allocates_when_dimensions_require_it() {
         let native=image::RgbaImage::from_pixel(640,480,image::Rgba([12,34,56,255]));
-        assert!(scale_if_needed(&native).unwrap().is_none());
+        assert!(scale_if_needed(&native,true).unwrap().is_none());
         let large=image::RgbaImage::from_pixel(1920,1080,image::Rgba([12,34,56,255]));
-        let resized=scale_if_needed(&large).unwrap().unwrap();
+        let resized=scale_if_needed(&large,true).unwrap().unwrap();
         assert_eq!(resized.dimensions(),(1280,720));
         assert_eq!(*resized.get_pixel(640,360),image::Rgba([12,34,56,255]));
         let odd=image::RgbaImage::from_pixel(641,481,image::Rgba([1,2,3,255]));
-        assert_eq!(scale_if_needed(&odd).unwrap().unwrap().dimensions(),(640,480));
-        assert!(scale_if_needed(&image::RgbaImage::new(1,1)).is_err());
+        assert_eq!(scale_if_needed(&odd,true).unwrap().unwrap().dimensions(),(640,480));
+        assert!(scale_if_needed(&image::RgbaImage::new(1,1),true).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn avc_triangle_kernel_matches_reference_and_rejects_invalid_buffers() {
+        for (sw,sh,w,h) in [(192,108,128,72),(160,120,80,60),(161,121,160,120),
+                           (128,96,32,24),(64,64,16,16),(32,24,8,6)] {
+            let src=image::RgbaImage::from_fn(sw,sh,|x,y|image::Rgba([
+                ((x*37+y*17)%256) as u8,
+                if (x+y)%2==0 {255} else {0},
+                ((x*3+y*11)%256) as u8,255]));
+            let mut actual=image::RgbaImage::new(w,h);
+            assert_eq!(unsafe{p2p_resize_rgba_triangle(src.as_raw().as_ptr(),src.len(),sw,sh,
+                actual.as_mut_ptr(),actual.len(),w,h)},1);
+            let expected=image::imageops::resize(&src,w,h,image::imageops::FilterType::Triangle);
+            let max_error=actual.as_raw().iter().zip(expected.as_raw())
+                .map(|(&a,&b)|a.abs_diff(b)).max().unwrap();
+            assert!(max_error<=2,"triangle mismatch {}x{} to {}x{}: {}",sw,sh,w,h,max_error);
+            assert_eq!(resize_avc(&src,w,h),actual);
+        }
+        let input=[0u8;64];
+        let mut output=[77u8;16];
+        assert_eq!(unsafe{p2p_resize_rgba_triangle(input.as_ptr(),63,4,4,
+            output.as_mut_ptr(),16,2,2)},0);
+        assert_eq!(output,[77;16]);
+        let src=image::RgbaImage::from_pixel(64,64,image::Rgba([14,25,36,255]));
+        assert_eq!(resize_avc(&src,8,8),
+            image::imageops::resize(&src,8,8,image::imageops::FilterType::Triangle));
     }
 
     #[cfg(windows)]
