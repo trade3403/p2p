@@ -141,7 +141,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows GPU counter smoke report validation failed' }
           python qa/release-ui/summarize_evidence.py g1 evidence/windows/g1-lan-video.jsonl evidence/windows/g1-performance-summary.json
           if ($LASTEXITCODE -ne 0) { throw 'Measured G1 evidence validation failed' }
-          python qa/release-ui/summarize_evidence.py g6 evidence/windows/g5b2-avc-handoff.jsonl evidence/windows/g5b2-performance-summary.json
+          python qa/release-ui/summarize_evidence.py g6-pacing evidence/windows/g5b2-avc-handoff.jsonl evidence/windows/g5b2-performance-summary.json
           if ($LASTEXITCODE -ne 0) { throw 'Measured G5b2 AVC evidence validation failed' }
 
       - name: Build Rust native shared library

@@ -83,6 +83,32 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize_g5b2(rows,require_encode_stages=True)
 
+    def test_frame_pacing_evidence(self):
+        # Constructed counters exercise the validator, not measured performance.
+        rows = actual_g5b2()
+        with self.assertRaises(ValueError):
+            summarize_g5b2(rows, require_frame_work=True)
+        stable = rows[3]["data"]
+        samples = stable["lan"]["timing_samples"]
+        for i, sample in enumerate(samples):
+            sample["timing"]["frame_work"] = dict(samples=i*5, total_us=i*500)
+            sample["timing"]["frame_budget_misses"] = i
+        timing = stable["performance"]["session_timing"]
+        timing["frame_work"] = dict(samples=20, total_us=2000, mean_us=100.0)
+        timing["frame_budget_misses"] = 4
+        timing["operation_rates_per_second"] = {key: timing[key]["samples"]*1000/7999
+            for key in ("capture", "encode", "send", "frame_work")}
+        result = summarize_g5b2(rows, require_frame_work=True)
+        self.assertEqual(result["schema_version"], 3)
+        self.assertEqual(result["session_timing"]["frame_budget_misses"], 4)
+        timing["operation_rates_per_second"]["send"] = 0
+        with self.assertRaises(ValueError):
+            summarize_g5b2(rows, require_frame_work=True)
+        timing["operation_rates_per_second"]["send"] = timing["send"]["samples"]*1000/7999
+        samples[2]["timing"]["frame_budget_misses"] = 0
+        with self.assertRaises(ValueError):
+            summarize_g5b2(rows, require_frame_work=True)
+
     def test_g5b2_rejects_missing_or_inconsistent_measurements(self):
         def stable(rows): return rows[3]["data"]
         mutations = [

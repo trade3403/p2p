@@ -108,7 +108,7 @@ def summarize_encode_stages(samples):
     return result
 
 
-def summarize_g5b2(rows, require_encode_stages=False):
+def summarize_g5b2(rows, require_encode_stages=False, require_frame_work=False):
     """Recompute stable LAN measurements from the authenticated observer's raw
     counters. Metadata observation times and receiver windows are distinct."""
     stages = ["start", "relay_baseline", "lan_startup", "lan_stable", "relay_resumed", "passed"]
@@ -145,7 +145,11 @@ def summarize_g5b2(rows, require_encode_stages=False):
             "invalid AVC dimensions")
     samples = lan["timing_samples"]
     require(isinstance(samples, list) and len(samples) >= 2, "missing timing metadata")
+    pacing = require_frame_work or any("frame_work" in s["timing"] or
+                                       "frame_budget_misses" in s["timing"] for s in samples)
     keys = ("capture", "encode", "send", "queue_wait")
+    if pacing:
+        keys += ("frame_work",)
     backends = ("DXGI", "screenshots compatibility")
     encoders = ("OpenH264 software", "Media Foundation hardware", "Media Foundation D3D11 texture")
     previous = None
@@ -155,6 +159,10 @@ def summarize_g5b2(rows, require_encode_stages=False):
                 and sample.get("capture_backend") in backends, "invalid metadata observation")
         timing = sample["timing"]
         counter(timing, "queue_drops")
+        if pacing:
+            require("frame_work" in timing and "frame_budget_misses" in timing,
+                    "missing frame pacing evidence")
+            counter(timing, "frame_budget_misses")
         for key in keys:
             counter(timing[key], "total_us")
             counter(timing[key], "samples")
@@ -163,6 +171,8 @@ def summarize_g5b2(rows, require_encode_stages=False):
         if previous is not None:
             require(observed > previous["observed_ms"], "metadata time not increasing")
             delta(previous["timing"], timing, "queue_drops")
+            if pacing:
+                delta(previous["timing"], timing, "frame_budget_misses")
             for key in keys:
                 for field in ("total_us", "samples"):
                     delta(previous["timing"][key], timing[key], field)
@@ -179,6 +189,11 @@ def summarize_g5b2(rows, require_encode_stages=False):
                   queue_drops=delta(first["timing"], last["timing"], "queue_drops"),
                   encoder_first=first["encoder"], encoder_last=last["encoder"],
                   capture_backend_first=first["capture_backend"], capture_backend_last=last["capture_backend"])
+    if pacing:
+        result["frame_budget_misses"] = delta(first["timing"], last["timing"], "frame_budget_misses")
+        result["operation_rates_per_second"] = {
+            key: result[key]["samples"] * 1000 / result["elapsed_observation_ms"]
+            for key in ("capture", "encode", "send", "frame_work")}
     if require_encode_stages or any("encode_stages" in s["timing"] for s in samples):
         stages = summarize_encode_stages(samples)
         reported_stages = phase["performance"]["session_timing"].get("encode_stages")
@@ -238,7 +253,7 @@ def summarize_g5b2(rows, require_encode_stages=False):
             and counter(final, "relay_socket_opens") == 1, "Host socket not retired")
     if stages is not None:
         result["encode_stages"] = stages
-    return {"schema_version": 2 if stages is not None else 1, "scope": "Windows runner loopback real capture; not physical display latency",
+    return {"schema_version": 3 if pacing else (2 if stages is not None else 1), "scope": "Windows runner loopback real capture; not physical display latency",
             "dimensions": dimensions, **rates, "session_timing": result, "host_delta": counts,
             "host_minus_received_bytes": counts["lan_bytes"]-received_bytes,
             "host_minus_received_packets": counts["lan_frames"]-packets,
@@ -347,9 +362,10 @@ def main():
     raw = Path(source).read_text(encoding="utf-8")
     if role == "g1":
         summary = summarize_g1([json.loads(line) for line in raw.splitlines() if line.strip()])
-    elif role in ("g5b2", "g6"):
+    elif role in ("g5b2", "g6", "g6-pacing"):
         summary = summarize_g5b2([json.loads(line) for line in raw.splitlines() if line.strip()],
-                                  require_encode_stages=role=="g6")
+                                  require_encode_stages=role in ("g6", "g6-pacing"),
+                                  require_frame_work=role=="g6-pacing")
     else:
         require(role in ("windows", "android"), "invalid role")
         summary = summarize_release(json.loads(raw), role)

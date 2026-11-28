@@ -847,6 +847,8 @@ struct SessionTiming {
     queue_wait: crate::video::TimingSample,
     queue_drops: u64,
     encode_stages: std::collections::BTreeMap<String,crate::video::TimingSample>,
+    frame_work: crate::video::TimingSample,
+    frame_budget_misses: u64,
 }
 #[derive(Debug, serde::Serialize)]
 struct SessionTimingObservation {
@@ -872,7 +874,16 @@ fn timing_interval(samples: &[SessionTimingObservation]) -> serde_json::Value {
             && b.send.delta(a.send).is_some() && b.queue_wait.delta(a.queue_wait).is_some()
             && b.queue_drops >= a.queue_drops, "session timing counters regressed");
     }
+    for pair in samples.windows(2) {
+        let (a,b) = (&pair[0].timing,&pair[1].timing);
+        assert!(b.frame_work.delta(a.frame_work).is_some());
+        assert!(b.frame_budget_misses >= a.frame_budget_misses);
+    }
     let (a,b) = (&first.timing,&last.timing);
+    let elapsed = (last.observed_ms-first.observed_ms) as f64;
+    let rate = |a: crate::video::TimingSample, b: crate::video::TimingSample| {
+        b.delta(a).expect("counter regressed").samples as f64 * 1000.0 / elapsed
+    };
     assert_eq!(a.send.samples,a.queue_wait.samples);
     assert_eq!(b.send.samples,b.queue_wait.samples);
     let mut stages=std::collections::BTreeMap::new();
@@ -894,6 +905,12 @@ fn timing_interval(samples: &[SessionTimingObservation]) -> serde_json::Value {
         "send":stage(a.send,b.send),"queue_wait":stage(a.queue_wait,b.queue_wait),
         "queue_drops":b.queue_drops-a.queue_drops,
         "encode_stages":stages,
+        "frame_work":stage(a.frame_work,b.frame_work),
+        "frame_budget_misses":b.frame_budget_misses-a.frame_budget_misses,
+        "operation_rates_per_second": {
+            "capture":rate(a.capture,b.capture), "encode":rate(a.encode,b.encode),
+            "send":rate(a.send,b.send), "frame_work":rate(a.frame_work,b.frame_work)
+        },
         "encoder_first":first.encoder,"encoder_last":last.encoder,
         "capture_backend_first":first.capture_backend,"capture_backend_last":last.capture_backend
     })
