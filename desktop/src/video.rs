@@ -23,6 +23,9 @@ pub struct VideoStats {
     pub send: Timing,
     pub queue_wait: Timing,
     pub queue_drops: AtomicU64,
+    // Actual worker iterations and work duration; not delivered video FPS.
+    pub frame_work: Timing,
+    pub frame_budget_misses: AtomicU64,
 }
 
 // Actual operations, not estimates. Zero samples means unobserved.
@@ -207,6 +210,36 @@ fn scale_if_needed(raw: &image::RgbaImage, h264:bool) -> anyhow::Result<Option<i
     })
 }
 
+// Round the period up to a whole nanosecond, not down to milliseconds.
+// Pace from the actual iteration start: late work never creates catch-up debt.
+#[cfg(any(windows, test))]
+fn frame_budget(active_h264: bool, target_fps: u32) -> Duration {
+    let fps = if active_h264 { target_fps.clamp(5, 30) } else { 6 } as u64;
+    Duration::from_nanos((1_000_000_000 + fps - 1) / fps)
+}
+
+#[cfg(any(windows, test))]
+fn frame_pacing(budget: Duration, work: Duration) -> (Duration, bool) {
+    (budget.saturating_sub(work), work > budget)
+}
+
+#[cfg(test)]
+#[test]
+fn frame_pacing_has_precise_period_and_no_catchup_debt() {
+    let budget = frame_budget(true, 30);
+    assert_eq!(budget, Duration::from_nanos(33_333_334));
+    assert_eq!(frame_budget(true, 60), budget);
+    assert_eq!(frame_budget(true, 0), Duration::from_millis(200));
+    assert_eq!(frame_budget(false, 30), Duration::from_nanos(166_666_667));
+    assert_eq!(frame_pacing(budget, Duration::from_millis(10)),
+        (Duration::from_nanos(23_333_334), false));
+    assert_eq!(frame_pacing(budget, budget), (Duration::ZERO, false));
+    assert_eq!(frame_pacing(budget, Duration::from_millis(90)), (Duration::ZERO, true));
+    // A subsequent fast iteration still waits its own full remaining budget.
+    assert_eq!(frame_pacing(budget, Duration::from_millis(1)),
+        (Duration::from_nanos(32_333_334), false));
+}
+
 #[cfg(windows)]
 pub fn spawn_frames(
     monitor: Arc<AtomicUsize>,
@@ -319,13 +352,12 @@ pub fn spawn_frames(
                 }
             }
 
-            let fps = if active_h264 {
-                target_fps.load(Ordering::Relaxed).clamp(5, 30)
-            } else {
-                6
-            };
-            let budget = Duration::from_millis(1000 / fps as u64);
-            let delay = budget.saturating_sub(started.elapsed());
+            // Use the same target as this iteration's encoder profile. A target
+            // change takes effect with the next iteration, not mid-frame.
+            let work = started.elapsed();
+            let (delay, missed) = frame_pacing(frame_budget(active_h264, profile.1), work);
+            stats.frame_work.record_us(work.as_micros().min(u64::MAX as u128) as u64);
+            if missed { stats.frame_budget_misses.fetch_add(1, Ordering::Relaxed); }
             if !delay.is_zero() { thread::sleep(delay); }
         }
     });
