@@ -71,6 +71,10 @@ fn rgba_to_nv12(rgba:&[u8],w:usize,h:usize,out:&mut[u8])->Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn compressed_scratch_reuse_and_no_stale_nals() {
+        extern "C" {fn p2p_mf_test_scratch()->i32;}
+        assert_eq!(unsafe{p2p_mf_test_scratch()},1);
+    }
     #[test] fn nv12_layout_and_bounds() {
         let mut out=[0;6];
         assert_eq!(rgba_to_nv12(&[0;16],2,2,&mut out),Some(()));

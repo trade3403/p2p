@@ -31,6 +31,9 @@ struct Session {
     LONGLONG pts=0;
     unsigned frame=0;
     std::vector<uint8_t> headers;
+    // Private compressed bytes, never passed to the transform as a sample.
+    // Reuse capacity only within this session.
+    std::vector<uint8_t> encoded;
     ~Session() {
         if(transform && started) {
             transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM,0);
@@ -105,7 +108,8 @@ size_t prefix(const uint8_t* p,size_t n,size_t i) {
 }
 // MF AVC normally returns Annex B. Accept only fully parsed, bounded NAL units.
 bool annex(const uint8_t* p,size_t n,std::vector<uint8_t>& out) {
-    if(n<5 || n>2*1024*1024) return false;
+    out.clear();
+    if(!p || n<5 || n>2*1024*1024) return false;
     if(prefix(p,n,0)) { out.assign(p,p+n); return true; }
     for(size_t i=0;i<n;) {
         if(n-i<4) return false;
@@ -137,6 +141,7 @@ bool output(Session& s,std::vector<uint8_t>& bytes) {
     ComPtr<IMFSample> sample;
     if(!(info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES|MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES))) {
         ComPtr<IMFMediaBuffer> buffer;
+        if(info.cbSize>2*1024*1024) return false;
         if(FAILED(MFCreateSample(&sample))
            || FAILED(MFCreateAlignedMemoryBuffer(std::max<DWORD>(info.cbSize,2*1024*1024),
                 info.cbAlignment?info.cbAlignment-1:0,&buffer))
@@ -150,14 +155,19 @@ bool output(Session& s,std::vector<uint8_t>& bytes) {
     if(data.pSample && data.pSample!=sample.Get()) returned.Attach(data.pSample);
     if(FAILED(hr) || !data.pSample) return false;
     ComPtr<IMFMediaBuffer> buffer;
-    if(FAILED(data.pSample->ConvertToContiguousBuffer(&buffer))) return false;
+    DWORD count=0;
+    if(FAILED(data.pSample->GetBufferCount(&count)) || !count) return false;
+    // A single-buffer sample needs no contiguous conversion.
+    if(count==1) {
+        if(FAILED(data.pSample->GetBufferByIndex(0,&buffer))) return false;
+    } else if(FAILED(data.pSample->ConvertToContiguousBuffer(&buffer))) return false;
     BYTE* ptr=nullptr; DWORD len=0;
     if(FAILED(buffer->Lock(&ptr,nullptr,&len))) return false;
-    bool ok=annex(ptr,len,bytes); buffer->Unlock();
-    return ok;
+    // Unlock even if the vector allocation throws.
+    struct Unlock { IMFMediaBuffer* p; ~Unlock(){p->Unlock();} } unlock{buffer.Get()};
+    return annex(ptr,len,bytes);
 }
-bool event(Session& s,MediaEventType& type) {
-    auto deadline=GetTickCount64()+180;
+bool event(Session& s,MediaEventType& type,ULONGLONG deadline) {
     while(GetTickCount64()<deadline) {
         ComPtr<IMFMediaEvent> e;
         HRESULT hr=s.events->GetEvent(MF_EVENT_FLAG_NO_WAIT,&e);
@@ -240,27 +250,34 @@ static int encode_frame(void* handle,const uint8_t* nv12,size_t n,ID3D11Texture2
         }
         if(n!=size_t(s.w)*s.h*3/2) return -1;
         bool fed=false;
-        for(unsigned i=0;i<12;++i) {
+        // One polling budget per access unit, not one per event. Driver
+        // calls themselves may block; this is not an end-to-end deadline.
+        const auto deadline=GetTickCount64()+180;
+        for(unsigned i=0;i<12 && GetTickCount64()<deadline;++i) {
             if(s.need && !fed) {
                 if(!input(s,nv12,static_cast<DWORD>(n),texture)) return -1;
                 s.need=false; fed=true;
             }
             MediaEventType type;
-            if(!event(s,type)) return -1;
+            if(!event(s,type,deadline)) return -1;
             if(type==METransformNeedInput) { s.need=true; continue; }
             if(type!=METransformHaveOutput) continue;
             if(!fed) return -1; // no stale buffered output may be attributed to this input
-            std::vector<uint8_t> bytes;
+            auto& bytes=s.encoded;
+            bytes.clear();
             if(!output(s,bytes)) return -1;
             auto nal=scan(bytes);
             if(nal.sps && nal.pps) s.headers=nal.params;
             if(s.frame==1 && !nal.idr) return -1;
-            if(nal.idr && (!nal.sps || !nal.pps)) {
-                if(s.headers.empty()) return -1;
-                bytes.insert(bytes.begin(),s.headers.begin(),s.headers.end());
-            }
-            if(bytes.empty() || bytes.size()>cap) return -1;
-            memcpy(dst,bytes.data(),bytes.size()); *written=bytes.size(); return 0;
+            const bool prepend=nal.idr && (!nal.sps || !nal.pps);
+            const size_t header_len=prepend?s.headers.size():0;
+            if((prepend && !header_len) || bytes.empty() || bytes.size()>cap ||
+               header_len>cap-bytes.size()) return -1;
+            // Write directly to the caller's output; no vector insertion
+            // or shifting the encoded access unit to prepend parameters.
+            if(header_len) memcpy(dst,s.headers.data(),header_len);
+            memcpy(dst+header_len,bytes.data(),bytes.size());
+            *written=header_len+bytes.size(); return 0;
         }
         return -1;
     } catch(...) { return -1; }
@@ -272,3 +289,25 @@ extern "C" int p2p_mf_encode_gpu(void* handle,void* texture,uint8_t* dst,size_t 
     return texture?encode_frame(handle,nullptr,0,static_cast<ID3D11Texture2D*>(texture),dst,cap,written):-1;
 }
 extern "C" void p2p_mf_destroy(void* handle) noexcept { delete static_cast<Session*>(handle); }
+
+// Exercise the same Annex-B conversion and scratch allocation with bounded
+// fixtures. This is not a hardware encoder or performance test.
+extern "C" int p2p_mf_test_scratch() noexcept {
+    try {
+        std::vector<uint8_t> scratch;
+        const uint8_t first[]={0,0,0,2,0x67,0x12,0,0,0,2,0x68,0x34,0,0,0,2,0x65,0x56};
+        if(!annex(first,sizeof(first),scratch)) return 0;
+        auto nal=scan(scratch);
+        if(!nal.sps || !nal.pps || !nal.idr) return 0;
+        auto* allocation=scratch.data();
+        const uint8_t second[]={0,0,0,1,0x41,0x78};
+        if(!annex(second,sizeof(second),scratch) || scratch.data()!=allocation ||
+           scratch.size()!=sizeof(second) || memcmp(scratch.data(),second,sizeof(second))) return 0;
+        nal=scan(scratch);
+        if(nal.sps || nal.pps || nal.idr || !nal.params.empty()) return 0;
+        const uint8_t invalid[]={0,0,0,9,0x65,0x42};
+        if(annex(invalid,sizeof(invalid),scratch)) return 0;
+        if(!annex(second,sizeof(second),scratch) || scratch.size()!=sizeof(second)) return 0;
+        return 1;
+    } catch(...) {return 0;}
+}
