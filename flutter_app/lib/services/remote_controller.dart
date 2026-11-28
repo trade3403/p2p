@@ -121,7 +121,9 @@ class P2PRemoteController extends ChangeNotifier {
     }
     _performanceReadBusy = true;
     try {
-      final response = await _invoke(const <String, Object?>{'method': 'snapshot'});
+      final response = await _invoke(const <String, Object?>{
+        'method': 'snapshot', 'performance_resources': true,
+      });
       if (!identical(series, _performanceSeries) || !series.active) return;
       final raw = response['snapshot'];
       if (response['ok'] != true || raw is! Map) {
@@ -135,6 +137,14 @@ class P2PRemoteController extends ChangeNotifier {
       if (!active) {
         stopPerformanceSampling('session_inactive');
         return;
+      }
+      // The Flutter UI and native engine share this process. RSS is sampled
+      // only during explicit diagnostics; unsupported OS readings remain null.
+      try {
+        final rss = ProcessInfo.currentRss;
+        snapshot['process_rss_bytes'] = rss > 0 ? rss : null;
+      } catch (_) {
+        snapshot['process_rss_bytes'] = null;
       }
       series.add(snapshot, elapsedMs: clock.elapsedMilliseconds,
           capturedAt: DateTime.now().toUtc());

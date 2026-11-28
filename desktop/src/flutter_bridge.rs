@@ -27,6 +27,47 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+// Windows process user + kernel CPU time, not system-wide CPU or GPU usage.
+#[repr(C)]
+struct ProcessFileTime {
+    low: u32,
+    high: u32,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    fn GetProcessTimes(
+        process: *mut std::ffi::c_void,
+        creation: *mut ProcessFileTime,
+        exit: *mut ProcessFileTime,
+        kernel: *mut ProcessFileTime,
+        user: *mut ProcessFileTime,
+    ) -> i32;
+}
+
+fn process_cpu_ms() -> Option<u64> {
+    let zero = || ProcessFileTime { low: 0, high: 0 };
+    let (mut creation, mut exit, mut kernel, mut user) = (zero(), zero(), zero(), zero());
+    // GetCurrentProcess returns a pseudo handle which must not be closed.
+    let ok = unsafe {
+        GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user)
+    };
+    if ok == 0 {
+        return None;
+    }
+    let ticks = |t: ProcessFileTime| (u64::from(t.high) << 32) | u64::from(t.low);
+    ticks(kernel).checked_add(ticks(user)).map(|v| v / 10_000)
+}
+
+#[cfg(test)]
+#[test]
+fn process_cpu_counter_is_available_and_monotonic() {
+    let before = process_cpu_ms().expect("Windows process CPU counter");
+    let after = process_cpu_ms().expect("Windows process CPU counter");
+    assert!(after >= before);
+}
+
 const MAX_COMMAND_BYTES: usize = 64 * 1024;
 const MAX_EVENTS: usize = 256;
 const MAX_FRAME_BYTES: usize = 3 * 1024 * 1024;
@@ -227,7 +268,13 @@ impl Engine {
             return self.fail("缺少 method");
         };
         match method {
-            "snapshot" => self.response(json!({})),
+            "snapshot" => {
+                let mut result = self.response(json!({}));
+                if value.get("performance_resources").and_then(Value::as_bool) == Some(true) {
+                    result["snapshot"]["process_cpu_ms"] = json!(process_cpu_ms());
+                }
+                result
+            },
             "configureRelay" => self.configure_relay(&value),
             "startHost" => self.start_host(),
             "stopHost" => self.stop_host(),

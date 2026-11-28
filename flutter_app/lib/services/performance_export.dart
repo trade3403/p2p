@@ -1,5 +1,17 @@
 import 'dart:convert';
 
+// Closed backend enums: never export arbitrary codec/component names.
+void _addResources(Map<String, Object?> metrics, Map<String, dynamic> snapshot,
+    {required bool active}) {
+  for (final key in ['process_cpu_ms', 'process_rss_bytes']) {
+    final value = snapshot[key];
+    metrics[key] = active && value is int && value >= 0 &&
+        (key != 'process_rss_bytes' || value > 0) ? value : null;
+  }
+  // No portable measured GPU utilization source yet.
+  metrics['process_gpu_utilization_percent'] = null;
+}
+
 /// Exports only explicitly approved scalar diagnostics, never the raw snapshot.
 /// Missing or invalid data remains null; zero is a measured/reported zero.
 String exportPerformanceSnapshot(Map<String, dynamic> snapshot,
@@ -50,6 +62,21 @@ String exportPerformanceSnapshot(Map<String, dynamic> snapshot,
     final value = snapshot[entry.key];
     metrics[entry.key] = entry.value.contains(value) ? value : null;
   }
+  _addResources(metrics, snapshot, active: snapshot['viewer_requested'] == true);
+  final current = snapshot['host_metadata_current'] == true &&
+      snapshot['viewer_connected'] == true;
+  const encoders = ['Media Foundation D3D11 texture', 'Media Foundation hardware',
+    'OpenH264 software', 'JPEG'];
+  const captureBackends = ['DXGI', 'screenshots compatibility'];
+  metrics['video_encoder'] = current && encoders.contains(snapshot['video_encoder'])
+      ? snapshot['video_encoder'] : null;
+  metrics['capture_backend'] = current && captureBackends.contains(snapshot['capture_backend'])
+      ? snapshot['capture_backend'] : null;
+  final decoderHardware = snapshot['avc_decoder_hardware'];
+  metrics['decoder_backend_class'] = snapshot['viewer_connected'] == true &&
+      snapshot['active_video_codec'] == 'H264' &&
+      snapshot['avc_decoder_recovering'] == false && decoderHardware is bool
+      ? (decoderHardware ? 'hardware' : 'software') : null;
   return const JsonEncoder.withIndent('  ').convert({
     'schema_version': 1,
     'captured_at_utc': capturedAt.toUtc().toIso8601String(),
@@ -79,6 +106,7 @@ String exportHostPerformanceSnapshot(Map<String, dynamic> snapshot,
     final value = snapshot[key];
     metrics[key] = running == true && value is bool ? value : null;
   }
+  _addResources(metrics, snapshot, active: running == true);
   return const JsonEncoder.withIndent('  ').convert({
     'schema_version': 1,
     'captured_at_utc': capturedAt.toUtc().toIso8601String(),

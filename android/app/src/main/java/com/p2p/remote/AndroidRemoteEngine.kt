@@ -198,7 +198,8 @@ internal class AndroidRemoteEngine(
     }
 
     fun snapshotResponse(): Map<String, Any?> =
-        mapOf("ok" to true, "snapshot" to snapshotMap())
+        mapOf("ok" to true, "snapshot" to (snapshotMap() +
+            ("process_cpu_ms" to android.os.Process.getElapsedCpuTime().takeIf { it >= 0L })))
 
     fun emitSnapshot(force: Boolean = false) {
         val snapshot = snapshotMap()

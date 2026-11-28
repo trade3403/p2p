@@ -45,6 +45,51 @@ def phase(metrics, role):
     return "unknown"
 
 
+def summarize_resources(samples, role):
+    # Optional for legacy exports; missing data is never converted to zero.
+    cpu = []
+    rss = []
+    for sample in samples:
+        m = sample["metrics"]
+        t = sample["elapsed_ms"]
+        for key, dest in (("process_cpu_ms", cpu), ("process_rss_bytes", rss)):
+            value = m.get(key)
+            if value is not None:
+                uint(value, "invalid resource counter: " + key)
+                require(key != "process_rss_bytes" or value > 0, "invalid RSS")
+            dest.append((t, value))
+    known_cpu = [(t, v) for t, v in cpu if v is not None]
+    require(all(b[1] >= a[1] for a, b in zip(known_cpu, known_cpu[1:])), "process CPU reset")
+    rates = [(b[1]-a[1])*100/(b[0]-a[0]) for a,b in zip(cpu,cpu[1:])
+             if a[1] is not None and b[1] is not None]
+    memory = [v for _,v in rss if v is not None]
+    complete_cpu = len(known_cpu) == len(samples)
+    result = {
+        "process_cpu_sample_count": len(known_cpu),
+        "process_cpu_interval_count": len(rates),
+        "process_cpu_one_core_percent_mean": (
+            (cpu[-1][1]-cpu[0][1])*100/(cpu[-1][0]-cpu[0][0]) if complete_cpu else None),
+        "process_cpu_one_core_percent_max_observed": max(rates, default=None),
+        "process_rss_sample_count": len(memory),
+        "process_rss_min_bytes": min(memory, default=None),
+        "process_rss_max_bytes": max(memory, default=None),
+        "process_gpu_utilization_percent": None,
+    }
+    if role == "viewer":
+        enums = {
+            "video_encoder": ("Media Foundation D3D11 texture", "Media Foundation hardware",
+                              "OpenH264 software", "JPEG"),
+            "capture_backend": ("DXGI", "screenshots compatibility"),
+            "decoder_backend_class": ("hardware", "software"),
+        }
+        for key, allowed in enums.items():
+            values = [s["metrics"].get(key) for s in samples]
+            require(all(v is None or v in allowed for v in values), "invalid backend class")
+            result[key + "_sample_counts"] = {v: values.count(v) for v in allowed if v in values}
+            result[key + "_missing_samples"] = values.count(None)
+    return result
+
+
 def analyze(series, role, transport):
     require(role in ("host", "viewer") and transport in ("lan", "relay"), "invalid role or transport")
     require(isinstance(series, dict) and type(series.get("schema_version")) is int
@@ -118,6 +163,7 @@ def analyze(series, role, transport):
         result.update(avc_output_per_second=totals["avc_rendered_frames"] * 1000 / duration,
                       rtt_observation_min_ms=min(rtts), rtt_observation_max_ms=max(rtts),
                       rtt_observation_mean_ms=sum(rtts) / len(rtts))
+    result["resources"] = summarize_resources(samples, role)
     return result, points[0][1], points[-1][1]
 
 
@@ -140,7 +186,8 @@ def summarize(host, viewer, transport):
             "Endpoint observations cannot exclude transitions between samples.",
             "Host and viewer windows are independent; UTC overlap does not establish synchronization or session identity.",
             "Video counters are application transport counters, not NIC traffic; packet rate and decoder output are not display FPS.",
-            "RTT is not display latency; CPU/GPU/RAM and hardware provenance are not validated by this schema.",
+            "RTT is not display latency. Process CPU uses one-core percent (may exceed 100); RSS is not total system RAM. GPU utilization unavailable.",
+            "Backend classes are reported observations, not independent hardware provenance; host encoder classification is viewer metadata, not a global host backend.",
         ],
     }
 

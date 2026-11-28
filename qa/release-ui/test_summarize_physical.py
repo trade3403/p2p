@@ -41,6 +41,36 @@ class PairedSeriesTests(unittest.TestCase):
             self.assertNotIn("SECRET_MARKER",str(r))
             self.assertNotIn("untrusted",str(r))
 
+    def test_measured_resource_arithmetic_and_missing(self):
+        h,v=series("host"),series("viewer")
+        for i,s in enumerate(v["samples"]):
+            s["metrics"].update(process_cpu_ms=100+i*3000, process_rss_bytes=4096+i*1024,
+                video_encoder="OpenH264 software", capture_backend="DXGI",
+                decoder_backend_class="software", process_gpu_utilization_percent=99)
+        r=summarize(h,v,"lan")
+        self.assertEqual(r["viewer"]["resources"]["process_cpu_one_core_percent_mean"],150)
+        self.assertEqual(r["viewer"]["resources"]["process_rss_max_bytes"],9216)
+        self.assertEqual(r["viewer"]["resources"]["video_encoder_sample_counts"],{"OpenH264 software":6})
+        self.assertIsNone(r["viewer"]["resources"]["process_gpu_utilization_percent"])
+        self.assertIsNone(r["host"]["resources"]["process_cpu_one_core_percent_mean"])
+        v["samples"][2]["metrics"]["process_cpu_ms"]=None
+        r=summarize(h,v,"lan")
+        self.assertIsNone(r["viewer"]["resources"]["process_cpu_one_core_percent_mean"])
+        self.assertEqual(r["viewer"]["resources"]["process_cpu_interval_count"],3)
+
+    def test_invalid_resources(self):
+        for key,value in (("process_cpu_ms",True),("process_rss_bytes",0),
+                          ("video_encoder","PRIVATE_MARKER"),("decoder_backend_class","unknown")):
+            h,v=series("host"),series("viewer")
+            v["samples"][1]["metrics"][key]=value
+            with self.assertRaises(ValueError):
+                summarize(h,v,"lan")
+        h,v=series("host"),series("viewer")
+        v["samples"][0]["metrics"]["process_cpu_ms"]=100
+        v["samples"][2]["metrics"]["process_cpu_ms"]=99
+        with self.assertRaises(ValueError):
+            summarize(h,v,"lan")
+
     def test_independent_windows(self):
         h,v=series("host"),series("viewer")
         for i,s in enumerate(v["samples"]):

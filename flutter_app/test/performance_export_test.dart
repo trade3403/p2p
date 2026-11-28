@@ -74,17 +74,49 @@ void main() {
     expect(result.toString(), isNot(contains('PRIVATE_MARKER')));
   });
 
+  test('resource and actual backend exports use safe fields and preserve unknown', () {
+    final metrics = (jsonDecode(exportPerformanceSnapshot({
+      'viewer_requested': true, 'viewer_connected': true,
+      'host_metadata_current': true, 'active_video_codec': 'H264',
+      'video_encoder': 'Media Foundation hardware', 'capture_backend': 'DXGI',
+      'avc_decoder_hardware': false, 'avc_decoder_recovering': false,
+      'process_cpu_ms': 123, 'process_rss_bytes': 4096,
+      'process_gpu_utilization_percent': 42, 'avc_decoder': 'PRIVATE_MARKER',
+    }, capturedAt: DateTime.utc(2026))) as Map)['metrics'] as Map;
+    expect(metrics['process_cpu_ms'], 123);
+    expect(metrics['process_rss_bytes'], 4096);
+    expect(metrics['process_gpu_utilization_percent'], isNull);
+    expect(metrics['video_encoder'], 'Media Foundation hardware');
+    expect(metrics['capture_backend'], 'DXGI');
+    expect(metrics['decoder_backend_class'], 'software');
+    expect(metrics.toString(), isNot(contains('PRIVATE_MARKER')));
+    final missing = (jsonDecode(exportPerformanceSnapshot({
+      'viewer_requested': true, 'viewer_connected': true,
+      'host_metadata_current': false, 'active_video_codec': 'H264',
+      'video_encoder': 'OpenH264 software', 'avc_decoder_hardware': true,
+      'avc_decoder_recovering': true, 'process_cpu_ms': -1, 'process_rss_bytes': 0,
+    }, capturedAt: DateTime.utc(2026))) as Map)['metrics'] as Map;
+    for (final key in ['video_encoder', 'decoder_backend_class',
+      'process_cpu_ms', 'process_rss_bytes']) {
+      expect(missing[key], isNull);
+    }
+  });
+
   test('stopped or unknown host never exports stale counters', () {
     for (final running in [false, null]) {
       final result = jsonDecode(exportHostPerformanceSnapshot({
         'host_running': running,
         'host_lan_active': true,
         'host_lan_video_bytes': 200,
+        'process_cpu_ms': 100,
+        'process_rss_bytes': 4096,
       }, capturedAt: DateTime.utc(2026))) as Map;
       final metrics = result['metrics'] as Map;
       expect(metrics['host_running'], running);
       expect(metrics['host_lan_active'], isNull);
       expect(metrics['host_lan_video_bytes'], isNull);
+      expect(metrics['process_cpu_ms'], isNull);
+      expect(metrics['process_rss_bytes'], isNull);
     }
   });
 }
