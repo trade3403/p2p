@@ -11,20 +11,20 @@ pub fn desktop_allowed()->bool { unsafe {p2p_capture_desktop_allowed()==1} }
 type Geometry=(i32,i32,u32,u32);
 struct Output {
     handle:NonNull<c_void>,
-    rgba:Vec<u8>,
+    rgba:RgbaImage,
     ready:bool,
 }
 impl Output {
     fn new((x,y,w,h):Geometry)->Option<Self>{
         if w<2||h<2||w>8192||h>8192||u64::from(w)*u64::from(h)>34_000_000{return None;}
         let handle=NonNull::new(unsafe{p2p_dxgi_create(x,y,w,h)})?;
-        Some(Self{handle,rgba:vec![0;w as usize*h as usize*4],ready:false})
+        Some(Self{handle,rgba:RgbaImage::new(w,h),ready:false})
     }
 }
 impl Drop for Output {
     fn drop(&mut self){unsafe{p2p_dxgi_destroy(self.handle.as_ptr())}}
 }
-pub enum Read { Fresh(RgbaImage), Reused, Fallback, Blocked }
+pub enum Read { Fresh, Reused, Fallback, Blocked }
 #[derive(Default)]
 pub struct DesktopCapture {
     geometry:Option<Geometry>,
@@ -33,6 +33,11 @@ pub struct DesktopCapture {
 }
 impl DesktopCapture {
     pub fn clear(&mut self){self.output=None;self.geometry=None;self.retry_after=None;}
+    // Borrow the persistent CPU readback buffer only after successful read.
+    // No full-resolution clone; the worker never mutates it during encoding.
+    pub fn image(&self)->Option<&RgbaImage> {
+        self.output.as_ref().filter(|o|o.ready).map(|o|&o.rgba)
+    }
     pub fn read(&mut self,g:Geometry)->Read {
         if !desktop_allowed(){self.clear();return Read::Blocked;}
         if self.geometry!=Some(g){self.clear();self.geometry=Some(g);}
@@ -51,10 +56,10 @@ impl DesktopCapture {
         if code==0 && output.ready { return Read::Reused; }
         if code==1 {
             output.ready=true;
-            if let Some(image)=RgbaImage::from_raw(g.2,g.3,output.rgba.clone()){
-                return Read::Fresh(image);
-            }
+            return Read::Fresh;
         }
+        // No stale pixel access after any unsuccessful non-reuse read.
+        output.ready=false;
         if code == -2 {self.clear();return Read::Blocked;}
         if code != 0 {
             self.output=None;

@@ -80,6 +80,8 @@ fn timing_samples_preserve_denominator_and_checked_interval() {
 #[derive(Default)]
 struct PixelCache {
     geometry: Option<(i32,i32,u32,u32)>,
+    // Owns only a scaled image or compatibility screenshot. At native
+    // DXGI resolution the worker borrows the readback buffer directly.
     rgba: Option<image::RgbaImage>,
     yuv: Option<openh264::formats::YUVBuffer>,
 }
@@ -100,6 +102,16 @@ pub fn dimensions(source_w: u32, source_h: u32) -> (u32, u32) {
     let w = (((source_w as f64 * scale).round() as u32).max(2).min(1280)) & !1;
     let h = (((source_h as f64 * scale).round() as u32).max(2).min(720)) & !1;
     (w.max(2), h.max(2))
+}
+
+#[cfg(windows)]
+fn scale_if_needed(raw: &image::RgbaImage) -> anyhow::Result<Option<image::RgbaImage>> {
+    let (raw_w,raw_h)=raw.dimensions();
+    let (w,h)=dimensions(raw_w,raw_h);
+    if w<2||h<2 {return Err(anyhow::anyhow!("display has invalid dimensions"));}
+    Ok(if (raw_w,raw_h)==(w,h) {None} else {
+        Some(image::imageops::resize(raw,w,h,image::imageops::FilterType::Triangle))
+    })
 }
 
 #[cfg(windows)]
@@ -256,7 +268,7 @@ fn capture(
     stats: &VideoStats,
 ) -> anyhow::Result<Option<Frame>> {
     use anyhow::{anyhow, Context};
-    use image::{imageops::FilterType, codecs::jpeg::JpegEncoder, RgbaImage};
+    use image::{codecs::jpeg::JpegEncoder, RgbaImage};
     use openh264::{
         encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode},
         formats::{RgbaSliceU8, YUVBuffer},
@@ -308,9 +320,9 @@ fn capture(
     // Legacy JPEG behavior is retained for protocol compatibility.
     let result=if h264 {desktop_capture.read(geometry)}
         else {desktop_capture.clear();Read::Fallback};
-    let (fresh,backend,reused)=match result {
-        Read::Fresh(img)=>(Some(img),2,false),
-        Read::Reused if cache.geometry==Some(geometry) && cache.rgba.is_some()=>(None,2,true),
+    let (fallback,backend,reused)=match result {
+        Read::Fresh=>(None,2,false),
+        Read::Reused if cache.geometry==Some(geometry) && desktop_capture.image().is_some()=>(None,2,true),
         // Never reuse a stale cached image after losing its provenance.
         Read::Reused=>{desktop_capture.clear();cache.clear();return Ok(None);}
         Read::Blocked=>{cache.clear();return Err(anyhow!("desktop capture blocked"));}
@@ -332,19 +344,25 @@ fn capture(
     else {stats.fresh_frames.fetch_add(1,Ordering::Relaxed);}
     stats.capture.record(capture_start);
     let encode_start=Instant::now();
-    if let Some(rgba)=fresh {
-        let (raw_w,raw_h)=rgba.dimensions();
-        let (w,h)=dimensions(raw_w,raw_h);
-        if w<2||h<2 {return Err(anyhow!("display has invalid dimensions"));}
-        cache.rgba=Some(if (raw_w,raw_h)==(w,h) {rgba} else {
-            image::imageops::resize(&rgba,w,h,FilterType::Triangle)
-        });
+    if !reused {
+        cache.rgba=if let Some(rgba)=fallback {
+            // Compatibility capture already owns its source buffer.
+            Some(scale_if_needed(&rgba)?.unwrap_or(rgba))
+        } else {
+            // DXGI owns the raw image throughout this synchronous encode.
+            // Resize directly from it, or borrow it at matching dimensions.
+            scale_if_needed(desktop_capture.image().context("DXGI frame missing")?)?
+        };
         cache.yuv=None;
         cache.geometry=Some(geometry);
-    } else {
+    } else if cache.rgba.is_some() {
+        // Count only actual cached resized images; native-size reuse needs
+        // neither a resize nor an allocation.
         stats.resize_cache_hits.fetch_add(1,Ordering::Relaxed);
     }
-    let image=cache.rgba.as_ref().context("scaled frame missing")?;
+    let image=cache.rgba.as_ref().or_else(|| {
+        if backend==2 {desktop_capture.image()} else {None}
+    }).context("capture frame missing")?;
     let (w,h)=image.dimensions();
     if h264 {
         // Hardware is classified only after a successfully emitted, validated AVC unit.
@@ -436,6 +454,20 @@ mod tests {
             assert_eq!(out_h % 2,0);
         }
         assert_eq!(dimensions(1920,1080), (1280,720));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scale_only_allocates_when_dimensions_require_it() {
+        let native=image::RgbaImage::from_pixel(640,480,image::Rgba([12,34,56,255]));
+        assert!(scale_if_needed(&native).unwrap().is_none());
+        let large=image::RgbaImage::from_pixel(1920,1080,image::Rgba([12,34,56,255]));
+        let resized=scale_if_needed(&large).unwrap().unwrap();
+        assert_eq!(resized.dimensions(),(1280,720));
+        assert_eq!(*resized.get_pixel(640,360),image::Rgba([12,34,56,255]));
+        let odd=image::RgbaImage::from_pixel(641,481,image::Rgba([1,2,3,255]));
+        assert_eq!(scale_if_needed(&odd).unwrap().unwrap().dimensions(),(640,480));
+        assert!(scale_if_needed(&image::RgbaImage::new(1,1)).is_err());
     }
 
     #[cfg(windows)]
