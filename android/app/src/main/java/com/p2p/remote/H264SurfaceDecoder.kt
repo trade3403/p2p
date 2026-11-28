@@ -3,6 +3,7 @@ package com.p2p.remote
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaCodecList
+import android.media.MediaCodecInfo
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -18,6 +19,29 @@ internal class H264SurfaceDecoder(
     private val onRendered: (Long) -> Unit,
     private val onDecoderError: (Long, String) -> Unit,
 ) {
+    companion object {
+        private fun emulator():Boolean =
+            Build.HARDWARE.contains("goldfish",true) ||
+            Build.HARDWARE.contains("ranchu",true) ||
+            Build.FINGERPRINT.startsWith("generic") ||
+            Build.FINGERPRINT.contains("sdk_gphone",true)
+
+        private fun capableHardware(info:MediaCodecInfo,w:Int,h:Int):Boolean {
+            if(Build.VERSION.SDK_INT<29 || emulator()) return false
+            if(info.isEncoder || !info.isHardwareAccelerated || info.isSoftwareOnly ||
+                info.name.contains("goldfish",true) || info.name.contains("ranchu",true)) return false
+            return runCatching {
+                info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                    .videoCapabilities.areSizeAndRateSupported(w,h,30.0)
+            }.getOrDefault(false)
+        }
+
+        fun supportsFullHd30():Boolean = runCatching {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any {
+                capableHardware(it,1920,1080)
+            }
+        }.getOrDefault(false)
+    }
     private val thread = HandlerThread("P2PRemote-H264").apply { start() }
     private val handler = Handler(thread.looper)
     private val admissions = AvcDecodeQueue()
@@ -53,7 +77,7 @@ internal class H264SurfaceDecoder(
         }
     }
 
-    @Synchronized fun offer(packet: ByteArray) {
+    @Synchronized fun offer(packet: ByteArray, requireFullHdHardware:Boolean=false) {
         val header = AvcPayload.parse(packet) ?: return
         val ticket = admissions.admit(header.width, header.height) ?: return
         val g = ticket.generation
@@ -68,7 +92,7 @@ internal class H264SurfaceDecoder(
                         if (workerTicket?.generation != g) lastErrorAt = 0L
                         workerTicket = ticket
                     }
-                    decode(header, g)
+                    decode(header, g, requireFullHdHardware)
                 }
             } catch (error: Exception) {
                 admissions.beginRecovery(g)
@@ -85,7 +109,7 @@ internal class H264SurfaceDecoder(
         if (!accepted) admissions.complete(ticket)
     }
 
-    private fun decode(unit: AvcPayload, g: Long) {
+    private fun decode(unit: AvcPayload, g: Long, requireFullHdHardware:Boolean) {
         val target = surface ?: return
         if (!target.isValid) return
         val w = unit.width
@@ -100,6 +124,7 @@ internal class H264SurfaceDecoder(
             if(Build.VERSION.SDK_INT>=30) format.setInteger(MediaFormat.KEY_LOW_LATENCY,1)
             val candidates=MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
                 .filter { !it.isEncoder && it.supportedTypes.any { t -> t.equals(MediaFormat.MIMETYPE_VIDEO_AVC,true) } }
+                .filter { !requireFullHdHardware || (w<=1280 && h<=720) || capableHardware(it,w,h) }
                 .sortedByDescending { if(Build.VERSION.SDK_INT>=29 && it.isHardwareAccelerated) 1 else 0 }
             for(info in candidates) {
                 var candidate:MediaCodec?=null

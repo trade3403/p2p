@@ -103,6 +103,9 @@ internal class AndroidRemoteEngine(
     private var h264Active = false
     private var hasVideoSurface = false
     private var avcRequested = false
+    private val fullHdPolicy=FullHdPolicy()
+    private var hostFullHdNegotiation=false
+    private val localFullHdCapable by lazy { H264SurfaceDecoder.supportsFullHd30() }
     private var renderedAvcFrames = 0L
     private var receivedAvcBytes = 0L
     private var videoTargetBps = 0
@@ -157,6 +160,7 @@ internal class AndroidRemoteEngine(
                         receivedFrames++
                         renderedAvcFrames++
                         lastFrameAtMs = SystemClock.elapsedRealtime()
+                        fullHdPolicy.rendered(h264Width>1280 || h264Height>720)
                         if (!usingLan) lanRecovery.relayVideo(lastFrameAtMs)
                         retryAttempt = 0
                         status = "已连接家庭电脑 · H.264 正在播放"
@@ -169,8 +173,14 @@ internal class AndroidRemoteEngine(
                         status = message
                         // A codec that cannot start must not leave a black screen.
                         if (avcRequested) {
-                            avcRequested = false
-                            sendVideoControl(JSONObject().put("type","video_codec").put("codec","jpeg"))
+                            if (fullHdPolicy.downgrade()) {
+                                receivingFrames=false
+                                avcDecoder.reset()
+                                sendVideoControl(JSONObject().put("type","video_codec").put("codec","h264"))
+                            } else {
+                                avcRequested = false
+                                sendVideoControl(JSONObject().put("type","video_codec").put("codec","jpeg"))
+                            }
                         }
                     }
                 }
@@ -289,6 +299,8 @@ internal class AndroidRemoteEngine(
         "measured_video_bps" to measuredBps,
         "video_target_bps" to videoTargetBps,
         "video_target_fps" to videoTargetFps,
+        "full_hd_negotiation" to hostFullHdNegotiation,
+        "full_hd_state" to fullHdPolicy.state.name.lowercase(),
         "video_encoder" to videoEncoder,
         "capture_backend" to captureBackend,
         "capture_avg_us" to captureAvgUs,
@@ -725,6 +737,7 @@ internal class AndroidRemoteEngine(
                                             udpLastFrameAtMs = 0L
                                             transport = "VPS WSS 中转"
                                         }
+                                        if (fullHdPolicy.rejectRetiredFormat(accessUnit.width,accessUnit.height)) return@post
                                         if (!h264Active || h264Width!=accessUnit.width || h264Height!=accessUnit.height) {
                                             // A new format is not connected until the current
                                             // decoder generation actually submits output.
@@ -738,7 +751,7 @@ internal class AndroidRemoteEngine(
                                         frame=null
                                         // Queue AVC only after the main-thread socket identity
                                         // check, ordered with disconnect/reset and codec changes.
-                                        avcDecoder.offer(accessUnit.bytes)
+                                        avcDecoder.offer(accessUnit.bytes,fullHdPolicy.requiresHardware())
                                     }
                                 }
                             }
@@ -765,6 +778,7 @@ internal class AndroidRemoteEngine(
                                         hostAllowsClipboard=clipboardAllowed
                                         videoTargetBps=metadata.optInt("video_target_bps",0)
                                         videoTargetFps=metadata.optInt("video_target_fps",0)
+                                        hostFullHdNegotiation=metadata.opt("video_full_hd_gpu_negotiation")==true
                                         videoEncoder=metadata.optString("video_encoder","")
                                         captureBackend=metadata.optString("capture_backend","unknown")
                                         captureAvgUs=metadata.optLong("capture_avg_us",0)
@@ -1112,6 +1126,8 @@ internal class AndroidRemoteEngine(
         sampleDrops=if(hasVideoSurface) avcDecoder.droppedFrames else 0
         renderedFps=0.0
         measuredBps=0
+        fullHdPolicy.reset()
+        hostFullHdNegotiation=false
         avcRequested=hasVideoSurface
         if(avcRequested) sendVideoControl(JSONObject().put("type","video_codec").put("codec","h264"))
         watchdogTask = object : Runnable {
@@ -1126,6 +1142,20 @@ internal class AndroidRemoteEngine(
                 if(avcRequested && hasVideoSurface) {
                     val now=SystemClock.elapsedRealtime()
                     val elapsed=(now-sampleAt).coerceAtLeast(1)
+                    if (fullHdPolicy.expired(now)) {
+                        if (fullHdPolicy.downgrade()) {
+                            // Keep a working 720p decoder if the host already fell back.
+                            if(h264Width>1280 || h264Height>720) {
+                                receivingFrames=false
+                                avcDecoder.reset()
+                            }
+                            sendVideoControl(JSONObject().put("type","video_codec").put("codec","h264"))
+                        }
+                    } else if (hostFullHdNegotiation && h264Active && receivingFrames &&
+                        fullHdPolicy.canAttempt() && localFullHdCapable &&
+                        fullHdPolicy.request(now)) {
+                        sendVideoControl(JSONObject().put("type","video_codec").put("codec","h264_1080p"))
+                    }
                     val drops=avcDecoder.droppedFrames
                     renderedFps=if(h264Active && receivingFrames) (renderedAvcFrames-sampleFrames)*1000.0/elapsed else 0.0
                     measuredBps=if(h264Active && receivingFrames) (receivedAvcBytes-sampleBytes)*8000L/elapsed else 0L
@@ -1318,6 +1348,8 @@ internal class AndroidRemoteEngine(
     // Session totals and LAN recovery history survive automatic reconnect.
     private fun clearLiveDiagnostics() {
         hostMetadataCurrent = false
+        hostFullHdNegotiation=false
+        fullHdPolicy.reset()
         videoTargetBps = 0
         videoTargetFps = 0
         videoEncoder = ""
