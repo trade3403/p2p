@@ -167,9 +167,63 @@ def analyze(series, role, transport):
     return result, points[0][1], points[-1][1]
 
 
-def summarize(host, viewer, transport):
+def summarize_gpu(report, host_start=None, host_end=None):
+    """Separate local process GPU engine observations, never whole-adapter load."""
+    require(isinstance(report, dict) and type(report.get("schema_version")) is int
+            and report["schema_version"] == 1
+            and report.get("sample_kind") == "windows_process_gpu_engine_series"
+            and report.get("source") == "windows_cim_formatted_gpu_engine"
+            and report.get("target_identity_stable") is True, "invalid GPU report")
+    interval = uint(report.get("nominal_interval_ms"), "invalid GPU interval")
+    require(1000 <= interval <= 4000, "invalid GPU interval")
+    samples = report.get("samples")
+    require(isinstance(samples, list) and 2 <= len(samples) <= MAX_SAMPLES, "invalid GPU sample count")
+    statuses = {"measured": 0, "no_matching_engine": 0, "provider_unavailable": 0}
+    maxima = []
+    points = []
+    for sample in samples:
+        require(isinstance(sample, dict), "invalid GPU sample")
+        elapsed = uint(sample.get("elapsed_ms"), "invalid GPU elapsed")
+        stamp = utc(sample.get("captured_at_utc"))
+        query = uint(sample.get("query_duration_ms"), "invalid GPU query duration")
+        require(query <= elapsed, "GPU query starts before collection")
+        if points:
+            require(elapsed > points[-1][0] and stamp >= points[-1][1]
+                    and query <= elapsed-points[-1][0], "invalid GPU sample order")
+        status = sample.get("status")
+        require(isinstance(status, str) and status in statuses, "invalid GPU status")
+        values = sample.get("engine_percentages")
+        require(isinstance(values, list) and all(type(v) is int and 0 <= v <= 100 for v in values),
+                "invalid GPU engine percent")
+        require(bool(values) == (status == "measured"), "GPU status contradicts samples")
+        statuses[status] += 1
+        if values:
+            maxima.append(max(values))
+        points.append((elapsed, stamp))
+    overlap = None
+    if host_start is not None and host_end is not None:
+        overlap = max(0, int((min(host_end, points[-1][1]) -
+                              max(host_start, points[0][1])).total_seconds() * 1000))
+    return {
+        "scope": "selected Windows process, maximum reported individual GPU engine instance; not total GPU utilization",
+        "source": "windows_cim_formatted_gpu_engine",
+        "sample_count": len(points),
+        "status_counts": statuses,
+        "duration_ms": points[-1][0] - points[0][0],
+        "max_sample_gap_ms": max(b[0]-a[0] for a,b in zip(points, points[1:])),
+        "measured_engine_max_percent_min": min(maxima, default=None),
+        "measured_engine_max_percent_max": max(maxima, default=None),
+        "measured_engine_max_percent_sample_mean": sum(maxima)/len(maxima) if maxima else None,
+        "host_utc_overlap_hint_ms": overlap,
+        "host_process_identity_independently_verified": False,
+    }
+
+
+def summarize(host, viewer, transport, host_gpu=None):
     h, hs, he = analyze(host, "host", transport)
     v, vs, ve = analyze(viewer, "viewer", transport)
+    if host_gpu is not None:
+        h["external_gpu_engine_observations"] = summarize_gpu(host_gpu, hs, he)
     # UTC is only a rough correlation aid; device clocks are not synchronized here.
     overlap = max(0, int((min(he, ve) - max(hs, vs)).total_seconds() * 1000))
     return {
@@ -186,7 +240,7 @@ def summarize(host, viewer, transport):
             "Endpoint observations cannot exclude transitions between samples.",
             "Host and viewer windows are independent; UTC overlap does not establish synchronization or session identity.",
             "Video counters are application transport counters, not NIC traffic; packet rate and decoder output are not display FPS.",
-            "RTT is not display latency. Process CPU uses one-core percent (may exceed 100); RSS is not total system RAM. GPU utilization unavailable.",
+            "RTT is not display latency. Process CPU uses one-core percent (may exceed 100); RSS is not total system RAM. Aggregate GPU utilization unavailable; optional Windows GPU-engine observations are separately scoped.",
             "Backend classes are reported observations, not independent hardware provenance; host encoder classification is viewer metadata, not a global host backend.",
         ],
     }
@@ -198,12 +252,16 @@ def main():
     parser.add_argument("--viewer", required=True, type=Path)
     parser.add_argument("--transport", required=True, choices=("lan", "relay"))
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--host-gpu", type=Path)
     args = parser.parse_args()
-    if args.output.resolve() in (args.host.resolve(), args.viewer.resolve()):
+    inputs = [args.host, args.viewer] + ([args.host_gpu] if args.host_gpu else [])
+    if args.output.resolve() in [p.resolve() for p in inputs]:
         parser.error("output must not overwrite either input")
     try:
+        gpu = json.loads(args.host_gpu.read_text(encoding="utf-8-sig")) if args.host_gpu else None
+        require(not args.host_gpu or isinstance(gpu, dict), "missing GPU report")
         result = summarize(json.loads(args.host.read_text(encoding="utf-8-sig")),
-                           json.loads(args.viewer.read_text(encoding="utf-8-sig")), args.transport)
+                           json.loads(args.viewer.read_text(encoding="utf-8-sig")), args.transport, gpu)
     except (ValueError, TypeError, OSError, OverflowError):
         # Do not print raw report values or paths. No partial success report.
         parser.exit(1, "Invalid or incomplete paired diagnostic evidence.\n")

@@ -1,7 +1,7 @@
 """Synthetic unit cases only; never physical performance evidence."""
 import unittest
 from datetime import datetime, timedelta, timezone
-from summarize_physical import summarize
+from summarize_physical import summarize, summarize_gpu
 
 
 def series(role, transport="lan"):
@@ -30,7 +30,52 @@ def series(role, transport="lan"):
     return result
 
 
+def gpu_series():
+    return dict(schema_version=1, sample_kind="windows_process_gpu_engine_series",
+                source="windows_cim_formatted_gpu_engine", target_identity_stable=True,
+                nominal_interval_ms=2000, samples=[
+        dict(elapsed_ms=10+i*2100, captured_at_utc=f"2026-01-01T00:00:0{i*2}Z",
+             query_duration_ms=10, status=status, engine_percentages=values)
+        for i,(status,values) in enumerate([
+            ("measured",[0,0]), ("measured",[20,60]), ("no_matching_engine",[]),
+            ("provider_unavailable",[])])])
+
+
 class PairedSeriesTests(unittest.TestCase):
+    def test_gpu_engine_observations_do_not_sum_engines(self):
+        r = summarize(series("host"),series("viewer"),"lan",gpu_series())
+        g = r["host"]["external_gpu_engine_observations"]
+        self.assertEqual(g["measured_engine_max_percent_max"],60)
+        self.assertEqual(g["measured_engine_max_percent_min"],0)
+        self.assertEqual(g["measured_engine_max_percent_sample_mean"],30)
+        self.assertEqual(g["status_counts"]["measured"],2)
+        self.assertEqual(g["host_utc_overlap_hint_ms"],6000)
+        self.assertFalse(g["host_process_identity_independently_verified"])
+        self.assertIsNone(r["viewer"]["resources"]["process_gpu_utilization_percent"])
+
+    def test_unavailable_gpu_is_not_zero(self):
+        g=gpu_series()
+        for s in g["samples"]:
+            s.update(status="provider_unavailable",engine_percentages=[])
+        r=summarize_gpu(g)
+        self.assertIsNone(r["measured_engine_max_percent_max"])
+        self.assertEqual(r["status_counts"]["provider_unavailable"],4)
+
+    def test_bad_gpu_evidence(self):
+        for change in (
+            lambda g:g.update(target_identity_stable=False),
+            lambda g:g["samples"][1].update(engine_percentages=[101]),
+            lambda g:g["samples"][1].update(engine_percentages=[True]),
+            lambda g:g["samples"][1].update(engine_percentages=[]),
+            lambda g:g["samples"][1].update(status="no_matching_engine"),
+            lambda g:g["samples"][1].update(elapsed_ms=10),
+            lambda g:g["samples"][1].update(query_duration_ms=2200),
+        ):
+            g=gpu_series()
+            change(g)
+            with self.assertRaises(ValueError):
+                summarize_gpu(g)
+
     def test_both_transports(self):
         for transport in ("lan", "relay"):
             r = summarize(series("host",transport),series("viewer",transport),transport)
