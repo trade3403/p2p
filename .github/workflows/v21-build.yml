@@ -122,6 +122,8 @@ jobs:
         run: |
           python -m unittest discover -s qa/release-ui -p test_summarize_evidence.py
           if ($LASTEXITCODE -ne 0) { throw 'Evidence validator unit tests failed' }
+          python -m unittest discover -s qa/release-ui -p test_summarize_physical.py
+          if ($LASTEXITCODE -ne 0) { throw 'Paired device evidence validator unit tests failed' }
           python qa/release-ui/summarize_evidence.py g1 evidence/windows/g1-lan-video.jsonl evidence/windows/g1-performance-summary.json
           if ($LASTEXITCODE -ne 0) { throw 'Measured G1 evidence validation failed' }
           python qa/release-ui/summarize_evidence.py g5b2 evidence/windows/g5b2-avc-handoff.jsonl evidence/windows/g5b2-performance-summary.json
