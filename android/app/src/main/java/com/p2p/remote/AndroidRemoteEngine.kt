@@ -44,7 +44,7 @@ internal class AndroidRemoteEngine(
     private var lanSequence: LanSequence? = null
     private fun encryptBusiness(key: ByteArray, kind: Int, plain: ByteArray): ByteArray {
         val nonce = if (usingLan) requireNotNull(lanSequence).nextNonce() else null
-        return encryptPacket(key, kind, plain, nonce)
+        return encryptEnginePacket(key, kind, plain, nonce)
     }
     private fun businessKey(): ByteArray? = if (usingLan) lanBusinessKey else secret
     private val decoding = AtomicBoolean(false)
@@ -555,7 +555,7 @@ internal class AndroidRemoteEngine(
                             val currentKey = secret
                             if(currentKey == null ||
                                 !webSocket.send(
-                                    encryptPacket(
+                                    encryptEnginePacket(
                                         currentKey, 6, requireNotNull(handshake).hello()
                                     ).toByteString()
                                 )
@@ -581,7 +581,7 @@ internal class AndroidRemoteEngine(
                 if (bytes.size > 0 && (bytes[0].toInt() and 255) == 10) {
                     try {
                         val key = secret ?: return
-                        val message = decryptPacket(key, bytes.toByteArray())
+                        val message = decryptEnginePacket(key, bytes.toByteArray())
                         if (message.first == 10 && message.second.size in 2..256 && !tryLan) {
                             val candidate = JSONObject(message.second.toString(Charsets.UTF_8))
                             main.post {
@@ -598,7 +598,7 @@ internal class AndroidRemoteEngine(
                 if (tryLan && bytes.size > 0 && (bytes[0].toInt() and 255) == 7) {
                     try {
                         val key = secret ?: return
-                        val (kind, payload) = decryptPacket(key, bytes.toByteArray())
+                        val (kind, payload) = decryptEnginePacket(key, bytes.toByteArray())
                         if (kind != 7) return
                         main.post {
                             if (socket === webSocket && requested && !lanVerified) {
@@ -609,7 +609,7 @@ internal class AndroidRemoteEngine(
                                 val state = requireNotNull(handshake)
                                 val proof = state.acceptChallenge(payload)
                                 if (proof != null) {
-                                    if (!webSocket.send(encryptPacket(key, 6, proof).toByteString())) {
+                                    if (!webSocket.send(encryptEnginePacket(key, 6, proof).toByteString())) {
                                         webSocket.cancel()
                                     }
                                 } else if (state.acceptReady(payload)) {
@@ -638,7 +638,7 @@ internal class AndroidRemoteEngine(
                         val key = lanBusinessKey ?: return
                         if (!lanVerified) return
                         val packet = bytes.toByteArray()
-                        val (kind, body) = decryptPacket(key, packet)
+                        val (kind, body) = decryptEnginePacket(key, packet)
                         if (kind != 9 || body.size != 8 || socket !== webSocket ||
                             !requireNotNull(replayGuard).accept(packet)) return
                         val token = ByteBuffer.wrap(body).long
@@ -654,7 +654,7 @@ internal class AndroidRemoteEngine(
                 try {
                     val key = (if (tryLan) lanBusinessKey else secret) ?: return
                     val packet = bytes.toByteArray()
-                    val original = decryptPacket(key, packet)
+                    val original = decryptEnginePacket(key, packet)
                     if (tryLan && !lanVerified) return
                     if (replayGuard != null && !replayGuard.accept(packet)) return
                     if (socket !== webSocket) return
@@ -1112,7 +1112,7 @@ internal class AndroidRemoteEngine(
             signal = { json ->
                 main.post {
                     if (requested && socket === ws) {
-                        try { ws.send(encryptPacket(key, 10,
+                        try { ws.send(encryptEnginePacket(key, 10,
                             json.toByteArray(Charsets.UTF_8)).toByteString()) }
                         catch (_: Exception) {}
                     }
@@ -1159,7 +1159,7 @@ internal class AndroidRemoteEngine(
             // before our encrypted candidate can arrive through the relay.
             val request = JSONObject().put("v",1).put("type","request").toString()
             val accepted = ws.send(
-                encryptPacket(key,10,request.toByteArray(Charsets.UTF_8)).toByteString()
+                encryptEnginePacket(key,10,request.toByteArray(Charsets.UTF_8)).toByteString()
             )
             if (accepted) {
                 probe.start()
@@ -1352,14 +1352,14 @@ private fun decodeKey(hex:String):ByteArray{
 }
 private fun sha256(bytes:ByteArray)=MessageDigest.getInstance("SHA-256").digest(bytes)
 private fun ByteArray.toHex():String=joinToString("") {"%02x".format(it.toInt() and 0xff)}
-internal fun encryptPacket(key:ByteArray,kind:Int,plain:ByteArray, suppliedNonce:ByteArray? = null):ByteArray{
+internal fun encryptEnginePacket(key:ByteArray,kind:Int,plain:ByteArray, suppliedNonce:ByteArray? = null):ByteArray{
     val nonce=suppliedNonce ?: ByteArray(12).also {SecureRandom().nextBytes(it)}
     val cipher=javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(javax.crypto.Cipher.ENCRYPT_MODE,javax.crypto.spec.SecretKeySpec(key,"AES"),javax.crypto.spec.GCMParameterSpec(128,nonce))
     cipher.updateAAD(byteArrayOf(kind.toByte()))
     return byteArrayOf(kind.toByte())+nonce+cipher.doFinal(plain)
 }
-internal fun decryptPacket(key:ByteArray,packet:ByteArray):Pair<Int,ByteArray>{
+internal fun decryptEnginePacket(key:ByteArray,packet:ByteArray):Pair<Int,ByteArray>{
     require(packet.size in 30..(3*1024*1024))
     val cipher=javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(javax.crypto.Cipher.DECRYPT_MODE,javax.crypto.spec.SecretKeySpec(key,"AES"),javax.crypto.spec.GCMParameterSpec(128,packet.copyOfRange(1,13)))

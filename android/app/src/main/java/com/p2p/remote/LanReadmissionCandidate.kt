@@ -93,11 +93,11 @@ internal class LanReadmissionCandidate(
     }
 
     private fun send(payload: ByteArray): Boolean =
-        runCatching { socket?.send(encryptPacket(key, 6, payload).toByteString()) == true }
+        runCatching { socket?.send(encryptEnginePacket(key, 6, payload).toByteString()) == true }
             .getOrDefault(false)
 
     private fun receive(packet: ByteArray) {
-        val decoded = runCatching { decryptPacket(key, packet) }.getOrNull()
+        val decoded = runCatching { decryptEnginePacket(key, packet) }.getOrNull()
         if (decoded == null || decoded.first != 7) {
             fail("authentication_failed")
             return

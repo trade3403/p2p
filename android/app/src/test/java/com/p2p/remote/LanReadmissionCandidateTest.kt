@@ -63,7 +63,7 @@ class LanReadmissionCandidateTest {
             private var step = 0
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 try {
-                    val (kind, data) = decryptPacket(root, bytes.toByteArray())
+                    val (kind, data) = decryptEnginePacket(root, bytes.toByteArray())
                     check(kind == 6)
                     val response = when (step++) {
                         0 -> {
@@ -84,7 +84,7 @@ class LanReadmissionCandidateTest {
                         }
                         else -> error("unexpected handshake step")
                     }
-                    val packet = encryptPacket(root,7,response)
+                    val packet = encryptEnginePacket(root,7,response)
                     if (tamper && step == 2) packet[packet.lastIndex] = (packet.last().toInt() xor 1).toByte()
                     check(webSocket.send(packet.toByteString()))
                 } catch (t: Throwable) {
