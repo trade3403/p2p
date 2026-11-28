@@ -372,6 +372,7 @@ where
     // Each connection begins in JPEG compatibility mode; AVC is negotiated
     // only by an authenticated viewer with an attached decoding surface.
     let force_jpeg = Arc::new(AtomicBool::new(true));
+    let full_hd_requested=Arc::new(AtomicBool::new(false));
     let bitrate = Arc::new(AtomicU32::new(1_800_000));
     let session_fps = Arc::new(AtomicU32::new(config.target_fps.load(Ordering::Relaxed).clamp(6,30)));
     let mut last_adaptation = std::time::Instant::now();
@@ -390,6 +391,7 @@ where
         config.dropped_frames.clone(),
         config.udp_active.clone(),
         force_jpeg.clone(),
+        full_hd_requested.clone(),
         actual_encoder.clone(),
         video_stats.clone(),
         encoder_reset.clone(),
@@ -504,6 +506,8 @@ where
                         "allow_clipboard": config.allow_clipboard.load(Ordering::SeqCst),
                         "video_target_bps": bitrate.load(Ordering::Relaxed),
                         "video_target_fps": session_fps.load(Ordering::Relaxed),
+                        "video_full_hd_gpu_negotiation": true,
+                        "video_full_hd_requested": full_hd_requested.load(Ordering::SeqCst),
                         "video_encoder": match actual_encoder.load(Ordering::Relaxed) {
                             3 => "Media Foundation D3D11 texture",
                             2 => "Media Foundation hardware",
@@ -596,14 +600,17 @@ where
                                 if let Ok(command) = serde_json::from_slice::<Control>(&bytes) {
                                     match command.kind.as_str() {
                                         "video_codec" => {
-                                            if command.codec.as_deref() == Some("jpeg") {
-                                                force_jpeg.store(true, Ordering::SeqCst);
-                                                let _ = config.messages.send(
-                                                    "已接收 Viewer 兼容请求：本次连接切换 JPEG 画面".into()
-                                                );
-                                            } else if command.codec.as_deref() == Some("h264")
-                                                && config.h264_enabled.load(Ordering::Relaxed) {
-                                                force_jpeg.store(false, Ordering::SeqCst);
+                                            if let Some((avc,full_hd))=command.codec.as_deref().and_then(crate::video::codec_request) {
+                                                if !avc {
+                                                    force_jpeg.store(true, Ordering::SeqCst);
+                                                    full_hd_requested.store(false, Ordering::SeqCst);
+                                                    let _ = config.messages.send(
+                                                        "已接收 Viewer 兼容请求：本次连接切换 JPEG 画面".into()
+                                                    );
+                                                } else if config.h264_enabled.load(Ordering::Relaxed) {
+                                                    full_hd_requested.store(full_hd, Ordering::SeqCst);
+                                                    force_jpeg.store(false, Ordering::SeqCst);
+                                                }
                                             }
                                         }
                                         "video_feedback" if !force_jpeg.load(Ordering::Relaxed)

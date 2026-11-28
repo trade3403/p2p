@@ -13,6 +13,17 @@ class AvcPayloadTest {
         assertEquals(header.size, frame.bytes.size)
     }
 
+    @Test fun acceptsFullHdAndRejectsBeyondNegotiationCeiling() {
+        fun packet(w:Int,h:Int)=byteArrayOf((w shr 8).toByte(),w.toByte(),
+            (h shr 8).toByte(),h.toByte(),0,0,0,1,0x65)
+        val fullHd=requireNotNull(AvcPayload.parse(packet(1920,1080)))
+        assertEquals(1920,fullHd.width)
+        assertEquals(1080,fullHd.height)
+        assertNull(AvcPayload.parse(packet(1922,1080)))
+        assertNull(AvcPayload.parse(packet(1920,1082)))
+        assertNull(AvcPayload.parse(packet(1920,1079)))
+    }
+
     @Test fun refusesOddOrMalformedFrames() {
         assertNull(AvcPayload.parse(byteArrayOf(0, 0, 0)))
         assertNull(AvcPayload.parse(byteArrayOf(0x05, 1, 2, 3, 0, 0, 0, 1, 0x65)))

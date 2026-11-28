@@ -153,13 +153,27 @@ impl I420Cache {
 }
 
 pub fn dimensions(source_w: u32, source_h: u32) -> (u32, u32) {
-    if source_w < 2 || source_h < 2 { return (0, 0); }
-    let scale = (1280.0_f64 / source_w as f64)
-        .min(720.0_f64 / source_h as f64)
-        .min(1.0);
-    let w = (((source_w as f64 * scale).round() as u32).max(2).min(1280)) & !1;
-    let h = (((source_h as f64 * scale).round() as u32).max(2).min(720)) & !1;
-    (w.max(2), h.max(2))
+    bounded_dimensions(source_w,source_h,false)
+}
+
+// Full HD is an explicitly negotiated GPU-only ceiling. Never upscale.
+pub fn bounded_dimensions(source_w:u32,source_h:u32,full_hd:bool)->(u32,u32) {
+    if source_w < 2 || source_h < 2 {return (0,0);}
+    let (max_w,max_h)=if full_hd {(1920,1080)} else {(1280,720)};
+    let scale=(max_w as f64/source_w as f64).min(max_h as f64/source_h as f64).min(1.0);
+    let w=((source_w as f64*scale).round() as u32).max(2).min(max_w)&!1;
+    let h=((source_h as f64*scale).round() as u32).max(2).min(max_h)&!1;
+    (w,h)
+}
+
+/// A legacy codec request never raises the resolution ceiling.
+pub fn codec_request(codec:&str)->Option<(bool,bool)> {
+    match codec {
+        "jpeg"=>Some((false,false)),
+        "h264"=>Some((true,false)),
+        "h264_1080p"=>Some((true,true)),
+        _=>None
+    }
 }
 
 #[cfg(windows)]
@@ -202,6 +216,7 @@ pub fn spawn_frames(
     drops: Arc<AtomicU64>,
     udp_active: Arc<AtomicBool>,
     force_jpeg: Arc<AtomicBool>,
+    full_hd_requested: Arc<AtomicBool>,
     actual_encoder: Arc<AtomicU32>,
     stats: Arc<VideoStats>,
     encoder_reset: Arc<AtomicBool>,
@@ -218,6 +233,7 @@ pub fn spawn_frames(
         let mut desktop_capture=crate::dxgi_capture::DesktopCapture::default();
         let mut pixels=PixelCache::default();
         let mut previous_h264 = false;
+        let mut previous_full_hd=false;
         let mut previous_monitor = usize::MAX;
         let mut frames_since_reset = 0u32;
         let mut previous_profile = (0u32,0u32);
@@ -240,11 +256,13 @@ pub fn spawn_frames(
             // Session-local JPEG override does not modify the owner's H.264 preference.
             let active_h264 = h264.load(Ordering::Relaxed)
                 && !force_jpeg.load(Ordering::Relaxed);
+            let full_hd=active_h264 && full_hd_requested.load(Ordering::SeqCst);
             let selected = monitor.load(Ordering::Relaxed);
             let profile = (bitrate.load(Ordering::Relaxed).clamp(400_000,4_000_000),
                            target_fps.load(Ordering::Relaxed).clamp(5,30));
             let requested_reset = encoder_reset.swap(false, Ordering::AcqRel);
             if active_h264 != previous_h264
+                || full_hd!=previous_full_hd
                 || epoch_changed
                 || (active_h264 && requested_reset)
                 || selected != previous_monitor
@@ -255,21 +273,22 @@ pub fn spawn_frames(
                 encoder = None;
                 hardware = None;
                 gpu=None;
-                if epoch_changed || active_h264!=previous_h264 || selected!=previous_monitor {
+                if epoch_changed || active_h264!=previous_h264 || full_hd!=previous_full_hd || selected!=previous_monitor {
                     desktop_capture.clear();
                     pixels.clear();
                 }
-                if active_h264!=previous_h264 || selected!=previous_monitor {
+                if active_h264!=previous_h264 || full_hd!=previous_full_hd || selected!=previous_monitor {
                     gpu_failed=false;
                 }
                 frames_since_reset = 0;
                 previous_h264 = active_h264;
+                previous_full_hd=full_hd;
                 previous_monitor = selected;
                 previous_profile = profile;
                 previous_epoch = Some(frame_epoch);
             }
 
-            match capture(selected, active_h264, profile, &mut encoder, &mut hardware,
+            match capture(selected, active_h264, full_hd, profile, &mut encoder, &mut hardware,
                           &mut hardware_failed, &actual_encoder, &mut desktop_capture, &mut pixels, &mut gpu, &mut gpu_failed, &stats) {
                 Ok(Some(frame)) => {
                     frames_since_reset += 1;
@@ -322,6 +341,7 @@ pub fn spawn_frames(
     _drops: Arc<AtomicU64>,
     _udp_active: Arc<AtomicBool>,
     _force_jpeg: Arc<AtomicBool>,
+    _full_hd_requested: Arc<AtomicBool>,
     _actual_encoder: Arc<AtomicU32>,
     _stats: Arc<VideoStats>,
     _encoder_reset: Arc<AtomicBool>,
@@ -335,6 +355,7 @@ pub fn spawn_frames(
 fn capture(
     screen_index: usize,
     h264: bool,
+    full_hd: bool,
     profile: (u32,u32),
     encoder: &mut Option<openh264::encoder::Encoder>,
     hardware: &mut Option<crate::mf_encoder::HardwareEncoder>,
@@ -371,7 +392,7 @@ fn capture(
         if gpu.is_none() {
             desktop_capture.clear();cache.clear();*hardware=None;*encoder=None;
             let init=Instant::now();
-            *gpu=GpuEncoder::new(geometry,profile,dimensions(info.width,info.height));
+            *gpu=GpuEncoder::new(geometry,profile,bounded_dimensions(info.width,info.height,full_hd));
             stats.stages.encoder_init.record(init);
             if gpu.is_none(){*gpu_failed=true;}
         }
@@ -555,6 +576,65 @@ mod tests {
             assert_eq!(out_h % 2,0);
         }
         assert_eq!(dimensions(1920,1080), (1280,720));
+    }
+
+    #[test]
+    fn full_hd_ceiling_is_explicit_and_never_upscales() {
+        assert_eq!(codec_request("h264"),Some((true,false)));
+        assert_eq!(codec_request("h264_1080p"),Some((true,true)));
+        assert_eq!(codec_request("jpeg"),Some((false,false)));
+        assert_eq!(codec_request("h264_4k"),None);
+        assert_eq!(bounded_dimensions(1920,1080,true),(1920,1080));
+        assert_eq!(bounded_dimensions(3840,2160,true),(1920,1080));
+        assert_eq!(bounded_dimensions(1280,720,true),(1280,720));
+        assert_eq!(bounded_dimensions(1920,1080,false),(1280,720));
+        assert_eq!(bounded_dimensions(1,1080,true),(0,0));
+        for (w,h) in [(3440,1440),(1080,1920),(1921,1081),(640,481),(u32::MAX,u32::MAX)] {
+            let (x,y)=bounded_dimensions(w,h,true);
+            assert!(x<=1920 && y<=1080 && x<=w && y<=h && x%2==0 && y%2==0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn full_hd_real_avc_roundtrip_with_encrypted_packet() {
+        use openh264::{encoder::{Encoder,EncoderConfig,BitRate,FrameRate,IntraFramePeriod,RateControlMode},
+            formats::{YUVBuffer,RgbaSliceU8,YUVSource},OpenH264API,decoder::Decoder};
+        // Generated pixels, actual codec operations; not desktop or FPS evidence.
+        let (w,h)=(1920usize,1080usize);
+        let mut rgba=vec![0u8;w*h*4];
+        for (i,p) in rgba.chunks_exact_mut(4).enumerate() {
+            p.copy_from_slice(&[((i%w)/16) as u8,((i/w)/8) as u8,90,255]);
+        }
+        let mut yuv=YUVBuffer::from_rgb_source(RgbaSliceU8::new(&rgba,(w,h)));
+        let cfg=EncoderConfig::new().bitrate(BitRate::from_bps(4_000_000))
+            .max_frame_rate(FrameRate::from_hz(30.0))
+            .intra_frame_period(IntraFramePeriod::from_num_frames(30))
+            .rate_control_mode(RateControlMode::Bitrate).skip_frames(false);
+        let mut enc=Encoder::with_api_config(OpenH264API::from_source(),cfg).unwrap();
+        let mut dec=Decoder::new().unwrap();
+        let key=protocol::new_secret();
+        for frame in 0..3 {
+            if frame>0 {
+                for p in rgba.chunks_exact_mut(4).take(w*64) {p[2]=90+frame*20;}
+                yuv.read_rgb(RgbaSliceU8::new(&rgba,(w,h)));
+            }
+            let bytes=enc.encode(&yuv).unwrap().to_vec();
+            assert!(!bytes.is_empty());
+            let types:Vec<u8>=openh264::nal_units(&bytes).map(|nal| {
+                let body=nal.strip_prefix(&[0,0,0,1]).or_else(||nal.strip_prefix(&[0,0,1])).unwrap();
+                body[0]&31
+            }).collect();
+            if frame==0 {assert!(types.contains(&7)&&types.contains(&8)&&types.contains(&5));}
+            let mut payload=vec![0x07,0x80,0x04,0x38];
+            payload.extend_from_slice(&bytes);
+            assert!(payload.len()<=2*1024*1024);
+            let encrypted=protocol::encrypt(&key,protocol::AVC,&payload).unwrap();
+            let (kind,decoded)=protocol::decrypt(&key,&encrypted).unwrap();
+            assert_eq!(kind,protocol::AVC);
+            assert_eq!(&decoded[..4],&[0x07,0x80,0x04,0x38]);
+            assert_eq!(dec.decode(&decoded[4..]).unwrap().unwrap().dimensions(),(w,h));
+        }
     }
 
     #[cfg(windows)]

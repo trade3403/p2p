@@ -200,7 +200,8 @@ bool input(Session& s,const uint8_t* nv12,DWORD n,ID3D11Texture2D* texture) {
 }
 static void* create_encoder(uint32_t w,uint32_t h,uint32_t fps,uint32_t bitrate,ID3D11Device* device) noexcept {
     try {
-        if(w<2 || h<2 || w>1280 || h>720 || (w&1) || (h&1) || fps<5 || fps>30) return nullptr;
+        if(w<2 || h<2 || w>(device?1920u:1280u) || h>(device?1080u:720u) ||
+           (w&1) || (h&1) || fps<5 || fps>30) return nullptr;
         auto s=std::make_unique<Session>();
         HRESULT hr=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
         if(FAILED(hr)) return nullptr;
