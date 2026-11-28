@@ -774,7 +774,8 @@ internal class AndroidRemoteEngine(
                                                 if (candidate is String) advertised.add(candidate)
                                             }
                                             advertised.add(metadata.optString("lan_ipv4", ""))
-                                            tryAdvertisedLan(webSocket, advertised)
+                                            tryAdvertisedLan(webSocket, advertised,
+                                                metadata.optBoolean("lan_readmission_v5", false))
                                         }
                                     }
                             }
@@ -903,14 +904,14 @@ internal class AndroidRemoteEngine(
     }
 
     // One bounded batch per session. Never probe arbitrary or off-subnet addresses.
-    private fun tryAdvertisedLan(current: WebSocket, candidates: List<String>) {
+    private fun tryAdvertisedLan(current: WebSocket, candidates: List<String>, stagedSupported: Boolean) {
         if (!requested || socket !== current || usingLan) return
         val eligible = LanEndpoint.eligibleAdvertised(candidates)
         if (lanAttempt.attempted) {
             // Recheck current subnet and authenticated metadata on each observation.
             // Never close WSS or send a probe in this diagnostic-only batch.
             lanReadmission.observe(SystemClock.elapsedRealtime(),
-                online && receivingFrames && udpLastFrameAtMs == 0L, eligible)
+                online && receivingFrames && udpLastFrameAtMs == 0L && stagedSupported, eligible)
             return
         }
         if (eligible.isEmpty()) return
@@ -1351,14 +1352,14 @@ private fun decodeKey(hex:String):ByteArray{
 }
 private fun sha256(bytes:ByteArray)=MessageDigest.getInstance("SHA-256").digest(bytes)
 private fun ByteArray.toHex():String=joinToString("") {"%02x".format(it.toInt() and 0xff)}
-private fun encryptPacket(key:ByteArray,kind:Int,plain:ByteArray, suppliedNonce:ByteArray? = null):ByteArray{
+internal fun encryptPacket(key:ByteArray,kind:Int,plain:ByteArray, suppliedNonce:ByteArray? = null):ByteArray{
     val nonce=suppliedNonce ?: ByteArray(12).also {SecureRandom().nextBytes(it)}
     val cipher=javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(javax.crypto.Cipher.ENCRYPT_MODE,javax.crypto.spec.SecretKeySpec(key,"AES"),javax.crypto.spec.GCMParameterSpec(128,nonce))
     cipher.updateAAD(byteArrayOf(kind.toByte()))
     return byteArrayOf(kind.toByte())+nonce+cipher.doFinal(plain)
 }
-private fun decryptPacket(key:ByteArray,packet:ByteArray):Pair<Int,ByteArray>{
+internal fun decryptPacket(key:ByteArray,packet:ByteArray):Pair<Int,ByteArray>{
     require(packet.size in 30..(3*1024*1024))
     val cipher=javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
     cipher.init(javax.crypto.Cipher.DECRYPT_MODE,javax.crypto.spec.SecretKeySpec(key,"AES"),javax.crypto.spec.GCMParameterSpec(128,packet.copyOfRange(1,13)))

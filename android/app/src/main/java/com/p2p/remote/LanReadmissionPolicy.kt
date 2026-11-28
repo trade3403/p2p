@@ -10,6 +10,7 @@ internal class LanReadmissionPolicy {
     private var failed = false
     private var eligible = emptyList<String>()
     private var stableSince: Long? = null
+    private var lastObservedAt: Long? = null
     private var nextAllowedAt = 0L
     private var inFlight = false
     private var generation = 0L
@@ -23,6 +24,7 @@ internal class LanReadmissionPolicy {
         failed = false
         eligible = emptyList()
         stableSince = null
+        lastObservedAt = null
         nextAllowedAt = 0
         inFlight = false
         reservations = 0
@@ -33,6 +35,7 @@ internal class LanReadmissionPolicy {
         failed = true
         eligible = emptyList()
         stableSince = null
+        lastObservedAt = null
         inFlight = false
         nextAllowedAt = now + delayMs(reservations)
     }
@@ -43,24 +46,29 @@ internal class LanReadmissionPolicy {
         generation++
         eligible = emptyList()
         stableSince = null
+        lastObservedAt = null
         inFlight = false
     }
 
     fun observe(now: Long, relayVideo: Boolean, candidates: List<String>) {
         val next = if (failed && relayVideo) candidates.take(17).distinct() else emptyList()
-        if (next != eligible) {
+        val previous = lastObservedAt
+        val expired = previous != null && now - previous > FRESH_MS
+        if (next != eligible || expired) {
+            if (inFlight) nextAllowedAt = maxOf(nextAllowedAt, now + delayMs(reservations))
             generation++
             inFlight = false
             eligible = next
             stableSince = if (next.isEmpty()) null else now
         }
+        lastObservedAt = if (next.isEmpty()) null else now
     }
 
     fun state(now: Long): String = when {
         !failed -> "idle"
         inFlight -> "reserved"
         reservations >= MAX_BATCHES -> "budget_exhausted"
-        eligible.isEmpty() -> "waiting_candidates"
+        eligible.isEmpty() || now - (lastObservedAt ?: 0L) > FRESH_MS -> "waiting_candidates"
         now < nextAllowedAt -> "cooldown"
         now - (stableSince ?: now) < STABLE_MS -> "stabilizing"
         else -> "eligible"
@@ -84,6 +92,7 @@ internal class LanReadmissionPolicy {
         inFlight = false
         eligible = emptyList()
         stableSince = null
+        lastObservedAt = null
         failed = !success
         nextAllowedAt = now + delayMs(reservations)
         return true
@@ -91,6 +100,7 @@ internal class LanReadmissionPolicy {
 
     companion object {
         const val STABLE_MS = 3000L
+        const val FRESH_MS = 8000L
         const val MAX_BATCHES = 4
         fun delayMs(attempts: Int): Long =
             (10_000L shl attempts.coerceIn(0, 3)).coerceAtMost(80_000L)
