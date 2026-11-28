@@ -59,6 +59,16 @@ def reports():
         "lan_authenticated_heartbeat_timeout": dict(unanswered_pings=1,
             lan_video_bytes_during_silence=1, observed_silence_to_public_video_ms=4,
             observed_total_ms=5, relay_open_ms=1, first_video_ms=2),
+        "lan_auto_readmission": dict(automatic_socket_replacement=True,
+            v5_hellos=1,v5_commits=1,v5_pongs=1,v5_codec_requests=1,
+            boundaries=[dict(name=name,phase=phase,codec="H264",connected=True,input_allowed=False,
+                elapsed_ms=t,rendered=r,surface_frames=r,surface_errors=0,lan_bytes=l,relay_bytes=w,
+                relay_opens=o,retry_events=0,batches=b)
+                for name,phase,t,r,l,w,o,b in (
+                    ("initial_lan","lan_video",600,3,100,0,0,0),
+                    ("relay_video","relay_video",2200,4,100,200,1,0),
+                    ("restored_lan","lan_video",11000,90,300,500,1,1),
+                    ("stable_lan","lan_video",14000,119,900,500,1,1))]),
         "lan_avc_fixture": dict(sample, relay_video_bytes=0, relay_socket_opens=0, surface_errors=0),
         "lan_avc_resolution_switches": synthetic_switches(),
         "lan_avc_fallback_live_windows": dict(sample, lan_video_byte_delta=0, host_encoded_frame_delta=20),
@@ -73,6 +83,19 @@ class EvidenceTests(unittest.TestCase):
         result = summarize(native, job)
         self.assertNotIn("PRIVATE_MARKER", str(result))
         self.assertEqual(result["lan_avc_fixture_emulator_local"]["rendered_fps"], 10)
+
+    def test_readmission_raw_counter_gate(self):
+        native, job = reports()
+        result = summarize(native, job)["lan_auto_readmission_emulator_local"]
+        self.assertEqual(result["readmission_observation_ms"], 8800)
+        self.assertEqual(result["stable_rendered_delta"], 29)
+        self.assertEqual(result["stable_relay_byte_delta"], 0)
+        for field,value in (("relay_bytes",501),("relay_opens",2),("surface_errors",1),
+                            ("rendered",89),("elapsed_ms",11001),("input_allowed",True)):
+            native,job=reports()
+            native["metrics"]["lan_auto_readmission"]["boundaries"][-1][field]=value
+            with self.assertRaises(ValueError):
+                summarize(native,job)
 
     def test_historical_observations_and_missing_raw_gate(self):
         legacy=historical_switches()

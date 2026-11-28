@@ -603,6 +603,16 @@ fn input_evidence(stage: &str, data: serde_json::Value) {
 #[tokio::test]
 #[ignore = "interactive Windows desktop; mandatory dedicated G2c input CI step"]
 async fn windows_real_host_input_handoff() {
+    exercise_real_input_handoff(false).await;
+}
+
+#[tokio::test]
+#[ignore = "interactive Windows desktop; mandatory dedicated G5d-3b CI step"]
+async fn windows_real_host_staged_input_handoff() {
+    exercise_real_input_handoff(true).await;
+}
+
+async fn exercise_real_input_handoff(staged: bool) {
     tokio::task::LocalSet::new().run_until(async {
         let window = input_probe::Window::new();
         let a = window.target(0);
@@ -650,28 +660,80 @@ async fn windows_real_host_input_handoff() {
         input_evidence("relay_drag",serde_json::json!({"down":true,"moved":true}));
         let lan_config = config.clone();
         let lan_task = tokio::task::spawn_local(async move {
+            if staged {
+                let (stream, _) = lan_listener.accept().await.unwrap();
+                assert!(accept_authorized(stream, &lan_config).await.is_err(),
+                    "cancelled PREPARED must not authorize");
+            }
             let (stream, address) = lan_listener.accept().await.unwrap();
             assert!(is_lan_address(address.ip()));
             let (socket, key, lease) = accept_authorized(stream, &lan_config).await.expect("LAN authorization");
             serve_authorized_session(&lan_config, socket, key, address.ip(), lease).await;
         });
+        let version = if staged { HandshakeVersion::V5 } else { HandshakeVersion::V4 };
+        if staged {
+            let before = snapshot(&config);
+            let epoch = config.control_gate.video_epoch().load(Ordering::SeqCst);
+            let (mut cancelled, _) = timeout(Duration::from_secs(10),
+                connect_async(format!("ws://{lan_address}/direct"))).await.unwrap().unwrap();
+            let client = protocol::new_secret();
+            cancelled.send(Message::Binary(protocol::encrypt(&secret, HELLO,
+                &transcript(HELLO_V5, &client, &[])).unwrap())).await.unwrap();
+            let (kind, challenge) = protocol::decrypt(&secret, &binary(&mut cancelled).await).unwrap();
+            assert_eq!(kind, READY);
+            let prefix = transcript(CHALLENGE_V5, &client, &[]);
+            let server = challenge.strip_prefix(prefix.as_slice()).unwrap();
+            assert_eq!(server.len(), NONCE_LEN);
+            cancelled.send(Message::Binary(protocol::encrypt(&secret, HELLO,
+                &transcript(PROOF_V5, &client, server)).unwrap())).await.unwrap();
+            let (kind, prepared) = protocol::decrypt(&secret, &binary(&mut cancelled).await).unwrap();
+            assert_eq!((kind, prepared), (READY, transcript(PREPARED_V5, &client, server)));
+            assert!(!snapshot(&config).active);
+            pointer(&mut relay,"move",c).await;
+            relay.service_until(await_os(&window,"relay drag while candidate prepared",||input_probe::held() && input_probe::at(c.2,c.3))).await;
+            drop(cancelled);
+            pointer(&mut relay,"move",b).await;
+            relay.service_until(await_os(&window,"relay drag after candidate cancel",||input_probe::held() && input_probe::at(b.2,b.3))).await;
+            relay.send(protocol::PING,&71u64.to_be_bytes()).await;
+            let observed = relay.sample(2,71).await;
+            let after = snapshot(&config);
+            assert!(observed.frames>0 && observed.pong);
+            assert!(!after.active && after.relay_socket_open && after.relay_socket_opens==1);
+            assert!(after.relay_bytes>before.relay_bytes && after.lan_bytes==before.lan_bytes);
+            assert_eq!(config.control_gate.video_epoch().load(Ordering::SeqCst),epoch);
+            assert!(input_probe::held());
+            input_evidence("v5_cancelled",serde_json::json!({"before":before,"after":after,
+                "relay":observed,"relay_drag_preserved":true,"epoch_unchanged":true}));
+        }
         let (mut socket, _) = timeout(Duration::from_secs(10),
             connect_async(format!("ws://{lan_address}/direct"))).await.unwrap().unwrap();
         let client = protocol::new_secret();
         socket.send(Message::Binary(protocol::encrypt(&secret, HELLO,
-            &transcript(HELLO_PAYLOAD, &client, &[])).unwrap())).await.unwrap();
+            &transcript(version.hello(), &client, &[])).unwrap())).await.unwrap();
         let (kind, challenge) = protocol::decrypt(&secret, &binary(&mut socket).await).unwrap();
         assert_eq!(kind, READY);
-        let prefix = transcript(CHALLENGE_PAYLOAD, &client, &[]);
+        let prefix = transcript(version.challenge(), &client, &[]);
         let server = challenge.strip_prefix(prefix.as_slice()).unwrap();
         assert_eq!(server.len(), NONCE_LEN);
         assert!(!config.lan_active.load(Ordering::SeqCst), "LAN active before proof");
         socket.send(Message::Binary(protocol::encrypt(&secret, HELLO,
-            &transcript(PROOF_PAYLOAD, &client, server)).unwrap())).await.unwrap();
+            &transcript(version.proof(), &client, server)).unwrap())).await.unwrap();
+        if staged {
+            let (kind, prepared) = protocol::decrypt(&secret, &binary(&mut socket).await).unwrap();
+            assert_eq!((kind,prepared),(READY,transcript(PREPARED_V5,&client,server)));
+            assert!(!snapshot(&config).active && input_probe::held());
+            pointer(&mut relay,"move",a).await;
+            relay.service_until(await_os(&window,"relay drag before explicit commit",||input_probe::held() && input_probe::at(a.2,a.3))).await;
+            assert!(!snapshot(&config).active);
+            input_evidence("v5_prepared",serde_json::json!({"host":snapshot(&config),"relay_drag_preserved":true}));
+            socket.send(Message::Binary(protocol::encrypt(&secret,HELLO,
+                &transcript(COMMIT_V5,&client,server)).unwrap())).await.unwrap();
+        }
         let (kind, ready) = protocol::decrypt(&secret, &binary(&mut socket).await).unwrap();
         assert_eq!(kind, READY);
-        assert_eq!(ready, transcript(READY_PAYLOAD, &client, server));
-        let mut lan = Peer::new(socket, business_key(&secret, &client, server), true);
+        assert_eq!(ready, transcript(version.ready(), &client, server));
+        if staged { assert!(snapshot(&config).active); }
+        let mut lan = Peer::new(socket, versioned_business_key(&secret, &client, server,version), true);
 
         await_os(&window,"release relay drag at LAN activation",||!input_probe::held()).await;
         input_evidence("lan_takeover",serde_json::json!({"relay_button_released":true}));
@@ -683,10 +745,19 @@ async fn windows_real_host_input_handoff() {
         relay.send(protocol::CONTROL,br#"{"type":"text","text":"BLOCKED"}"#).await;
         // Ensure the competing relay has time to be serviced while the
         // LAN button remains held. Both transport sockets are drained.
+        let stable_before = snapshot(&config);
         let (r,l,_) = tokio::join!(relay.sample(2,999),lan.sample(2,999),
             settle_os(&window,1800,||input_probe::held() && input_probe::at(a.2,a.3) && window.text().is_empty()));
         assert_eq!(r.frames,0);
         assert!(l.frames>0);
+        if staged {
+            let after = snapshot(&config);
+            assert!(after.active && after.relay_socket_open && after.relay_socket_opens==1);
+            assert_eq!(after.relay_bytes,stable_before.relay_bytes);
+            assert_eq!(after.relay_frames,stable_before.relay_frames);
+            assert!(after.lan_bytes>stable_before.lan_bytes && after.suppressed>stable_before.suppressed);
+            input_evidence("v5_video_exclusive",serde_json::json!({"before":stable_before,"after":after,"relay":r,"lan":l}));
+        }
         pointer(&mut lan,"move",b).await;
         lan.service_until(await_os(&window,"LAN real drag",||input_probe::held() && input_probe::at(b.2,b.3))).await;
         pointer(&mut lan,"up",b).await;
@@ -706,6 +777,16 @@ async fn windows_real_host_input_handoff() {
         timeout(Duration::from_secs(12),lan_task).await.unwrap().unwrap();
         await_os(&window,"LAN disconnect real release",||!input_probe::held()).await;
         assert!(!config.lan_active.load(Ordering::SeqCst));
+        if staged {
+            let before = snapshot(&config);
+            relay.send(protocol::PING,&72u64.to_be_bytes()).await;
+            let observed = relay.sample(3,72).await;
+            let after = snapshot(&config);
+            assert!(observed.frames>0 && observed.pong);
+            assert!(!after.active && after.relay_socket_open && after.relay_socket_opens==1);
+            assert!(after.relay_bytes>before.relay_bytes && after.lan_bytes==before.lan_bytes);
+            input_evidence("v5_relay_resumed",serde_json::json!({"before":before,"after":after,"relay":observed}));
+        }
         pointer(&mut relay,"down",c).await;
         relay.service_until(await_os(&window,"relay resumed real down",||input_probe::held() && input_probe::at(c.2,c.3))).await;
         config.control_gate.set_input(&config.allow_input, false);

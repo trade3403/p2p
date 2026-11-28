@@ -115,6 +115,17 @@ jobs:
           $last = Get-Content $env:P2P_G2_INPUT_REPORT -Tail 1 | ConvertFrom-Json
           if ($last.stage -ne 'passed') { throw 'G2c input evidence incomplete' }
 
+      - name: G5d-3b real Windows staged LAN ownership and rollback
+        run: |
+          New-Item -ItemType Directory -Force evidence/windows | Out-Null
+          $env:P2P_G2_INPUT_REPORT = Join-Path $env:GITHUB_WORKSPACE 'evidence/windows/g5d3b-staged-handoff.jsonl'
+          Remove-Item $env:P2P_G2_INPUT_REPORT -ErrorAction SilentlyContinue
+          cargo test --manifest-path desktop/Cargo.toml --lib --no-default-features lan::g1::windows_real_host_staged_input_handoff -- --exact --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'G5d-3b staged Windows handoff failed' }
+          if (-not (Test-Path $env:P2P_G2_INPUT_REPORT)) { throw 'G5d-3b staged evidence missing' }
+          $records = @(Get-Content $env:P2P_G2_INPUT_REPORT | ForEach-Object { $_ | ConvertFrom-Json })
+          if (($records.stage -join ',') -ne 'relay_drag,v5_cancelled,v5_prepared,lan_takeover,v5_video_exclusive,lan_exclusive,v5_relay_resumed,rapid_permission_cycle,passed') { throw 'G5d-3b staged evidence incomplete' }
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

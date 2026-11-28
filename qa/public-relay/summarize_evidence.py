@@ -128,6 +128,48 @@ def resolution_switches(metrics):
     return [resolution_switch(s, sizes[i], sizes[i+1]) for i, s in enumerate(switches)]
 
 
+def readmission(section):
+    require(section.get("automatic_socket_replacement") is True, "missing automatic handoff")
+    handshake = integers(section, ("v5_hellos", "v5_commits", "v5_pongs", "v5_codec_requests"))
+    require(handshake["v5_hellos"] == handshake["v5_commits"] == 1
+            and handshake["v5_pongs"] > 0 and handshake["v5_codec_requests"] > 0,
+            "invalid readmission handshake")
+    raw = section.get("boundaries")
+    require(isinstance(raw, list) and len(raw) == 4, "missing readmission boundaries")
+    points = []
+    keys = ("elapsed_ms", "rendered", "surface_frames", "surface_errors", "lan_bytes",
+            "relay_bytes", "relay_opens", "retry_events", "batches")
+    for row, name, phase in zip(raw, ("initial_lan", "relay_video", "restored_lan", "stable_lan"),
+                                ("lan_video", "relay_video", "lan_video", "lan_video")):
+        require(isinstance(row, dict) and row.get("name") == name and row.get("phase") == phase
+                and row.get("codec") == "H264" and row.get("connected") is True
+                and row.get("input_allowed") is False, "invalid readmission boundary")
+        point = integers(row, keys)
+        require(point["surface_errors"] == 0, "readmission surface error")
+        points.append(point)
+    a, b, c, d = points
+    for previous, current in zip(points, points[1:]):
+        require(current["elapsed_ms"] > previous["elapsed_ms"]
+                and all(current[k] >= previous[k] for k in keys), "readmission counter regression")
+    require(a["relay_opens"] == 0 and b["relay_opens"] == c["relay_opens"] == d["relay_opens"] == 1
+            and a["batches"] == b["batches"] == 0 and c["batches"] == d["batches"] == 1
+            and b["retry_events"] == c["retry_events"] == d["retry_events"], "readmission retry/open mismatch")
+    require(a["lan_bytes"] > 0 and a["relay_bytes"] == 0 and b["relay_bytes"] > 0
+            and c["lan_bytes"] > b["lan_bytes"] and d["lan_bytes"] > c["lan_bytes"]
+            and d["relay_bytes"] == c["relay_bytes"], "readmission transport mismatch")
+    require(c["rendered"] > b["rendered"] and d["rendered"] > c["rendered"]
+            and d["surface_frames"] > c["surface_frames"] and d["elapsed_ms"]-c["elapsed_ms"] >= 2500,
+            "missing stable readmission output")
+    return dict(handshake, fallback_observation_ms=b["elapsed_ms"]-a["elapsed_ms"],
+                readmission_observation_ms=c["elapsed_ms"]-b["elapsed_ms"],
+                stable_observation_ms=d["elapsed_ms"]-c["elapsed_ms"],
+                stable_rendered_delta=d["rendered"]-c["rendered"],
+                stable_surface_delta=d["surface_frames"]-c["surface_frames"],
+                stable_lan_byte_delta=d["lan_bytes"]-c["lan_bytes"],
+                stable_relay_byte_delta=d["relay_bytes"]-c["relay_bytes"],
+                new_relay_opens=d["relay_opens"]-b["relay_opens"])
+
+
 def summarize(native, job):
     require(native.get("passed") is True and job.get("passed") is True
             and job.get("native_passed") is True, "E2E not passed")
@@ -192,6 +234,7 @@ def summarize(native, job):
         "scope": "Android emulator and CI Windows; not physical LAN or display latency",
         "system_network_outage": outage_result,
         "multi_candidate_lan": candidate_result,
+        "lan_auto_readmission_emulator_local": readmission(metrics["lan_auto_readmission"]),
         "lan_stalled_verification": stalled,
         "lan_authenticated_heartbeat_timeout": heartbeat,
         "lan_avc_fixture_emulator_local": fixture_result,
