@@ -59,6 +59,8 @@ internal class AndroidRemoteEngine(
     private var networkRetryWakes = 0L
     private val networkObserver = AndroidNetworkObserver(context, main) { change -> onNetworkChanged(change) }
     private val lanAttempt = LanCandidatePlan()
+    // Admission observation only until parallel authenticated handoff is wired.
+    private val lanReadmission = LanReadmissionPolicy()
     private var usingLan = false
     @Volatile private var lanVerified = false
     private var transport = "未连接"
@@ -246,6 +248,8 @@ internal class AndroidRemoteEngine(
         },
         "lan_attempt_ms" to lanRecovery.attemptMs,
         "lan_candidate_attempts" to lanAttempt.attemptCount,
+        "lan_readmission_state" to lanReadmission.state(SystemClock.elapsedRealtime()),
+        "lan_readmission_batches" to lanReadmission.reservations,
         "network_observer_ready" to networkObserver.ready,
         "network_change_events" to networkChanges,
         "network_retry_wakes" to networkRetryWakes,
@@ -469,6 +473,7 @@ internal class AndroidRemoteEngine(
         val room = sha256("p2p-v02-room:".toByteArray(Charsets.UTF_8) + key).toHex()
         activeEndpoint = "$normalized/relay?room=$room&role=viewer"
         lanAttempt.reset()
+        lanReadmission.reset()
         lanAdvertised = false
         if (LanEndpoint.url(lanIp) != null) {
             lanAttempt.begin(listOf(lanIp.trim()), SystemClock.elapsedRealtime())
@@ -883,6 +888,7 @@ internal class AndroidRemoteEngine(
         }
         lanRecovery.failed(reason, lanAttempt.canFallback(activeToken), now)
         if (lanAttempt.canFallback(activeToken)) {
+            lanReadmission.lanFailed(now)
             transport = "局域网不可达，准备切换 VPS"
             status = "局域网直连结束，改走 VPS 中转"
             openConnection()
@@ -898,8 +904,15 @@ internal class AndroidRemoteEngine(
 
     // One bounded batch per session. Never probe arbitrary or off-subnet addresses.
     private fun tryAdvertisedLan(current: WebSocket, candidates: List<String>) {
-        if (!requested || socket !== current || usingLan || lanAttempt.attempted) return
+        if (!requested || socket !== current || usingLan) return
         val eligible = LanEndpoint.eligibleAdvertised(candidates)
+        if (lanAttempt.attempted) {
+            // Recheck current subnet and authenticated metadata on each observation.
+            // Never close WSS or send a probe in this diagnostic-only batch.
+            lanReadmission.observe(SystemClock.elapsedRealtime(),
+                online && receivingFrames && udpLastFrameAtMs == 0L, eligible)
+            return
+        }
         if (eligible.isEmpty()) return
         lanAdvertised = true
         lanAttempt.begin(eligible, SystemClock.elapsedRealtime())
@@ -926,6 +939,7 @@ internal class AndroidRemoteEngine(
     private fun onNetworkChanged(change: NetworkChangePolicy.Change) {
         if (closed || !requested) return
         networkChanges++
+        lanReadmission.networkChanged()
         val ws = socket
         val address = currentLanAddress
         if (usingLan && lanAdvertised && ws != null && address != null) {
@@ -1011,7 +1025,12 @@ internal class AndroidRemoteEngine(
                     sampleBytes=receivedAvcBytes
                     sampleDrops=drops
                 }
-                if (!usingLan) sendPing()
+                if (!usingLan) {
+                    if (!online || !receivingFrames || udpLastFrameAtMs != 0L) {
+                        lanReadmission.observe(SystemClock.elapsedRealtime(), false, emptyList())
+                    }
+                    sendPing()
+                }
                 main.postDelayed(this, 5_000L)
             }
         }.also { main.postDelayed(it, 5_000L) }
@@ -1263,6 +1282,7 @@ internal class AndroidRemoteEngine(
         lanAdvertised = false
         currentLanAddress = null
         lanAttempt.reset()
+        lanReadmission.reset()
         lanRecovery.reset()
         lanFailureHint = null
         usingLan = false

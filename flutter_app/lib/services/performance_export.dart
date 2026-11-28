@@ -23,6 +23,7 @@ String exportPerformanceSnapshot(Map<String, dynamic> snapshot,
     'encode_avg_us', 'send_avg_us', 'fresh_frames', 'reused_frames',
     'resize_cache_hits', 'yuv_cache_hits', 'host_encoded_frames',
     'lan_attempt_ms', 'lan_candidate_attempts', 'network_change_events',
+    'lan_readmission_batches',
     'network_retry_wakes', 'lan_fallback_relay_open_ms',
     'lan_fallback_first_video_ms', 'viewer_lan_video_bytes',
     'viewer_relay_video_bytes', 'viewer_lan_video_frames',
@@ -41,6 +42,10 @@ String exportPerformanceSnapshot(Map<String, dynamic> snapshot,
     'viewer_transport_phase': [
       'idle', 'lan_verifying', 'lan_verified', 'lan_video', 'relay_connecting',
       'relay_open', 'relay_video', 'relay_retry', 'udp_video', 'failed',
+    ],
+    'lan_readmission_state': [
+      'idle', 'waiting_candidates', 'cooldown', 'stabilizing',
+      'eligible', 'reserved', 'budget_exhausted',
     ],
     'lan_fallback_reason': [
       'none', 'invalid_endpoint', 'connect_or_verify_timeout',
